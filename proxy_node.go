@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -80,6 +82,9 @@ type ProxyNode struct {
 	CooldownUntil time.Time `json:"-"`
 	LastError     string    `json:"-"`
 	LastUsedAt    time.Time `json:"-"`
+	// LatencyMs 最近一次健康探测延迟（毫秒）；0/未探测表示尚无结果。
+	LatencyMs   int64     `json:"-"`
+	LastProbeAt time.Time `json:"-"`
 }
 
 // ProxyNodeConfig 是配置（config.json / 面板）中可手填的节点精简形态。
@@ -146,6 +151,8 @@ type nodeRuntimeState struct {
 	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
 	LastError     string    `json:"last_error,omitempty"`
 	LastUsedAt    time.Time `json:"last_used_at,omitempty"`
+	LatencyMs     int64     `json:"latency_ms,omitempty"`
+	LastProbeAt   time.Time `json:"last_probe_at,omitempty"`
 }
 
 var zeroTime time.Time
@@ -166,9 +173,19 @@ type nodePool struct {
 	exhaustedCooldown time.Duration
 	deadCooldown      time.Duration
 
+	probeURL      string        // 健康探测目标（空 = 默认 gstatic 204）
+	probeInterval time.Duration // 健康检查周期（0 = 默认 15min）
+
 	clients   map[string]*http.Client // 节点指纹 → 缓存客户端
 	statePath string
 }
+
+// 健康检查默认值（Clash url-test 语义：真实连接 + HTTP 2xx 判定可用）。
+const (
+	defaultHealthInterval = 15 * time.Minute
+	defaultProbeURL       = "https://www.gstatic.com/generate_204"
+	probeTimeout          = 20 * time.Second
+)
 
 var proxyPool = newProxyPool("proxy_state.json")
 
@@ -384,6 +401,133 @@ func (p *nodePool) unmark(fp string) bool {
 	return true
 }
 
+// ======================= 健康检查 =======================
+
+// healthIntervalLocked 返回当前探测周期（调用方持锁）。
+func (p *nodePool) healthIntervalLocked() time.Duration {
+	if p.probeInterval > 0 {
+		return p.probeInterval
+	}
+	return defaultHealthInterval
+}
+
+// probeURL 返回有效探针目标（调用方持锁或用只读辅助）。
+func (p *nodePool) effectiveProbeURL() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.probeURL != "" {
+		return p.probeURL
+	}
+	return defaultProbeURL
+}
+
+// healthInterval 返回探测周期（无锁只读辅助）。
+func (p *nodePool) healthInterval() time.Duration {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.healthIntervalLocked()
+}
+
+// probeNode 经节点真实探测目标 URL：完整协议握手 + HTTP 请求，
+// 2xx 判定可用，返回毫秒延迟（含握手与 HTTP 往返，Clash url-test 语义）。
+func (p *nodePool) probeNode(ctx context.Context, n *ProxyNode, probeURL string) (int64, error) {
+	client := p.getClient(n.Fingerprint)
+	if client == nil {
+		return 0, errors.New("node client unavailable")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
+	if err != nil {
+		return 0, err
+	}
+	start := time.Now()
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return 0, fmt.Errorf("probe status %d", resp.StatusCode)
+	}
+	return time.Since(start).Milliseconds(), nil
+}
+
+// checkNodes 并发探测池内全部节点并更新状态。失败标记 dead（冷却=探测周期，
+// 恢复完全由下一次探测驱动）；成功恢复 available 并记录延迟。
+// 返回检查节点数。配额标记（exhausted）不会被探测成功解除。
+func (p *nodePool) checkNodes(ctx context.Context) int {
+	probeURL := p.effectiveProbeURL()
+	nodes := p.snapshot()
+	if len(nodes) == 0 {
+		return 0
+	}
+	var wg sync.WaitGroup
+	for _, n := range nodes {
+		wg.Add(1)
+		go func(n *ProxyNode) {
+			defer wg.Done()
+			pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+			defer cancel()
+			ms, err := p.probeNode(pctx, n, probeURL)
+			if err != nil {
+				p.markProbeDead(n.Fingerprint, "probe: "+err.Error())
+				slog.Warn("node health probe failed", "node", n.Name, "error", err)
+			} else {
+				p.recordProbeSuccess(n.Fingerprint, ms)
+				slog.Debug("node health probe ok", "node", n.Name, "latency_ms", ms)
+			}
+		}(n)
+	}
+	wg.Wait()
+	return len(nodes)
+}
+
+// markProbeDead 探测失败标记：冷却至下一次探测时刻（跟随探测周期），
+// 无独立自动重试计时——恢复仅由后续探测成功驱动。
+func (p *nodePool) markProbeDead(fp, reason string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := p.byID[fp]
+	if n == nil {
+		return
+	}
+	now := time.Now()
+	n.State = NodeDead
+	n.MarkedAt = now
+	n.LastError = reason
+	n.CooldownUntil = now.Add(p.healthIntervalLocked())
+	if p.activeID == fp {
+		p.activeID = ""
+	}
+	if c := p.clients[fp]; c != nil {
+		c.CloseIdleConnections()
+		delete(p.clients, fp)
+	}
+	slog.Info("node marked dead by health check",
+		"node", n.Name, "fp", fp, "reason", reason,
+		"until", n.CooldownUntil.Format(time.RFC3339))
+	go p.saveState()
+}
+
+// recordProbeSuccess 探测成功：记录延迟；仅解除 dead 标记（exhausted 不受影响）。
+func (p *nodePool) recordProbeSuccess(fp string, ms int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := p.byID[fp]
+	if n == nil {
+		return
+	}
+	n.LatencyMs = ms
+	n.LastProbeAt = time.Now()
+	if n.State == NodeDead {
+		n.State = NodeAvailable
+		n.MarkedAt = time.Time{}
+		n.CooldownUntil = time.Time{}
+		n.LastError = ""
+	}
+	go p.saveState()
+}
+
 // currentFp 返回当前生效指纹（无锁读用，仅日志/统计）。
 func (p *nodePool) currentFp() string {
 	p.mu.RLock()
@@ -444,6 +588,8 @@ func (p *nodePool) setNodes(nodes []*ProxyNode) {
 			n.CooldownUntil = prev.CooldownUntil
 			n.LastError = prev.LastError
 			n.LastUsedAt = prev.LastUsedAt
+			n.LatencyMs = prev.LatencyMs
+			n.LastProbeAt = prev.LastProbeAt
 		}
 		next = append(next, n)
 		byID[n.Fingerprint] = n
@@ -486,6 +632,8 @@ func (p *nodePool) saveState() {
 			CooldownUntil: n.CooldownUntil,
 			LastError:     n.LastError,
 			LastUsedAt:    n.LastUsedAt,
+			LatencyMs:     n.LatencyMs,
+			LastProbeAt:   n.LastProbeAt,
 		}
 	}
 	p.mu.RUnlock()
@@ -515,6 +663,8 @@ func (p *nodePool) loadState() {
 			n.CooldownUntil = rs.CooldownUntil
 			n.LastError = rs.LastError
 			n.LastUsedAt = rs.LastUsedAt
+			n.LatencyMs = rs.LatencyMs
+			n.LastProbeAt = rs.LastProbeAt
 		}
 	}
 	p.mu.Unlock()

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## v0.4.1
+
+- Node health check (Clash url-test semantics): periodic real-probe through each node against a configurable URL (default `https://www.gstatic.com/generate_204`), 2xx judged available, per-node latency recorded and shown in the panel. Failed nodes are marked dead and skipped until the next successful probe (recovery is probe-driven, no timer); manual "测速" button runs the same probe on demand.
+- Panel fixes: new authenticated `/api/models` endpoint returns the real upstream model IDs for the model-mapping dropdown (no anonymous free-only filter); "刷新会话 & 模型" now shows the real model count and re-populates the dropdown; "刷新数据" re-fetches the model list so the page visibly updates.
+- Fix timestamps showing `NaN-NaN-NaN` in the panel: the run-log viewer's `fmtTime` shadowed the table version (duplicate function name).
+- Stop tracking `proxy_state.json` (runtime state, now gitignored).
+
 ## v0.4.0
 
 - Node pool with manual config and Clash/URI/base64 subscriptions (vless/reality, ss, socks5, hysteria2, anytls): in-process dialing, no mihomo dependency; subscription nodes deduped by fingerprint and refreshed periodically.

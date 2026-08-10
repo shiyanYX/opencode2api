@@ -1,6 +1,7 @@
 # Runtime state
 config.json
 stats.json
+proxy_state.json
 *.log
 *.log.gz
 
