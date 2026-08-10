@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.4.0
+
+- Node pool with manual config and Clash/URI/base64 subscriptions (vless/reality, ss, socks5, hysteria2, anytls): in-process dialing, no mihomo dependency; subscription nodes deduped by fingerprint and refreshed periodically.
+- Quota-exhaustion auto-switch: mark the current node and rotate to the next on configured `error.type` / `error.message` signals, with per-request switch limit, 24h exhausted cooldown, and 1min failure cooldown.
+- Rebuilt Dark-OLED admin panel: overview stats, node pool management (switch / unmark / reload subscriptions), editable subscriptions & manual nodes & quota signals, and a proxy/misc page; partial config merge on save so panel edits never wipe unrelated settings.
+- Run log viewer page: live SSE stream with `id` resume, level filtering and keyword search, runtime log-level switching (in-memory only), and plain-text export; all captured entries are redacted with the same rules as the log file.
+- Fix SOCKS5 deletion from the panel (existing rows could not be removed) and stop leftover SOCKS5 config being promoted into the node pool.
+- Pin CI and Docker builds to Go 1.26.
+
 ## v0.3.10
 
 - Add `socks5_paid_direct` (default `false`): when an `active_socks5` proxy is set, keyed/paid upstream traffic also uses SOCKS5 unless this flag is explicitly enabled for the old paid-direct bypass.
