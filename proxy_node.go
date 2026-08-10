@@ -178,6 +178,7 @@ type nodePool struct {
 
 	clients   map[string]*http.Client // 节点指纹 → 缓存客户端
 	statePath string
+	saveWG    sync.WaitGroup // 跟踪异步状态写入（测试可排空等待）
 }
 
 // 健康检查默认值（Clash url-test 语义：真实连接 + HTTP 2xx 判定可用）。
@@ -382,7 +383,8 @@ func (p *nodePool) mark(fp string, st NodeState, reason string) bool {
 	slog.Info("node state changed",
 		"node", n.Name, "fp", fp, "state", st.String(),
 		"reason", reason, "until", n.CooldownUntil.Format(time.RFC3339))
-	go p.saveState()
+	p.saveWG.Add(1)
+	go func() { defer p.saveWG.Done(); p.saveState() }()
 	return true
 }
 
@@ -397,7 +399,8 @@ func (p *nodePool) unmark(fp string) bool {
 	n.MarkedAt = time.Time{}
 	n.CooldownUntil = time.Time{}
 	n.LastError = ""
-	go p.saveState()
+	p.saveWG.Add(1)
+	go func() { defer p.saveWG.Done(); p.saveState() }()
 	return true
 }
 
@@ -506,7 +509,8 @@ func (p *nodePool) markProbeDead(fp, reason string) {
 	slog.Info("node marked dead by health check",
 		"node", n.Name, "fp", fp, "reason", reason,
 		"until", n.CooldownUntil.Format(time.RFC3339))
-	go p.saveState()
+	p.saveWG.Add(1)
+	go func() { defer p.saveWG.Done(); p.saveState() }()
 }
 
 // recordProbeSuccess 探测成功：记录延迟；仅解除 dead 标记（exhausted 不受影响）。
@@ -525,7 +529,8 @@ func (p *nodePool) recordProbeSuccess(fp string, ms int64) {
 		n.CooldownUntil = time.Time{}
 		n.LastError = ""
 	}
-	go p.saveState()
+	p.saveWG.Add(1)
+	go func() { defer p.saveWG.Done(); p.saveState() }()
 }
 
 // currentFp 返回当前生效指纹（无锁读用，仅日志/统计）。
@@ -609,6 +614,11 @@ func (p *nodePool) nodeCount() int {
 	return len(p.nodes)
 }
 
+// waitStateSaves 等待所有异步状态写入完成（测试清理用）。
+func (p *nodePool) waitStateSaves() {
+	p.saveWG.Wait()
+}
+
 // snapshot 深拷贝快照（管理面板用）。
 func (p *nodePool) snapshot() []*ProxyNode {
 	p.mu.RLock()
@@ -623,6 +633,8 @@ func (p *nodePool) snapshot() []*ProxyNode {
 // ======================= 状态持久化 =======================
 
 func (p *nodePool) saveState() {
+	p.saveWG.Add(1)
+	defer p.saveWG.Done()
 	p.mu.RLock()
 	st := persistentState{Nodes: map[string]nodeRuntimeState{}}
 	for _, n := range p.nodes {

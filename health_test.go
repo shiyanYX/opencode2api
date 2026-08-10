@@ -28,6 +28,7 @@ func probeTestPool(t *testing.T, rt http.RoundTripper) (*nodePool, *ProxyNode) {
 	t.Cleanup(func() { testNodeClient = prev })
 
 	p := newProxyPool(filepath.Join(t.TempDir(), "state.json"))
+	t.Cleanup(p.waitStateSaves)
 	p.probeInterval = 5 * time.Minute
 	p.probeURL = "http://probe.local/204"
 	n := &ProxyNode{Name: "n1", Protocol: "socks5", Address: "127.0.0.1", Port: 1080}
