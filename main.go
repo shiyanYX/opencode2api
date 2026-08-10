@@ -5463,9 +5463,16 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		pick, manual := proxyPool.pickState()
 		nodes := proxyPool.snapshot()
+		activeName, manualName := "", ""
 		out := make([]nodeAdminView, 0, len(nodes))
 		health := map[string]int{"available": 0, "exhausted": 0, "dead": 0}
 		for _, n := range nodes {
+			if n.Fingerprint == pick {
+				activeName = n.Name
+			}
+			if n.Fingerprint == manual {
+				manualName = n.Name
+			}
 			v := nodeAdminView{
 				Name: n.Name, Protocol: n.Protocol, Address: n.Address, Port: n.Port,
 				Fingerprint: n.Fingerprint, State: n.State.String(),
@@ -5490,7 +5497,9 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"active_fp":       pick,
+			"active_name":     activeName,
 			"manual_fp":       manual,
+			"manual_name":     manualName,
 			"healthy":         health["available"],
 			"exhausted_count": health["exhausted"],
 			"dead_count":      health["dead"],
@@ -5961,7 +5970,7 @@ async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats()
 async function loadConfig(){try{const r=await fetch('/api/config');if(!r.ok)throw new Error(await r.text());cfg=await r.json();renderConfigEditors()}catch(e){showToast('配置加载失败: '+e.message,'error')}}
 async function loadNodes(){try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=d.subscriptions||[];renderOverview(d);renderNodeTable()}catch(e){document.querySelector('#nodeTable tbody').innerHTML='<tr><td colspan="6" class="empty-hint">加载失败: '+esc(e.message)+'</td></tr>'}}
 async function loadStats(){try{const r=await fetch('/api/stats');const d=await r.json();renderStats(d)}catch(e){document.getElementById('statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">加载失败</td></tr>'}}
-function renderOverview(d){document.getElementById('ovTotal').textContent=d.nodes?d.nodes.length:0;document.getElementById('ovHealthy').textContent=d.healthy??0;document.getElementById('ovExhausted').textContent=d.exhausted_count??0;document.getElementById('ovDead').textContent=d.dead_count??0;document.getElementById('ovActive').textContent=d.active_fp?'当前: '+shortFp(d.active_fp):'直连';document.getElementById('ovManual').textContent=d.manual_fp?shortFp(d.manual_fp):'自动轮询'}
+function renderOverview(d){document.getElementById('ovTotal').textContent=d.nodes?d.nodes.length:0;document.getElementById('ovHealthy').textContent=d.healthy??0;document.getElementById('ovExhausted').textContent=d.exhausted_count??0;document.getElementById('ovDead').textContent=d.dead_count??0;document.getElementById('ovActive').textContent=d.active_name?('当前: '+d.active_name):(d.active_fp?'当前: '+shortFp(d.active_fp):'直连');document.getElementById('ovManual').textContent=d.manual_name?('手动: '+d.manual_name):(d.manual_fp?shortFp(d.manual_fp):'自动轮询')}
 function shortFp(fp){return fp?fp.slice(0,8):''}
 function renderStats(d){const ms=d.models||{};const ks=Object.keys(ms);let h='';if(!ks.length){h='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>'}else{let tr=0,pt=0,ct=0,tt=0;for(const k of ks){const m=ms[k];h+='<tr><td class="mono">'+esc(k)+'</td><td>'+fmt(m.request_count)+'</td><td>'+fmt(m.prompt_tokens)+'</td><td>'+fmt(m.completion_tokens)+'</td><td>'+fmt(m.total_tokens)+'</td></tr>';tr+=m.request_count;pt+=m.prompt_tokens;ct+=m.completion_tokens;tt+=m.total_tokens}h+='<tr><td style="font-weight:700">总计</td><td style="font-weight:700">'+fmt(tr)+'</td><td style="font-weight:700">'+fmt(pt)+'</td><td style="font-weight:700">'+fmt(ct)+'</td><td style="font-weight:700">'+fmt(tt)+'</td></tr>'}document.getElementById('statsTable').innerHTML='<thead><tr><th>模型</th><th>请求数</th><th>输入 Token</th><th>输出 Token</th><th>总计</th></tr></thead><tbody>'+h+'</tbody>'}
 /* ---------- 节点表 ---------- */
