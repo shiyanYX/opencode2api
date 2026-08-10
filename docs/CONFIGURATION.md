@@ -82,6 +82,59 @@ SOCKS5 代理列表。
 }
 ```
 
+### `subscriptions` / `manual_nodes`（订阅节点池）
+
+节点池（v0.14+）把上游请求通过订阅节点转发（进程内直连，无需 mihomo 子进程）。**池非空时所有请求都走池；池为空时回退旧 SOCKS5 逻辑。**
+
+```json
+{
+  "subscriptions": [
+    {
+      "name": "my-sub",
+      "url": "https://example.com/sub?token=xxx",
+      "interval_hours": 12
+    }
+  ],
+  "manual_nodes": [
+    {
+      "name": "hk1",
+      "protocol": "vless",
+      "address": "1.2.3.4",
+      "port": 443,
+      "user_id": "uuid-here",
+      "flow": "",
+      "sni": "example.com",
+      "reality": {
+        "public_key": "xxx",
+        "short_id": "xxxxxx",
+        "spider_x": "/"
+      }
+    }
+  ]
+}
+```
+
+- 支持协议：`vless`（含 reality）、`ss`、`hysteria2`、`anytls`、`socks5`（`socks5://` URI 走账户限制，clash 配置按原样处理）。
+- 订阅内容支持：Clash YAML（只读 `proxies`）、整条 base64 包裹、每行一条 `vless://`/`ss://`/`hysteria2://`/`anytls://`/`socks5://` URI。
+- 订阅 URL 需要认证时：`url` 可直接附 query；base64 包裹的订阅会自动解码。
+- 免费额度耗尽自动切换：请求遇 `FreeUsageLimitError`/`insufficient_quota`/`credits_error`/`billing_error`（`error.type`）或 `free usage limit`/`quota`/`insufficient`/`limit exceeded`（`error.message`）时，标记当前节点为 **已耗尽**，透明切换下一个节点重试；单个请求最多切换 `max_quota_node_switches`（默认 5）次。**403 无签名视为耗尽、429 无签名不视为耗尽**。
+- 判定可定制：
+
+```json
+{
+  "quota_error_signals": {
+    "error_types": ["FreeUsageLimitError", "insufficient_quota"],
+    "message_keywords": ["free usage limit", "quota", "limit exceeded"]
+  },
+  "max_quota_node_switches": 5,
+  "node_cooldown_exhausted_hours": 24,
+  "node_cooldown_dead_minutes": 1
+}
+```
+
+- 节点状态持久化在配置同目录 `proxy_state.json`（运行时按订阅指纹学习、重启不丢失）；节点客户端与订阅缓存缓存在 `.subscriptions/` 目录。
+- 管理面板新增「节点池」卡片：查看状态/冷却、手动切换节点、解除耗尽标记、重新加载订阅。
+
 ## 管理面板
 
 打开 `http://127.0.0.1:8000/` 可进入管理面板。面板可以修改配置、刷新模型和查看 token 统计。

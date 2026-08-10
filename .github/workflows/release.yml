@@ -42,7 +42,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.22.x"
+          go-version: "1.26.x"
           cache: false
 
       - name: Verify
@@ -87,7 +87,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: "1.22.x"
+          go-version: "1.26.x"
           cache: false
 
       - name: Build target
