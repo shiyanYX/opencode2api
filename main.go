@@ -800,6 +800,11 @@ type AppConfig struct {
 	NodeCooldownDeadMinutes    int `json:"node_cooldown_dead_minutes,omitempty"`
 	// MaxQuotaNodeSwitches 配额耗尽后最多尝试的节点数（默认 5）。
 	MaxQuotaNodeSwitches int `json:"max_quota_node_switches,omitempty"`
+
+	// ---- 节点健康检查（可选）----
+	// 0 = 默认 15min；URL 空 = 默认 https://www.gstatic.com/generate_204
+	NodeHealthIntervalMinutes int    `json:"node_health_interval_minutes,omitempty"`
+	NodeHealthProbeURL        string `json:"node_health_probe_url,omitempty"`
 }
 
 // QuotaSignalsConfig 配额耗尽判定签名（纯配置，不记运行时状态）。
@@ -995,6 +1000,14 @@ func applyConfig(cfg AppConfig) {
 		maxQuotaNodeSwitches = defaultMaxQuotaNodeSwitches
 	}
 	quotaSignalsMu.Unlock()
+
+	// ---- 健康检查配置 ----
+	if cfg.NodeHealthIntervalMinutes > 0 {
+		proxyPool.probeInterval = time.Duration(cfg.NodeHealthIntervalMinutes) * time.Minute
+	} else {
+		proxyPool.probeInterval = 0
+	}
+	proxyPool.probeURL = cfg.NodeHealthProbeURL
 }
 
 var (
@@ -2527,6 +2540,61 @@ func replaceModelIDsWithAliases(models []ModelInfo, aliases map[string]string) [
 		}
 	}
 	return result
+}
+
+// adminModelsHandler 管理面板专用：返回面板可直接使用的真实上游模型 ID 列表
+// （models 缓存 + Go 目录合并去重，不过滤免费、不套别名），供模型映射下拉框选择。
+func adminModelsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	modelMu.RLock()
+	loaded, modelsLoadedCount := modelsLoaded, len(modelsCache)
+	modelMu.RUnlock()
+	if !loaded || modelsLoadedCount == 0 {
+		// 上游缓存为空时同步拉取一次，保证面板可用。
+		if fetched, err := fetchModels(); err == nil && len(fetched) > 0 {
+			modelMu.Lock()
+			modelsCache = fetched
+			modelsLoaded = true
+			modelMu.Unlock()
+		}
+		if goFetched, goErr := fetchGoModels(); goErr == nil && len(goFetched) > 0 {
+			modelMu.Lock()
+			goModelsCache = goFetched
+			modelMu.Unlock()
+		}
+	}
+	modelMu.RLock()
+	seen := make(map[string]struct{}, len(modelsCache)+len(goModelsCache))
+	ids := make([]string, 0, len(modelsCache)+len(goModelsCache))
+	appendIDs := func(list []ModelInfo) {
+		for _, m := range list {
+			if _, ok := seen[m.ID]; ok {
+				continue
+			}
+			seen[m.ID] = struct{}{}
+			ids = append(ids, m.ID)
+		}
+	}
+	appendIDs(modelsCache)
+	appendIDs(goModelsCache)
+	modelMu.RUnlock()
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "无法获取模型列表，请检查上游服务是否可用",
+		})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"object": "list",
+		"data":   ids,
+	})
 }
 
 // ======================== Claude Messages API ========================
@@ -5172,6 +5240,7 @@ func reloadHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":  "ok",
 		"session": ocSessionID,
+		"models":  len(modelsCache),
 		"free":    len(modelsCache),
 		"go":      len(goModelsCache),
 	})
@@ -5203,6 +5272,8 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"max_quota_node_switches":       merged.MaxQuotaNodeSwitches,
 			"node_cooldown_exhausted_hours": merged.NodeCooldownExhaustedHours,
 			"node_cooldown_dead_minutes":    merged.NodeCooldownDeadMinutes,
+			"node_health_interval_minutes":  merged.NodeHealthIntervalMinutes,
+			"node_health_probe_url":         merged.NodeHealthProbeURL,
 			"log_level":                     getLogLevelString(),
 			"log_bodies":                    getLogBodies(),
 		})
@@ -5263,6 +5334,8 @@ type configPatch struct {
 	MaxQuotaNodeSwitches       *int                 `json:"max_quota_node_switches"`
 	NodeCooldownExhaustedHours *int                 `json:"node_cooldown_exhausted_hours"`
 	NodeCooldownDeadMinutes    *int                 `json:"node_cooldown_dead_minutes"`
+	NodeHealthIntervalMinutes  *int                 `json:"node_health_interval_minutes"`
+	NodeHealthProbeURL         *string              `json:"node_health_probe_url"`
 }
 
 // mergeAppConfig 将补丁叠加到基础配置（GET 回显与订阅保存共用，AppConfig 语义）。
@@ -5306,6 +5379,12 @@ func mergeAppConfig(base, patch AppConfig) AppConfig {
 	}
 	if patch.NodeCooldownDeadMinutes > 0 {
 		out.NodeCooldownDeadMinutes = patch.NodeCooldownDeadMinutes
+	}
+	if patch.NodeHealthIntervalMinutes > 0 {
+		out.NodeHealthIntervalMinutes = patch.NodeHealthIntervalMinutes
+	}
+	if patch.NodeHealthProbeURL != "" {
+		out.NodeHealthProbeURL = patch.NodeHealthProbeURL
 	}
 	return out
 }
@@ -5352,10 +5431,16 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	if patch.NodeCooldownDeadMinutes != nil {
 		out.NodeCooldownDeadMinutes = *patch.NodeCooldownDeadMinutes
 	}
+	if patch.NodeHealthIntervalMinutes != nil {
+		out.NodeHealthIntervalMinutes = *patch.NodeHealthIntervalMinutes
+	}
+	if patch.NodeHealthProbeURL != nil {
+		out.NodeHealthProbeURL = *patch.NodeHealthProbeURL
+	}
 	return out
 }
 
-// nodeAdminView API 视图：只读字段 + 当前/手动标记。
+// nodeAdminView API 视图：只读字段 + 当前/手动标记 + 健康探测结果。
 type nodeAdminView struct {
 	Name          string `json:"name"`
 	Protocol      string `json:"protocol"`
@@ -5367,6 +5452,8 @@ type nodeAdminView struct {
 	CooldownUntil string `json:"cooldown_until,omitempty"`
 	LastError     string `json:"last_error,omitempty"`
 	LastUsedAt    string `json:"last_used_at,omitempty"`
+	LatencyMs     int64  `json:"latency_ms,omitempty"`
+	LastProbeAt   string `json:"last_probe_at,omitempty"`
 	Active        bool   `json:"active"`
 	Manual        bool   `json:"manual"`
 }
@@ -5383,7 +5470,7 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 				Name: n.Name, Protocol: n.Protocol, Address: n.Address, Port: n.Port,
 				Fingerprint: n.Fingerprint, State: n.State.String(),
 				LastError: n.LastError, Active: n.Fingerprint == pick,
-				Manual: n.Fingerprint == manual,
+				Manual: n.Fingerprint == manual, LatencyMs: n.LatencyMs,
 			}
 			health[v.State]++
 			if !n.MarkedAt.IsZero() {
@@ -5394,6 +5481,9 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			if !n.LastUsedAt.IsZero() {
 				v.LastUsedAt = n.LastUsedAt.Format(time.RFC3339)
+			}
+			if !n.LastProbeAt.IsZero() {
+				v.LastProbeAt = n.LastProbeAt.Format(time.RFC3339)
 			}
 			out = append(out, v)
 		}
@@ -5440,6 +5530,12 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			resp["nodes"] = fmt.Sprintf("%d", n)
+		case "probe":
+			// 手动测速：同步执行真实探测并更新节点状态。
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+			checked := proxyPool.checkNodes(ctx)
+			cancel()
+			resp["checked"] = fmt.Sprintf("%d", checked)
 		case "save":
 			// 面板保存订阅源 + 手配节点：合并写盘 → 生效 → 立即刷新池
 			next := mergeAppConfig(loadConfig(configPath), AppConfig{
@@ -5740,12 +5836,13 @@ button{font-family:var(--font)}
 <button class="chip" data-f="dead" onclick="setFilter('dead')">故障</button>
 </div>
 <div style="overflow-x:auto"><table class="tbl" id="nodeTable">
-<thead><tr><th style="width:20%">名称</th><th style="width:9%">协议</th><th style="width:10%">状态</th><th style="width:20%">冷却至</th><th style="width:31%">最近错误</th><th style="width:10%"></th></tr></thead>
+<thead><tr><th style="width:18%">名称</th><th style="width:8%">协议</th><th style="width:8%">状态</th><th style="width:9%">延迟</th><th style="width:16%">冷却至</th><th style="width:31%">最近错误</th><th style="width:10%"></th></tr></thead>
 <tbody></tbody>
 </table></div>
 <div class="actions">
 <button class="btn btn-success" onclick="reloadSubs()">重新加载订阅</button>
 <button class="btn btn-ghost" onclick="resetAllMarks()">解除全部标记</button>
+<button class="btn btn-ghost" onclick="probeAll()">测速</button>
 <button class="btn btn-ghost" onclick="loadNodes()">刷新节点</button>
 <span id="nodeStatus" style="font-size:11px;color:var(--text-ter)"></span>
 </div>
@@ -5777,6 +5874,10 @@ button{font-family:var(--font)}
 <div class="field"><label>单请求最大切换次数</label><input id="q_max_switches" type="number" min="0" max="20" value="5"></div>
 <div class="field"><label>耗尽冷却（小时）</label><input id="q_cooldown_h" type="number" min="0" max="168" value="24"></div>
 <div class="field"><label>故障冷却（分钟）</label><input id="q_cooldown_m" type="number" min="0" max="1440" value="1"></div>
+</div>
+<div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-top:12px">
+<div class="field"><label>健康检查间隔（分钟，0=默认15）</label><input id="q_health_interval" type="number" min="1" max="1440" value="15"></div>
+<div class="field"><label>健康检查探针 URL</label><input id="q_health_url" placeholder="https://www.gstatic.com/generate_204"></div>
 </div>
 <div class="hint" style="font-size:11.5px;color:var(--text-ter);margin-top:8px">403 且无上述签名视为耗尽；429 无签名不视为耗尽。</div>
 </div>
@@ -5856,7 +5957,7 @@ function fmt(n){return Number(n||0).toString().replace(/\B(?=(\d{3})+(?!\d))/g,'
 let toastT;
 function showToast(msg,t){const e=document.getElementById('toast');e.textContent=msg;e.className=t==='error'?'error show':'show';clearTimeout(toastT);toastT=setTimeout(()=>e.classList.remove('show'),2600)}
 /* ---------- 数据加载 ---------- */
-async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats()])}
+async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),fetchModelList()]);renderAliasTable()}
 async function loadConfig(){try{const r=await fetch('/api/config');if(!r.ok)throw new Error(await r.text());cfg=await r.json();renderConfigEditors()}catch(e){showToast('配置加载失败: '+e.message,'error')}}
 async function loadNodes(){try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=d.subscriptions||[];renderOverview(d);renderNodeTable()}catch(e){document.querySelector('#nodeTable tbody').innerHTML='<tr><td colspan="6" class="empty-hint">加载失败: '+esc(e.message)+'</td></tr>'}}
 async function loadStats(){try{const r=await fetch('/api/stats');const d=await r.json();renderStats(d)}catch(e){document.getElementById('statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">加载失败</td></tr>'}}
@@ -5869,9 +5970,10 @@ function setFilter(f){filter=f;document.querySelectorAll('#stateChips .chip').fo
 const badgeMap={available:'<span class="badge available">可用</span>',exhausted:'<span class="badge exhausted">已耗尽</span>',dead:'<span class="badge dead">故障</span>',idle:'<span class="badge idle">未知</span>'};
 function badgeHtml(s){return badgeMap[s]||badgeMap.idle}
 function fmtTime(t){return t?String(t).replace('T',' ').slice(0,16):'-'}
-function renderNodeTable(){const tb=document.querySelector('#nodeTable tbody');const rows=nodeData.filter(n=>filter==='all'||n.state===filter);if(!rows.length){tb.innerHTML='<tr><td colspan="6" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}tb.innerHTML=rows.map(n=>'<tr class="'+(n.active?'hl':'')+'"><td>'+esc(n.name)+(n.active?' <span style="font-size:11px;color:var(--text-ter)">(当前)</span>':'')+(n.manual?' <span style="font-size:11px;color:var(--accent)">(手动)</span>':'')+'</td><td><span class="mono">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="mono" style="font-size:12px;color:var(--text-sec)">'+esc(fmtTime(n.cooldown_until))+'</td><td class="mono" style="font-size:11.5px;color:var(--text-ter);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(n.last_error||'-')+'</td><td style="white-space:nowrap"><button class="btn btn-success btn-sm" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-ghost btn-sm" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button></td></tr>').join('')}
-async function nodeAction(action,fp){const st=document.getElementById('nodeStatus');st.textContent='操作中...';try{const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action,fingerprint:fp||''})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent=action==='switch'?'已切换':action==='reload'?('订阅已加载，节点 '+d.nodes+' 个'):'已解除';showToast(st.textContent,'success')}catch(e){st.textContent='失败: '+e.message;showToast('操作失败: '+e.message,'error')}finally{loadNodes()}}
+function renderNodeTable(){const tb=document.querySelector('#nodeTable tbody');const rows=nodeData.filter(n=>filter==='all'||n.state===filter);if(!rows.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}tb.innerHTML=rows.map(n=>'<tr class="'+(n.active?'hl':'')+'"><td>'+esc(n.name)+(n.active?' <span style="font-size:11px;color:var(--text-ter)">(当前)</span>':'')+(n.manual?' <span style="font-size:11px;color:var(--accent)">(手动)</span>':'')+'</td><td><span class="mono">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="mono" style="font-size:12px;color:var(--text-sec)">'+(n.latency_ms!=null&&n.latency_ms>=0?n.latency_ms+' ms':'-')+'</td><td class="mono" style="font-size:12px;color:var(--text-sec)">'+esc(fmtTime(n.cooldown_until))+'</td><td class="mono" style="font-size:11.5px;color:var(--text-ter);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(n.last_error||'-')+'</td><td style="white-space:nowrap"><button class="btn btn-success btn-sm" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-ghost btn-sm" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button></td></tr>').join('')}
+async function nodeAction(action,fp){const st=document.getElementById('nodeStatus');st.textContent='操作中...';try{const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action,fingerprint:fp||''})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent=action==='switch'?'已切换':action==='reload'?('订阅已加载，节点 '+d.nodes+' 个'):action==='probe'?('测速完成 '+d.checked+' 个节点'):'已解除';showToast(st.textContent,'success')}catch(e){st.textContent='失败: '+e.message;showToast('操作失败: '+e.message,'error')}finally{loadNodes()}}
 function reloadSubs(){nodeAction('reload','')}
+function probeAll(){nodeAction('probe','')}
 async function resetAllMarks(){if(!confirm('解除所有节点的耗尽/故障标记？'))return;nodeAction('reset_all','')}
 /* ---------- 订阅编辑 ---------- */
 function renderSubTable(){const tb=document.querySelector('#subTable tbody');if(!subData.length){tb.innerHTML='<tr><td colspan="6" class="empty-hint">暂无订阅源 — 添加 Clash/URI/base64 订阅，或直接用手动配置节点</td></tr>';return}tb.innerHTML=subData.map((s,i)=>'<tr><td><input value="'+esc(s.name||'')+'" data-f="name" placeholder="订阅名"></td><td><input value="'+esc(s.url||'')+'" data-f="url" placeholder="https://..."></td><td><input type="number" min="0" value="'+(s.update_interval_hours||'')+'" data-f="interval" placeholder="24"></td><td class="mono" style="color:var(--text-sec)">'+(s.nodes||0)+'</td><td class="mono" style="font-size:11.5px;color:var(--text-ter)">'+esc(fmtTime(s.last_updated_at))+'</td><td><button class="btn btn-danger btn-sm" onclick="delSub('+i+')">删除</button></td></tr>'+(s.last_error?'<tr><td colspan="6" style="color:var(--red);font-size:12px">'+esc(s.last_error)+'</td></tr>':'')).join('')}
@@ -5887,13 +5989,13 @@ function addNodeEditor(){nodeEditors.push({protocol:'vless'});renderNodeEditors(
 function delNodeEditor(i){nodeEditors.splice(i,1);renderNodeEditors()}
 function collectNodes(){const out=[];document.querySelectorAll('#manualEditors .nedit').forEach(row=>{const i=+row.dataset.i;const g=f=>row.querySelector('[data-f="'+f+'"]');const address=((g('address')||{}).value||'').trim();if(!address)return;const n={name:(g('name')||{}).value||'',protocol:g('protocol').value,address:address,port:parseInt((g('port')||{}).value||'0',10)||0};for(const f of ['user_id','password','method','sni','flow']){const el=g(f);if(el&&el.value)n[f]=el.value}if(g('insecure')&&g('insecure').checked)n.insecure=true;const rp=((g('rp')||{}).value||'').trim(),rs=((g('rs')||{}).value||'').trim(),rx=((g('rx')||{}).value||'').trim();if(n.protocol==='vless'&&(rp||rs)){n.reality={public_key:rp,short_id:rs,spider_x:rx||'/'}}nodeEditors[i]=n;out.push(n)});return out}
 /* ---------- 配额 ---------- */
-function renderQuota(c){document.getElementById('q_error_types').value=(c.quota_error_signals&&c.quota_error_signals.error_types||[]).join(', ');document.getElementById('q_message_kw').value=(c.quota_error_signals&&c.quota_error_signals.message_keywords||[]).join(', ');document.getElementById('q_max_switches').value=c.max_quota_node_switches||5;document.getElementById('q_cooldown_h').value=c.node_cooldown_exhausted_hours||24;document.getElementById('q_cooldown_m').value=c.node_cooldown_dead_minutes||1}
-function collectQuota(){return{quota_error_signals:{error_types:document.getElementById('q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:document.getElementById('q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(document.getElementById('q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(document.getElementById('q_cooldown_h').value||'24',10),node_cooldown_dead_minutes:parseInt(document.getElementById('q_cooldown_m').value||'1',10)}}
+function renderQuota(c){document.getElementById('q_error_types').value=(c.quota_error_signals&&c.quota_error_signals.error_types||[]).join(', ');document.getElementById('q_message_kw').value=(c.quota_error_signals&&c.quota_error_signals.message_keywords||[]).join(', ');document.getElementById('q_max_switches').value=c.max_quota_node_switches||5;document.getElementById('q_cooldown_h').value=c.node_cooldown_exhausted_hours||24;document.getElementById('q_cooldown_m').value=c.node_cooldown_dead_minutes||1;document.getElementById('q_health_interval').value=c.node_health_interval_minutes||15;document.getElementById('q_health_url').value=c.node_health_probe_url||''}
+function collectQuota(){return{quota_error_signals:{error_types:document.getElementById('q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:document.getElementById('q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(document.getElementById('q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(document.getElementById('q_cooldown_h').value||'24',10),node_cooldown_dead_minutes:parseInt(document.getElementById('q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(document.getElementById('q_health_interval').value||'15',10),node_health_probe_url:document.getElementById('q_health_url').value.trim()}}
 async function saveSubsConfig(){const st=document.getElementById('subSaveStatus');st.textContent='保存中...';try{collectSubs();const nodes=collectNodes();const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'save',subscriptions:subData,manual_nodes:nodes})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent='已保存，节点 '+d.nodes+' 个';showToast('订阅与节点已保存，节点池已刷新','success')}catch(e){st.textContent='失败: '+e.message;showToast('保存失败: '+e.message,'error')}finally{loadNodes()}}
 async function saveQuotaConfig(){const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(collectQuota())});if(!r.ok){showToast('保存配额失败: '+await r.text(),'error');return}showToast('配额设置已保存','success')}
 /* ---------- 配置编辑（代理与模型） ---------- */
 function modelSelectHtml(selected){let h='<select data-field="val" class="m-select"><option value="">-- 选择模型 --</option>';for(const m of modelList){h+='<option value="'+esc(m)+'"'+(selected===m?' selected':'')+'>'+esc(m)+'</option>'}h+='</select>';return h}
-async function fetchModelList(){try{const m=await fetch('/v1/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(m=>m.id).sort()}}catch(e){}}
+async function fetchModelList(){try{let m=await fetch('/api/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort()}else if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}}catch(e){}}
 function renderAliasTable(){const tb=document.querySelector('#aliasTable tbody');const ks=Object.keys(cfg.model_alias||{});if(!ks.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置</td></tr>';return}tb.innerHTML=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key"></td><td>'+modelSelectHtml(cfg.model_alias[k])+'</td><td><button class="btn btn-danger btn-sm" onclick="delAlias(this)">删除</button></td></tr>').join('')}
 function addAliasRow(){const tb=document.querySelector('#aliasTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: gpt-5.5" data-field="key"></td><td>'+modelSelectHtml('')+'</td><td><button class="btn btn-danger btn-sm" onclick="delAlias(this)">删除</button></td></tr>';tb.appendChild(tr)}
 function delAlias(b){b.closest('tr').remove()}
@@ -5908,7 +6010,7 @@ function delSocks5(b){b.closest('tr').remove()}
 function collectSocks5(){const r=[];document.querySelectorAll('#socks5Table tbody tr').forEach(tr=>{const a=tr.querySelector('[data-field="addr"]');if(a&&a.value.trim())r.push({addr:a.value.trim(),name:(tr.querySelector('[data-field="name"]')||{}).value||'',username:(tr.querySelector('[data-field="username"]')||{}).value||'',password:(tr.querySelector('[data-field="password"]')||{}).value||''})});cfg.socks5_proxies=r;return r}
 function renderSocks5Select(){const sel=document.getElementById('activeSocks5');sel.innerHTML='<option value="">直连（不使用代理）</option>';(cfg.socks5_proxies||[]).forEach(p=>{if(p.addr){const opt=document.createElement('option');opt.value=p.addr;opt.textContent=p.name?p.name+' ('+p.addr+')':p.addr;sel.appendChild(opt)}});if((cfg.socks5_proxies||[]).length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cfg.active_socks5||'';document.getElementById('socks5_paid_direct').value=cfg.socks5_paid_direct?'1':'0'}
 async function saveConfig(){collectEfforts();collectAliases();collectSocks5();const body={model_alias:cfg.model_alias,reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:document.getElementById('force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:document.getElementById('activeSocks5').value,socks5_paid_direct:document.getElementById('socks5_paid_direct').value==='1'};try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}}
-async function reloadConfig(){const r=await fetch('/api/reload',{method:'POST'});const d=await r.json();showToast('会话已刷新，模型 '+d.models+' 个','success')}
+async function reloadConfig(){const r=await fetch('/api/reload',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');showToast('会话已刷新，模型 '+((d.models??d.free)||0)+' 个','success');fetchModelList().then(()=>renderAliasTable())}
 async function resetStats(){if(!confirm('确认清空所有 Token 统计？此操作不可撤销。'))return;const s=document.getElementById('resetStatus');s.textContent='清空中...';try{const r=await fetch('/api/stats',{method:'DELETE'});if(!r.ok)throw new Error(await r.text());document.getElementById('statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000)}catch(e){s.textContent='失败: '+e.message}}
 /* ---------- 渲染入口 ---------- */
 function renderConfigEditors(){subData=(cfg.subscriptions||[]).map(s=>({...s}));nodeEditors=(cfg.manual_nodes||[]).map(n=>({...n}));renderAliasTable();renderEffortTable();renderSocks5Table();renderSocks5Select();renderQuota(cfg);renderSubTable();renderNodeEditors();document.getElementById('force_disable_thinking').checked=!!cfg.force_disable_thinking}
@@ -5924,14 +6026,14 @@ function setLogKeyword(v){logKeyword=(v||'').toLowerCase();renderLogs()}
 function logMatches(e){if(logFilterLevel!=='all'&&e.level!==logFilterLevel)return false;if(!logKeyword)return true;if((e.msg||'').toLowerCase().includes(logKeyword))return true;return (e.attrs||[]).some(a=>String(a.v).toLowerCase().includes(logKeyword))}
 function renderLogs(){const rows=[];for(const e of logBuf){if(!logMatches(e))continue;rows.push(e)}logListEl.innerHTML=rows.map(logRowHtml).join('');const total=logBuf.length;const shown=rows.length;document.getElementById('logCount').textContent='缓冲 '+total+' 条 / 显示 '+shown+' 条';updateLogStick();logListEl.scrollTop=logListEl.scrollHeight}
 function logRowHtml(e){const dbg=e.level==='DEBUG'?'color:var(--muted)':'';return '<div class="log-line" data-seq="'+e.seq+'" style="padding:1px 10px;display:flex;gap:8px;align-items:baseline;'+(e.level==='ERROR'?'background:rgba(220,38,38,.08)':e.level==='WARN'?'background:rgba(234,179,8,.07)':'')+'">'+
-'<span style="color:var(--muted);white-space:nowrap;flex:none">'+fmtTime(e.time)+'</span>'+
+'<span style="color:var(--muted);white-space:nowrap;flex:none">'+fmtLogTime(e.time)+'</span>'+
 '<span class="log-lv" data-lv="'+e.level+'" style="flex:none;width:48px;font-weight:600;'+logLvColor(e.level)+'">'+e.level+'</span>'+
 '<span class="log-msg" style="white-space:pre-wrap;word-break:break-all">'+esc(e.msg||'')+'</span>'+
 (e.attrs&&e.attrs.length?'<button class="btn btn-ghost" style="padding:0 4px;flex:none" onclick="toggleLogAttrs('+e.seq+',this)">'+e.attrs.length+' 字段</button>':'')+
 '</div>'+(e.attrs&&e.attrs.length?'<div class="log-attrs" id="la-'+e.seq+'" style="display:none;padding:0 10px 2px 66px;color:var(--muted);font-size:12px">'+e.attrs.map(a=>'<span style="margin-right:10px"><b style="color:var(--accent)">'+esc(a.k)+'</b>='+esc(a.v)+'</span>').join('')+'</div>':'')}
 function logLvColor(l){switch(l){case 'ERROR':return 'color:var(--red)';case 'WARN':return 'color:var(--warning)';case 'DEBUG':return 'color:var(--muted)';default:return 'color:var(--green)'}}
 function toggleLogAttrs(seq,btn){const el=document.getElementById('la-'+seq);if(!el)return;const open=el.style.display!=='none';el.style.display=open?'none':'block';btn.textContent=(open?'':'隐藏 ')+el.querySelectorAll('span').length+' 字段'}
-function fmtTime(iso){const d=new Date(iso);const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
+function fmtLogTime(iso){const d=new Date(iso);const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
 function onLogEntry(e){if(e.seq<=logLastSeq)return;logLastSeq=e.seq;if(logBuf.length>=LOG_MAX_BUF)logBuf.shift();logBuf.push(e);if(logMatches(e)){logListEl.insertAdjacentHTML('beforeend',logRowHtml(e));}
 updateLogCount();updateLogStick();document.getElementById('logStatus').textContent='实时 · seq '+logLastSeq}
 function updateLogCount(){document.getElementById('logCount').textContent='缓冲 '+logBuf.length+' 条 / 显示 '+logListEl.querySelectorAll('.log-line').length+' 条'}
@@ -5985,6 +6087,7 @@ func main() {
 	cacheDir := filepath.Join(filepath.Dir(configPath), ".subscriptions")
 	subManager.configure(cfg.Subscriptions, cfg.ManualNodes, cacheDir)
 	startSubscriptionTicker()
+	startNodeHealthCheck()
 
 	loadTokenStats()
 	slog.Info("config loaded", "path", configPath)
@@ -6027,6 +6130,7 @@ func main() {
 	mux.HandleFunc("/v1/responses", loggingMiddleware(responsesHandler))
 	mux.HandleFunc("/v1/messages", loggingMiddleware(claudeMessagesHandler))
 	mux.HandleFunc("/v1/models", loggingMiddleware(listModelsHandler))
+	mux.HandleFunc("/api/models", loggingMiddleware(requireAuth(adminModelsHandler)))
 	mux.HandleFunc("/login", loggingMiddleware(loginHandler))
 	mux.HandleFunc("/logout", loggingMiddleware(logoutHandler))
 	mux.HandleFunc("/api/config", loggingMiddleware(requireAuth(adminConfigHandler)))
