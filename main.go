@@ -15,7 +15,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -200,6 +202,37 @@ const socks5RR = "__round_robin__"
 
 var socks5RRIndex uint32
 
+// legacySocks5Nodes 把 config.json 里遗留的 socks5Proxies 迁移为池内节点。
+// 若旧配置有名字，优先用名字；否则用 Addr。
+func legacySocks5Nodes() []*ProxyNode {
+	socks5Mu.RLock()
+	proxies := append([]Socks5Proxy(nil), socks5Proxies...)
+	socks5Mu.RUnlock()
+	out := make([]*ProxyNode, 0, len(proxies))
+	for _, p := range proxies {
+		if p.Addr == "" {
+			continue
+		}
+		host, portStr, err := net.SplitHostPort(p.Addr)
+		if err != nil {
+			host, portStr = p.Addr, "1080"
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			port = 1080
+		}
+		name := p.Name
+		if name == "" {
+			name = p.Addr
+		}
+		out = append(out, &ProxyNode{
+			Name: name, Protocol: "socks5", Address: host, Port: port,
+			UserID: p.Username, Password: p.Password,
+		})
+	}
+	return out
+}
+
 var (
 	socks5Client     *http.Client // 缓存的 SOCKS5 客户端
 	socks5ClientAddr string       // 缓存对应的代理地址
@@ -208,6 +241,15 @@ var (
 func getHTTPClient() *http.Client {
 	socks5Mu.RLock()
 	defer socks5Mu.RUnlock()
+
+	// 新管线：节点池优先（refreshAll 成功后池非空）。池为空时回退旧 socks5 逻辑。
+	if nodesActive() {
+		n := proxyPool.pick(false)
+		if n != nil {
+			return proxyPool.getClient(n.Fingerprint)
+		}
+		return httpClient // 节点都在冷却中 → 直连
+	}
 
 	if activeSocks5 == "" {
 		return httpClient
@@ -275,6 +317,26 @@ func getSocks5PaidDirect() bool {
 	return socks5PaidDirect
 }
 
+func nodesActive() bool {
+	return proxyPool.nodeCount() > 0
+}
+
+// getNodeClientForTier 供配额切换链路使用：返回本次请求所用客户端及其节点指纹。
+// 指纹为空表示直连（这些响应不参与节点标记）。forceSwitch=true 时强制换节点。
+func getNodeClientForTier(tier TierType, forceSwitch bool) (*http.Client, string) {
+	if tier == TierPaid && getSocks5PaidDirect() {
+		return httpClient, ""
+	}
+	if nodesActive() {
+		n := proxyPool.pick(forceSwitch)
+		if n != nil {
+			return proxyPool.getClient(n.Fingerprint), n.Fingerprint
+		}
+		return httpClient, ""
+	}
+	return getHTTPClientForTier(tier), ""
+}
+
 // ======================== 随机 ID ========================
 
 func randomString(n int) string {
@@ -325,6 +387,29 @@ func fetchOCVersion() string {
 	return "1.15.3"
 }
 
+// fetchOCVersionDirect 绕过节点池直连探测版本（会话切换时用，避免占用配额路径）。
+func fetchOCVersionDirect() string {
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, _ := http.NewRequest("GET", "https://registry.npmjs.org/opencode-ai/latest", nil)
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "1.15.3"
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var info struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal(body, &info) == nil && info.Version != "" {
+		return info.Version
+	}
+	return "1.15.3"
+}
+
+// noSessionRefresh 测试桩：置真时 refreshOCSession 不做网络请求。
+var noSessionRefresh bool
+
 func initOCSession() {
 	ocOnce.Do(func() {
 		ocClientVer = fetchOCVersion()
@@ -337,7 +422,13 @@ func initOCSession() {
 }
 
 func refreshOCSession() {
-	ocClientVer = fetchOCVersion()
+	if noSessionRefresh { // 测试桩：只本地轮换，不访问网络
+		ocSessionID = "ses_" + randomString(24)
+		ocProjectID = randomHex(40)
+		ocOnce = sync.Once{}
+		return
+	}
+	ocClientVer = fetchOCVersionDirect()
 	ocSessionID = "ses_" + randomString(24)
 	ocProjectID = randomHex(40)
 	slog.Info("session refreshed", "version", ocClientVer, "session_id", ocSessionID)
@@ -697,6 +788,32 @@ type AppConfig struct {
 	// Omitted or false (default): all traffic uses the active proxy.
 	// true: paid/keyed traffic goes direct; only public/free uses SOCKS5.
 	Socks5PaidDirect bool `json:"socks5_paid_direct,omitempty"`
+
+	// ---- 节点池（订阅）----
+	Subscriptions []SubscriptionConfig `json:"subscriptions,omitempty"`
+	ManualNodes   []ProxyNodeConfig    `json:"manual_nodes,omitempty"`
+	// QuotaErrorSignals 定义"免费额度耗尽"的判定签名（error.type 或 error.message 关键词）。
+	// 命中后自动切换节点重试（免费层 K=5 次）。
+	QuotaErrorSignals QuotaSignalsConfig `json:"quota_error_signals,omitempty"`
+	// 节点冷却时长（0 = 默认 24h / 60s）
+	NodeCooldownExhaustedHours int `json:"node_cooldown_exhausted_hours,omitempty"`
+	NodeCooldownDeadMinutes    int `json:"node_cooldown_dead_minutes,omitempty"`
+	// MaxQuotaNodeSwitches 配额耗尽后最多尝试的节点数（默认 5）。
+	MaxQuotaNodeSwitches int `json:"max_quota_node_switches,omitempty"`
+}
+
+// QuotaSignalsConfig 配额耗尽判定签名（纯配置，不记运行时状态）。
+type QuotaSignalsConfig struct {
+	ErrorTypes      []string `json:"error_types,omitempty"`
+	MessageKeywords []string `json:"message_keywords,omitempty"`
+}
+
+func defaultQuotaErrorTypes() []string {
+	return []string{"FreeUsageLimitError", "insufficient_quota", "credits_error", "billing_error"}
+}
+
+func defaultQuotaMessageKeywords() []string {
+	return []string{"free usage limit", "quota", "insufficient", "limit exceeded"}
 }
 
 // ======================== Claude Messages API 类型 ========================
@@ -853,7 +970,41 @@ func applyConfig(cfg AppConfig) {
 	socks5PaidDirect = cfg.Socks5PaidDirect
 	socks5Mu.Unlock()
 
+	// ---- 节点池配置 ----
+	if cfg.NodeCooldownExhaustedHours > 0 {
+		proxyPool.exhaustedCooldown = time.Duration(cfg.NodeCooldownExhaustedHours) * time.Hour
+	} else {
+		proxyPool.exhaustedCooldown = 0 // 回默认 24h
+	}
+	if cfg.NodeCooldownDeadMinutes > 0 {
+		proxyPool.deadCooldown = time.Duration(cfg.NodeCooldownDeadMinutes) * time.Minute
+	} else {
+		proxyPool.deadCooldown = 0 // 回默认 60s
+	}
+	quotaSignalsMu.Lock()
+	quotaErrorTypes = defaultQuotaErrorTypes()
+	quotaMessageKeywords = defaultQuotaMessageKeywords()
+	if cfg.QuotaErrorSignals.ErrorTypes != nil {
+		quotaErrorTypes = cfg.QuotaErrorSignals.ErrorTypes
+	}
+	if cfg.QuotaErrorSignals.MessageKeywords != nil {
+		quotaMessageKeywords = cfg.QuotaErrorSignals.MessageKeywords
+	}
+	maxQuotaNodeSwitches = cfg.MaxQuotaNodeSwitches
+	if maxQuotaNodeSwitches <= 0 {
+		maxQuotaNodeSwitches = defaultMaxQuotaNodeSwitches
+	}
+	quotaSignalsMu.Unlock()
 }
+
+var (
+	quotaSignalsMu       sync.Mutex
+	quotaErrorTypes      []string
+	quotaMessageKeywords []string
+	maxQuotaNodeSwitches int
+)
+
+const defaultMaxQuotaNodeSwitches = 5
 
 func resolveModel(model string) string {
 	m := strings.TrimSpace(model)
@@ -1762,12 +1913,18 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		maxAttempts = max401Retries
 	}
 
+	// 免费额度耗尽自动切节点：独立预算（默认 5 个节点），不消耗上游重试次数
+	nodeSwitchPending := false
+	quotaSwitches := 0
+	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
+
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint)
 		if err != nil {
 			return nil, 500, nil, err
 		}
-		client := getHTTPClientForTier(auth.tier())
+		client, nodeFp := getNodeClientForTier(auth.tier(), nodeSwitchPending)
+		nodeSwitchPending = false
 		attemptStart := time.Now()
 		resp, err := client.Do(up)
 		durationMs := time.Since(attemptStart).Milliseconds()
@@ -1822,6 +1979,26 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+		// 免费额度耗尽：标记当前节点 → 强制切下一个节点重试（预算内）
+		if quota, quotaReason := classifyQuota(resp.StatusCode, errBody); quota {
+			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
+				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
+				quotaSwitches++
+				client.CloseIdleConnections()
+				nodeSwitchPending = true
+				refreshOCSession()
+				log.Info("quota_node_switch",
+					"try_model", modelID,
+					"surface", surface,
+					"status", resp.StatusCode,
+					"reason", quotaReason,
+					"switches_done", quotaSwitches,
+					"max_switches", maxQuotaSwitches,
+				)
+				continue
+			}
+			// 预算用尽或直连：不换，按原错误路径返回
+		}
 		nonRetryable := isNonRetryableUpstreamError(resp.StatusCode, errBody)
 		canRetry := !nonRetryable && shouldRetryUpstreamStatus(resp.StatusCode) && attempt+1 < maxAttemptsForUpstreamStatus(resp.StatusCode)
 		retryReason := ""
@@ -1881,12 +2058,18 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		maxAttempts = max401Retries
 	}
 
+	// 免费额度耗尽自动切节点（流式：仅头部非 2xx 时可切；已吐字节不可重试）
+	nodeSwitchPending := false
+	quotaSwitches := 0
+	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
+
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint)
 		if err != nil {
 			return nil, 500, nil, err
 		}
-		client := getHTTPClientForTier(auth.tier())
+		client, nodeFp := getNodeClientForTier(auth.tier(), nodeSwitchPending)
+		nodeSwitchPending = false
 		attemptStart := time.Now()
 		resp, err := client.Do(up)
 		durationMs := time.Since(attemptStart).Milliseconds()
@@ -1931,6 +2114,25 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+		// 免费额度耗尽：标记当前节点 → 强制切下一个节点重试（头部阶段可安全重试）
+		if quota, quotaReason := classifyQuota(resp.StatusCode, errBody); quota {
+			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
+				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
+				quotaSwitches++
+				client.CloseIdleConnections()
+				nodeSwitchPending = true
+				refreshOCSession()
+				log.Info("quota_node_switch",
+					"try_model", modelID,
+					"surface", surface,
+					"status", resp.StatusCode,
+					"reason", quotaReason,
+					"switches_done", quotaSwitches,
+					"max_switches", maxQuotaSwitches,
+				)
+				continue
+			}
+		}
 		nonRetryable := isNonRetryableUpstreamError(resp.StatusCode, errBody)
 		canRetry := !nonRetryable && shouldRetryUpstreamStatus(resp.StatusCode) && attempt+1 < maxAttemptsForUpstreamStatus(resp.StatusCode)
 		retryReason := ""
@@ -4986,20 +5188,27 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 		cfg.ActiveSocks5 = activeSocks5
 		cfg.Socks5PaidDirect = socks5PaidDirect
 		socks5Mu.RUnlock()
+		merged := mergeAppConfig(loadConfig(configPath), cfg)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"model_alias":            cfg.ModelAlias,
-			"reasoning_effort_map":   cfg.ReasoningEffortMap,
-			"force_disable_thinking": cfg.ForceDisableThinking,
-			"socks5_proxies":         cfg.Socks5Proxies,
-			"active_socks5":          cfg.ActiveSocks5,
-			"socks5_paid_direct":     cfg.Socks5PaidDirect,
-			"log_level":              getLogLevelString(),
-			"log_bodies":             getLogBodies(),
+			"model_alias":                   merged.ModelAlias,
+			"reasoning_effort_map":          merged.ReasoningEffortMap,
+			"force_disable_thinking":        merged.ForceDisableThinking,
+			"socks5_proxies":                merged.Socks5Proxies,
+			"active_socks5":                 merged.ActiveSocks5,
+			"socks5_paid_direct":            merged.Socks5PaidDirect,
+			"subscriptions":                 merged.Subscriptions,
+			"manual_nodes":                  merged.ManualNodes,
+			"quota_error_signals":           merged.QuotaErrorSignals,
+			"max_quota_node_switches":       merged.MaxQuotaNodeSwitches,
+			"node_cooldown_exhausted_hours": merged.NodeCooldownExhaustedHours,
+			"node_cooldown_dead_minutes":    merged.NodeCooldownDeadMinutes,
+			"log_level":                     getLogLevelString(),
+			"log_bodies":                    getLogBodies(),
 		})
 	case http.MethodPost:
 		var payload struct {
-			AppConfig
+			configPatch
 			LogLevel  *string `json:"log_level,omitempty"`
 			LogBodies *bool   `json:"log_bodies,omitempty"`
 		}
@@ -5007,11 +5216,13 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, `{"error":"Invalid JSON"}`, http.StatusBadRequest)
 			return
 		}
-		if err := saveConfig(configPath, payload.AppConfig); err != nil {
+		// 合并保存：请求缺省的字段保留文件现存值；显式零值（false/""/0）可清零。
+		next := mergeConfigPatch(loadConfig(configPath), payload.configPatch)
+		if err := saveConfig(configPath, next); err != nil {
 			http.Error(w, `{"error":"Failed to save config"}`, http.StatusInternalServerError)
 			return
 		}
-		applyConfig(payload.AppConfig)
+		applyConfig(next)
 		if payload.LogLevel != nil {
 			setLogLevelString(*payload.LogLevel)
 		}
@@ -5020,9 +5231,11 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		if debugMode {
 			slog.Info("config updated",
-				"aliases", len(payload.ModelAlias),
-				"effort_map", len(payload.ReasoningEffortMap),
-				"force_disable", payload.ForceDisableThinking,
+				"aliases", len(next.ModelAlias),
+				"effort_map", len(next.ReasoningEffortMap),
+				"subscriptions", len(next.Subscriptions),
+				"manual_nodes", len(next.ManualNodes),
+				"force_disable", next.ForceDisableThinking,
 				"log_level", getLogLevelString(),
 				"log_bodies", getLogBodies(),
 			)
@@ -5031,6 +5244,230 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	default:
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// mergeAppConfig 将补丁叠加到基础配置：请求里为零值/空集合的字段保留基础值。
+// configPatch 是面板提交的配置补丁：指针字段区分"缺省"与"显式零值"，
+// 使 false / 空串 / 0 也能被保存（清零语义）。
+type configPatch struct {
+	ModelAlias                 map[string]string    `json:"model_alias"`
+	ReasoningEffortMap         map[string]string    `json:"reasoning_effort_map"`
+	ForceDisableThinking       *bool                `json:"force_disable_thinking"`
+	Socks5Proxies              []Socks5Proxy        `json:"socks5_proxies"`
+	ActiveSocks5               *string              `json:"active_socks5"`
+	Socks5PaidDirect           *bool                `json:"socks5_paid_direct"`
+	Subscriptions              []SubscriptionConfig `json:"subscriptions"`
+	ManualNodes                []ProxyNodeConfig    `json:"manual_nodes"`
+	QuotaErrorSignals          QuotaSignalsConfig   `json:"quota_error_signals"`
+	MaxQuotaNodeSwitches       *int                 `json:"max_quota_node_switches"`
+	NodeCooldownExhaustedHours *int                 `json:"node_cooldown_exhausted_hours"`
+	NodeCooldownDeadMinutes    *int                 `json:"node_cooldown_dead_minutes"`
+}
+
+// mergeAppConfig 将补丁叠加到基础配置（GET 回显与订阅保存共用，AppConfig 语义）。
+func mergeAppConfig(base, patch AppConfig) AppConfig {
+	out := base
+	if patch.ModelAlias != nil {
+		out.ModelAlias = patch.ModelAlias
+	}
+	if patch.ReasoningEffortMap != nil {
+		out.ReasoningEffortMap = patch.ReasoningEffortMap
+	}
+	if patch.Socks5Proxies != nil {
+		out.Socks5Proxies = patch.Socks5Proxies
+	}
+	if patch.Subscriptions != nil {
+		out.Subscriptions = patch.Subscriptions
+	}
+	if patch.ManualNodes != nil {
+		out.ManualNodes = patch.ManualNodes
+	}
+	if patch.QuotaErrorSignals.ErrorTypes != nil {
+		out.QuotaErrorSignals.ErrorTypes = patch.QuotaErrorSignals.ErrorTypes
+	}
+	if patch.QuotaErrorSignals.MessageKeywords != nil {
+		out.QuotaErrorSignals.MessageKeywords = patch.QuotaErrorSignals.MessageKeywords
+	}
+	if patch.Socks5PaidDirect {
+		out.Socks5PaidDirect = true
+	}
+	if patch.ActiveSocks5 != "" {
+		out.ActiveSocks5 = patch.ActiveSocks5
+	}
+	if patch.ForceDisableThinking {
+		out.ForceDisableThinking = true
+	}
+	if patch.MaxQuotaNodeSwitches > 0 {
+		out.MaxQuotaNodeSwitches = patch.MaxQuotaNodeSwitches
+	}
+	if patch.NodeCooldownExhaustedHours > 0 {
+		out.NodeCooldownExhaustedHours = patch.NodeCooldownExhaustedHours
+	}
+	if patch.NodeCooldownDeadMinutes > 0 {
+		out.NodeCooldownDeadMinutes = patch.NodeCooldownDeadMinutes
+	}
+	return out
+}
+
+// mergeConfigPatch 面板 POST：指针字段非 nil 即显式覆盖（含清零）。
+func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
+	out := base
+	if patch.ModelAlias != nil {
+		out.ModelAlias = patch.ModelAlias
+	}
+	if patch.ReasoningEffortMap != nil {
+		out.ReasoningEffortMap = patch.ReasoningEffortMap
+	}
+	if patch.Socks5Proxies != nil {
+		out.Socks5Proxies = patch.Socks5Proxies
+	}
+	if patch.Subscriptions != nil {
+		out.Subscriptions = patch.Subscriptions
+	}
+	if patch.ManualNodes != nil {
+		out.ManualNodes = patch.ManualNodes
+	}
+	if patch.QuotaErrorSignals.ErrorTypes != nil {
+		out.QuotaErrorSignals.ErrorTypes = patch.QuotaErrorSignals.ErrorTypes
+	}
+	if patch.QuotaErrorSignals.MessageKeywords != nil {
+		out.QuotaErrorSignals.MessageKeywords = patch.QuotaErrorSignals.MessageKeywords
+	}
+	if patch.ForceDisableThinking != nil {
+		out.ForceDisableThinking = *patch.ForceDisableThinking
+	}
+	if patch.ActiveSocks5 != nil {
+		out.ActiveSocks5 = *patch.ActiveSocks5
+	}
+	if patch.Socks5PaidDirect != nil {
+		out.Socks5PaidDirect = *patch.Socks5PaidDirect
+	}
+	if patch.MaxQuotaNodeSwitches != nil {
+		out.MaxQuotaNodeSwitches = *patch.MaxQuotaNodeSwitches
+	}
+	if patch.NodeCooldownExhaustedHours != nil {
+		out.NodeCooldownExhaustedHours = *patch.NodeCooldownExhaustedHours
+	}
+	if patch.NodeCooldownDeadMinutes != nil {
+		out.NodeCooldownDeadMinutes = *patch.NodeCooldownDeadMinutes
+	}
+	return out
+}
+
+// nodeAdminView API 视图：只读字段 + 当前/手动标记。
+type nodeAdminView struct {
+	Name          string `json:"name"`
+	Protocol      string `json:"protocol"`
+	Address       string `json:"address"`
+	Port          int    `json:"port"`
+	Fingerprint   string `json:"fingerprint"`
+	State         string `json:"state"`
+	MarkedAt      string `json:"marked_at,omitempty"`
+	CooldownUntil string `json:"cooldown_until,omitempty"`
+	LastError     string `json:"last_error,omitempty"`
+	LastUsedAt    string `json:"last_used_at,omitempty"`
+	Active        bool   `json:"active"`
+	Manual        bool   `json:"manual"`
+}
+
+func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		pick, manual := proxyPool.pickState()
+		nodes := proxyPool.snapshot()
+		out := make([]nodeAdminView, 0, len(nodes))
+		health := map[string]int{"available": 0, "exhausted": 0, "dead": 0}
+		for _, n := range nodes {
+			v := nodeAdminView{
+				Name: n.Name, Protocol: n.Protocol, Address: n.Address, Port: n.Port,
+				Fingerprint: n.Fingerprint, State: n.State.String(),
+				LastError: n.LastError, Active: n.Fingerprint == pick,
+				Manual: n.Fingerprint == manual,
+			}
+			health[v.State]++
+			if !n.MarkedAt.IsZero() {
+				v.MarkedAt = n.MarkedAt.Format(time.RFC3339)
+			}
+			if !n.CooldownUntil.IsZero() {
+				v.CooldownUntil = n.CooldownUntil.Format(time.RFC3339)
+			}
+			if !n.LastUsedAt.IsZero() {
+				v.LastUsedAt = n.LastUsedAt.Format(time.RFC3339)
+			}
+			out = append(out, v)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"active_fp":       pick,
+			"manual_fp":       manual,
+			"healthy":         health["available"],
+			"exhausted_count": health["exhausted"],
+			"dead_count":      health["dead"],
+			"nodes":           out,
+			"subscriptions":   subManager.snapshot(),
+		})
+	case http.MethodPost:
+		var payload struct {
+			Action      string               `json:"action"`
+			Fingerprint string               `json:"fingerprint"`
+			Subs        []SubscriptionConfig `json:"subscriptions"`
+			Nodes       []ProxyNodeConfig    `json:"manual_nodes"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			http.Error(w, `{"error":"Invalid JSON"}`, http.StatusBadRequest)
+			return
+		}
+		resp := map[string]string{"status": "ok", "action": payload.Action}
+		switch payload.Action {
+		case "switch":
+			resp["active_fp"] = proxyPool.manual(payload.Fingerprint)
+		case "reset":
+			if !proxyPool.unmark(payload.Fingerprint) {
+				http.Error(w, `{"error":"node not found"}`, http.StatusNotFound)
+				return
+			}
+		case "reset_all":
+			for _, n := range proxyPool.snapshot() {
+				proxyPool.unmark(n.Fingerprint)
+			}
+		case "reload":
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			defer cancel()
+			n, err := subManager.refreshAll(ctx, true)
+			if err != nil {
+				http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadGateway)
+				return
+			}
+			resp["nodes"] = fmt.Sprintf("%d", n)
+		case "save":
+			// 面板保存订阅源 + 手配节点：合并写盘 → 生效 → 立即刷新池
+			next := mergeAppConfig(loadConfig(configPath), AppConfig{
+				Subscriptions: payload.Subs,
+				ManualNodes:   payload.Nodes,
+			})
+			if err := saveConfig(configPath, next); err != nil {
+				http.Error(w, `{"error":"Failed to save config"}`, http.StatusInternalServerError)
+				return
+			}
+			applyConfig(next)
+			subManager.configure(next.Subscriptions, next.ManualNodes, filepath.Join(filepath.Dir(configPath), ".subscriptions"))
+			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+			n, err := subManager.refreshAll(ctx, true)
+			cancel()
+			if err != nil {
+				http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadGateway)
+				return
+			}
+			resp["nodes"] = fmt.Sprintf("%d", n)
+		default:
+			http.Error(w, `{"error":"unknown action"}`, http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	default:
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
 	}
 }
 
@@ -5071,317 +5508,445 @@ func renderLoginPage(w http.ResponseWriter, msg string) {
 	}
 }
 
-const adminLoginHTML = `<!DOCTYPE html>
-<html lang="zh" data-theme="light">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>登录 — OPENCODE TO API</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-:root{--bg:#f4f6fa;--surface:#fff;--border:#e2e6ed;--text:#1a1d26;--text-sec:#6a7180;--accent:#6c8aff;--accent-hover:#5a78f0;--radius:12px;--radius-sm:8px;--font:'Noto Sans SC',system-ui,-apple-system,sans-serif;--mono:'JetBrains Mono',Consolas,monospace}
-[data-theme="dark"]{--bg:#0c0e14;--surface:#14161e;--border:#252835;--text:#e8eaf0;--text-sec:#8b90a5;--accent:#6c8aff;--accent-hover:#5a78f0}
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.6;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
-body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(ellipse at 30% 20%,rgba(108,138,255,.04) 0%,transparent 50%),radial-gradient(ellipse at 70% 80%,rgba(61,214,140,.03) 0%,transparent 50%);pointer-events:none;z-index:0}
-.container{max-width:400px;width:100%;position:relative;z-index:1}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:36px 32px 32px}
-.logo{display:flex;align-items:center;gap:10px;margin-bottom:6px}
-.logo-mark{width:36px;height:36px;background:linear-gradient(135deg,var(--accent),#8b6cff);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;flex-shrink:0}
-.logo-text{font-size:20px;font-weight:700;letter-spacing:-.5px;background:linear-gradient(135deg,var(--text),var(--text-sec));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.logo-sub{font-size:12px;color:var(--text-sec);margin-top:2px}
-.subtitle{font-size:13px;color:var(--text-sec);margin-bottom:28px;margin-top:4px}
-.field{margin-bottom:16px}
-.field label{display:block;font-size:12px;font-weight:500;color:var(--text-sec);margin-bottom:6px;letter-spacing:.3px}
-.field input{width:100%;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:14px;font-family:var(--mono);background:var(--surface);color:var(--text);transition:border-color .15s,box-shadow .15s}
-.field input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(108,138,255,.1)}
-.msg{display:none;background:rgba(240,96,96,.1);color:#d64545;padding:10px 14px;border-radius:var(--radius-sm);margin-bottom:16px;font-size:13px;text-align:center;border:1px solid rgba(240,96,96,.2)}
-[data-theme="dark"] .msg{color:#f06060}
-.btn{width:100%;padding:10px;border:none;border-radius:var(--radius-sm);font-size:14px;font-weight:600;cursor:pointer;font-family:var(--font);background:var(--accent);color:#fff;transition:background .15s}
-.btn:hover{background:var(--accent-hover)}
-.theme-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
-.theme-toggle{background:transparent;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 12px;cursor:pointer;font-size:13px;color:var(--text-sec);font-family:var(--font);transition:all .15s}
-.theme-toggle:hover{border-color:var(--accent);color:var(--accent)}
-@media(max-width:500px){.card{padding:24px 20px}}
-</style>
-</head>
-<body>
-<div class="container">
-<div class="card">
-<div class="theme-bar">
-<div class="logo">
-<div class="logo-mark">⌨</div>
-<div>
-<div class="logo-text">OPENCODE TO API</div>
-<div class="logo-sub">管理面板</div>
-</div>
-</div>
-<button class="theme-toggle" onclick="toggleTheme()">☀</button>
-</div>
-<div class="subtitle">请输入管理密码以继续</div>
-<div class="msg" id="login-msg"></div>
-<form method="post" action="/login">
-<div class="field">
-<label for="pwd">密码</label>
-<input id="pwd" name="password" type="password" placeholder="输入管理密码" autocomplete="current-password" required>
-</div>
-<button class="btn" type="submit">登录</button>
-</form>
-</div>
-</div>
-<script>
-(function(){var t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark')}})();
-function toggleTheme(){var d=document.documentElement;var n=d.getAttribute('data-theme')==='dark'?'light':'dark';if(n==='dark')d.setAttribute('data-theme','dark');else d.removeAttribute('data-theme');localStorage.setItem('theme',n);document.querySelector('.theme-toggle').textContent=n==='dark'?'🌙':'☀'}
-</script>
-</body>
-</html>`
-
-const adminHTML = `<!DOCTYPE html>
+const adminLoginHTML = `
+<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>OPENCODE TO API 管理面板</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-:root {
-  --bg: #f4f6fa;
-  --surface: #ffffff;
-  --surface-2: #f0f2f7;
-  --border: #e2e6ed;
-  --border-light: #d0d4df;
-  --text: #1a1d26;
-  --text-sec: #6a7180;
-  --text-ter: #9ca3b0;
-  --accent: #6c8aff;
-  --accent-dim: rgba(108,138,255,.08);
-  --accent-hover: #5a78f0;
-  --green: #22a85a;
-  --green-dim: rgba(34,168,90,.08);
-  --green-hover: #1d9850;
-  --orange: #d9600a;
-  --orange-dim: rgba(217,96,10,.08);
-  --orange-hover: #c45507;
-  --red: #dc2626;
-  --red-dim: rgba(220,38,38,.08);
-  --radius: 12px;
-  --radius-sm: 8px;
-  --font: 'Noto Sans SC', system-ui, -apple-system, sans-serif;
-  --mono: 'JetBrains Mono', Consolas, monospace;
-  --glow-a: rgba(108,138,255,.03);
-  --glow-b: rgba(61,214,140,.02);
-  --stats-total-bg: #f0f2f7;
-}
-[data-theme="dark"] {
-  --bg: #0c0e14;
-  --surface: #14161e;
-  --surface-2: #1a1d27;
-  --border: #252835;
-  --border-light: #2e3142;
-  --text: #e8eaf0;
-  --text-sec: #8b90a5;
-  --text-ter: #5c6080;
-  --accent: #6c8aff;
-  --accent-dim: rgba(108,138,255,.12);
-  --accent-hover: #5a78f0;
-  --green: #3dd68c;
-  --green-dim: rgba(61,214,140,.12);
-  --green-hover: #30c47a;
-  --orange: #f0a050;
-  --orange-dim: rgba(240,160,80,.12);
-  --orange-hover: #e09040;
-  --red: #f06060;
-  --red-dim: rgba(240,96,96,.12);
-  --glow-a: rgba(108,138,255,.04);
-  --glow-b: rgba(61,214,140,.03);
-  --stats-total-bg: var(--surface-2);
-}
+:root{--bg:#020617;--surface:#0f172a;--surface-2:#1e293b;--border:#334155;--text:#f8fafc;--text-sec:#94a3b8;--text-ter:#64748b;--accent:#22c55e;--accent-hover:#16a34a;--blue:#6c8aff;--radius:14px;--radius-sm:8px;--mono:'JetBrains Mono',Consolas,monospace}
+[data-theme="light"]{--bg:#f4f6fa;--surface:#ffffff;--surface-2:#f0f2f7;--border:#d0d4df;--text:#1a1d26;--text-sec:#5b6372;--text-ter:#8a92a3;--accent:#16a34a;--accent-hover:#15803d}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.6;min-height:100vh}
-body::before{content:'';position:fixed;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(ellipse at 30% 20%,var(--glow-a) 0%,transparent 50%),radial-gradient(ellipse at 70% 80%,var(--glow-b) 0%,transparent 50%);pointer-events:none;z-index:0}
-.container{max-width:1020px;margin:0 auto;padding:32px 24px;position:relative;z-index:1}
-header{display:flex;align-items:flex-end;gap:16px;margin-bottom:28px;padding-bottom:20px;border-bottom:1px solid var(--border);justify-content:space-between}
-.logo{display:flex;align-items:center;gap:10px}
-.logo-mark{width:36px;height:36px;background:linear-gradient(135deg,var(--accent),#8b6cff);border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;flex-shrink:0}
-.logo-text{font-size:22px;font-weight:700;letter-spacing:-.5px;background:linear-gradient(135deg,var(--text),var(--text-sec));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.logo-sub{font-size:12.5px;color:var(--text-ter);margin-bottom:2px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:22px 24px;transition:border-color .2s}
-.card:hover{border-color:var(--border-light)}
-.card h2{font-size:13px;font-weight:600;margin-bottom:16px;letter-spacing:.2px;display:flex;align-items:center;gap:8px;color:var(--text-sec);text-transform:uppercase}
-.card h2 .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
-.config-grid{display:grid;grid-template-columns:2fr 3fr;gap:16px;margin-top:16px}
-.config-grid .card{margin-bottom:0}
-.full-row{grid-column:1/-1}
-.form-group{margin-bottom:14px}
-.form-group:last-child{margin-bottom:0}
-.form-group label{display:block;font-size:11.5px;font-weight:500;color:var(--text-ter);margin-bottom:5px;letter-spacing:.4px;text-transform:uppercase}
-.form-group input[type="text"],.form-group input[type="url"],.form-group input[type="password"],.form-group textarea,.form-group select,.m-select{width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:13px;font-family:var(--mono);background:var(--surface-2);color:var(--text);transition:border-color .15s,box-shadow .15s}
-.form-group input:focus,.form-group textarea:focus,.form-group select:focus,.m-select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
-.form-group .hint{font-size:11px;color:var(--text-ter);margin-top:4px;line-height:1.4}
-.actions{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}
-.btn{padding:8px 16px;border-radius:var(--radius-sm);font-size:12.5px;font-weight:500;cursor:pointer;border:none;transition:all .15s;font-family:var(--font);white-space:nowrap}
-.btn-primary{background:var(--accent-dim);color:var(--accent)}
-.btn-primary:hover{background:var(--accent);color:#fff}
-.btn-default{background:var(--surface-2);color:var(--text-sec);border:1px solid var(--border)}
-.btn-default:hover{border-color:var(--border-light);color:var(--text)}
-.btn-success{background:var(--green-dim);color:var(--green)}
-.btn-success:hover{background:var(--green);color:#fff}
-.btn-warning{background:var(--orange-dim);color:var(--orange)}
-.btn-warning:hover{background:var(--orange);color:#fff}
-.btn-danger{background:var(--red-dim);color:var(--red)}
-.btn-danger:hover{background:var(--red);color:#fff}
-.tbl{width:100%;border-collapse:collapse;font-size:12.5px}
-.tbl th{text-align:left;font-weight:500;color:var(--text-ter);padding:8px 10px;border-bottom:1px solid var(--border);font-size:11px;letter-spacing:.4px;text-transform:uppercase;white-space:nowrap}
-.tbl td{padding:7px 10px;border-bottom:1px solid var(--border)}
-.tbl tr:last-child td{border-bottom:none}
-.tbl input{width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:12.5px;font-family:var(--mono);background:var(--surface-2);color:var(--text);transition:border-color .15s,box-shadow .15s}
-.tbl input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}
-.tbl .m-select{padding:6px 10px;font-size:12.5px}
-.tbl th:last-child{width:52px}
-.tbl td:last-child{white-space:nowrap;text-align:center}
-#statsTable th:last-child{width:auto}
-#statsTable td:last-child{text-align:left;white-space:nowrap}
-.tbl .btn{padding:4px 10px;font-size:11px;white-space:nowrap}
-#statsTable td:first-child{font-weight:500;color:var(--text)}
-#statsTable td:not(:first-child){font-family:var(--mono);color:var(--text-sec);text-align:left}
-#statsTable tbody tr:hover{background:var(--surface-2)}
-#statsTable thead+tbody tr:last-child td{font-weight:600;color:var(--text);background:var(--stats-total-bg);border-top:1px solid var(--border-light)}
-.stats-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:12px}
-.stats-header .btns{display:flex;gap:6px;align-items:center}
-#toast{position:fixed;top:20px;right:20px;padding:12px 20px;border-radius:var(--radius-sm);font-size:13px;font-weight:500;color:#fff;opacity:0;transition:opacity .25s,transform .25s;z-index:999;transform:translateY(-8px);pointer-events:none;backdrop-filter:blur(8px)}
-#toast.success{background:rgba(61,214,140,.85)}
-#toast.error{background:rgba(240,96,96,.85)}
-#toast.show{opacity:1;transform:translateY(0)}
-.empty-hint{color:var(--text-ter);font-size:13px;padding:28px;text-align:center}
-.think-row{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:12px;transition:border-color .15s}
-.think-row:hover{border-color:var(--border-light)}
-.think-row input[type="checkbox"]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
-.think-row label{font-size:13px;font-weight:500;cursor:pointer;margin:0;color:var(--text)}
-.think-row .hint{font-size:11px;color:var(--text-ter);margin:0 0 0 auto;white-space:nowrap}
-@media(max-width:700px){.config-grid{grid-template-columns:1fr}.container{padding:16px 12px}header{flex-direction:column;align-items:flex-start;gap:8px}}
-.theme-toggle{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 12px;cursor:pointer;font-size:18px;display:flex;align-items:center;justify-content:center;transition:all .15s;color:var(--text-sec);flex-shrink:0;line-height:1}
-.theme-toggle:hover{border-color:var(--border-light);color:var(--text)}
+body{font-family:'Noto Sans SC',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:38px 40px;width:100%;max-width:380px;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+[data-theme="light"] .card{box-shadow:0 20px 60px rgba(15,23,42,.1)}
+.logo{display:flex;align-items:center;gap:12px;margin-bottom:28px}
+.logo-mark{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--accent),#22d3ee);display:flex;align-items:center;justify-content:center;color:#fff}
+.logo-text{font-size:20px;font-weight:700;letter-spacing:-.5px;line-height:1.2}
+.logo-sub{font-size:12px;color:var(--text-ter);font-weight:400}
+.msg{display:none;background:var(--red-d,rgba(239,68,68,.12));color:#f87171;padding:11px 14px;border-radius:var(--radius-sm);margin-bottom:16px;font-size:13px;text-align:center;border:1px solid rgba(239,68,68,.25)}
+.field label{display:block;font-size:12px;font-weight:600;color:var(--text-sec);margin-bottom:7px;letter-spacing:.4px}
+.field input{width:100%;padding:12px 15px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:14.5px;font-family:var(--mono);background:var(--bg);color:var(--text);transition:border-color .15s,box-shadow .15s}
+.field input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(34,197,94,.15)}
+.btn{width:100%;padding:11px;margin-top:18px;border:none;border-radius:var(--radius-sm);font-size:14.5px;font-weight:700;cursor:pointer;font-family:inherit;background:var(--accent);color:#fff;transition:background .15s;letter-spacing:.5px}
+.btn:hover{background:var(--accent-hover)}
+.theme-bar{display:flex;justify-content:flex-end;margin-bottom:14px}
+.theme-toggle{background:transparent;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 12px;cursor:pointer;font-size:13px;color:var(--text-sec);font-family:inherit;transition:all .15s}
+.theme-toggle:hover{border-color:var(--accent);color:var(--accent)}
+.foot{margin-top:22px;text-align:center;font-size:11.5px;color:var(--text-ter);font-family:var(--mono)}
+@media(max-width:500px){.card{padding:30px 24px}}
 </style>
 </head>
 <body>
-<div class="container">
-<header>
-<div class="logo">
-<div class="logo-mark">⌨</div>
-<div>
-<div class="logo-text">OPENCODE TO API</div>
-<div class="logo-sub">OpenCode 免费 API → 兼容格式代理</div>
-</div>
-</div>
-<div style="display:flex;align-items:center;gap:8px">
-<button class="theme-toggle" onclick="toggleTheme()" title="切换主题">☀</button>
-<form method="post" action="/logout" style="margin:0"><button class="theme-toggle" type="submit" title="退出登录" style="font-size:14px">退出</button></form>
-</div>
-</header>
-
 <div class="card">
-<div class="stats-header">
-<h2><span class="dot" style="background:var(--green)"></span>Token 统计</h2>
-<div class="btns">
-<button class="btn btn-success" onclick="reloadConfig()">刷新</button>
-<button class="btn btn-danger" onclick="resetStats()">清空统计</button>
+<div class="theme-bar"><button class="theme-toggle" onclick="toggleTheme()" id="tt">🌙</button></div>
+<div class="logo">
+<div class="logo-mark"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20l6-8h4l-6 8z"/><path d="M4 20h4"/><path d="M12 10V4a2 2 0 00-2-2H4a2 2 0 00-2 2v9"/></svg></div>
+<div><div class="logo-text">OPENCODE TO API</div><div class="logo-sub">管理面板</div></div>
+</div>
+<div class="msg" id="login-msg"></div>
+<form method="post" action="/login">
+<div class="field">
+<label>管理密码</label>
+<input id="pwd" name="password" type="password" placeholder="输入管理密码" autocomplete="current-password" required>
+</div>
+<button class="btn" type="submit">登 录</button>
+</form>
+<div class="foot">默认密码 123456 · 生产部署务必修改 -password</div>
+</div>
+<script>
+(function(){var t=localStorage.getItem('theme')||'dark';document.documentElement.setAttribute('data-theme',t);document.getElementById('tt').textContent=t==='dark'?'🌙':'☀'})();
+function toggleTheme(){var d=document.documentElement;var n=d.getAttribute('data-theme')==='dark'?'light':'dark';d.setAttribute('data-theme',n);localStorage.setItem('theme',n);document.getElementById('tt').textContent=n==='dark'?'🌙':'☀'}
+</script>
+</body>
+</html>
+`
+
+const adminHTML = `
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OPENCODE TO API 管理面板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#020617;--surface:#0f172a;--surface-2:#1e293b;--muted:#1a1e2f;
+  --border:#334155;--border-2:#475569;
+  --text:#f8fafc;--text-sec:#94a3b8;--text-ter:#64748b;
+  --accent:#22c55e;--accent-hover:#16a34a;--accent-dim:rgba(34,197,94,.12);
+  --blue:#6c8aff;--blue-dim:rgba(108,138,255,.12);
+  --orange:#f0a050;--orange-dim:rgba(240,160,80,.12);
+  --red:#ef4444;--red-dim:rgba(239,68,68,.12);
+  --radius:12px;--radius-sm:8px;
+  --font:'Noto Sans SC',-apple-system,BlinkMacSystemFont,sans-serif;
+  --mono:'JetBrains Mono','SFMono-Regular',Consolas,monospace;
+  --shadow:0 8px 30px rgba(0,0,0,.35);
+}
+[data-theme="light"]{
+  --bg:#f4f6fa; --surface:#ffffff; --surface-2:#f0f2f7;
+  --line:#e2e6ed; --border:#d0d4df;
+  --text:#1a1d26; --text-sec:#5b6372; --text-ter:#8a92a3;
+  --accent:#16a34a; --accent-hover:#15803d; --accent-dim:rgba(34,197,94,.1);
+  --blue-dim:rgba(108,138,255,.1);
+  --orange:#d9600a; --orange-dim:rgba(217,96,10,.1);
+  --red:#dc2626; --red-dim:rgba(220,38,38,.1);
+  --shadow:0 8px 30px rgba(15,23,42,.08);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.6;min-height:100vh}
+button{font-family:var(--font)}
+.app{display:flex;min-height:100vh}
+/* ---------- sidebar ---------- */
+.sidebar{width:218px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;padding:20px 12px}
+.brand{display:flex;align-items:center;gap:10px;padding:0 8px 18px;border-bottom:1px solid var(--border);margin-bottom:14px}
+.logo-mark{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),#22d3ee);display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0}
+.logo-text{font-size:16px;font-weight:700;letter-spacing:-.3px;line-height:1.2}
+.logo-sub{font-size:11px;color:var(--text-ter);font-weight:400}
+.nav{display:flex;flex-direction:column;gap:2px;flex:1}
+.nav button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:9px 12px;border:none;border-radius:var(--radius-sm);background:transparent;color:var(--text-sec);font-size:13.5px;font-weight:500;cursor:pointer;transition:background .15s,color .15s}
+.nav button:hover{background:var(--surface-2);color:var(--text)}
+.nav button.active{background:var(--accent-dim);color:var(--accent);font-weight:600}
+.nav button svg{flex-shrink:0}
+.sidebar-foot{border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:8px}
+/* ---------- main ---------- */
+.main{flex:1;min-width:0;padding:26px 30px 60px;max-width:1180px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:22px;padding-bottom:16px;border-bottom:1px solid var(--border)}
+.topbar h1{font-size:19px;font-weight:700;letter-spacing:-.3px;flex:1}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border:none;border-radius:var(--radius-sm);font-size:13px;font-weight:600;cursor:pointer;color:#fff;background:var(--blue);transition:background .15s;white-space:nowrap}
+.btn:hover{background:var(--blue-2,#5a78f0)}
+.btn-success{background:var(--accent)}.btn-success:hover{background:var(--accent-hover)}
+.btn-danger{background:transparent;color:var(--red);border:1px solid var(--red)}.btn-danger:hover{background:var(--red-dim)}
+.btn-ghost{background:var(--surface);color:var(--text-sec);border:1px solid var(--border)}.btn-ghost:hover{color:var(--text);border-color:var(--text-ter)}
+.btn-sm{padding:4px 9px;font-size:12px}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+/* ---------- stat cards ---------- */
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden}
+.stat .k{font-size:12px;color:var(--text-ter);margin-bottom:6px;display:flex;align-items:center;gap:7px}
+.stat .v{font-size:26px;font-weight:700;font-family:var(--mono);letter-spacing:-.5px}
+.stat .v.green{color:var(--accent)}.stat .v.orange{color:var(--orange)}.stat .v.red{color:var(--red)}.stat .v.blue{color:#6c8aff}
+.stat .sub{font-size:11.5px;color:var(--text-ter);margin-top:4px;font-family:var(--mono)}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:16px}
+.card h2{font-size:15px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
+.dot.green{background:var(--accent)}.dot.orange{background:var(--orange)}.dot.blue{background:#6c8aff}.dot.red{background:var(--red)}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px}
+/* ---------- table ---------- */
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-size:11.5px;font-weight:600;color:var(--text-ter);text-transform:uppercase;letter-spacing:.4px;padding:8px 10px;border-bottom:1px solid var(--border)}
+.tbl td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+.tbl tbody tr:last-child td{border-bottom:none}
+.tbl tbody tr.hl{background:var(--accent-dim)}
+.tbl input[type=text],.tbl input[type=password],.tbl input:not([type]),.tbl select{padding:5px 8px;font-size:12.5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);width:100%;min-width:60px}
+.tbl input:focus,.tbl select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}
+.empty-hint{text-align:center;color:var(--text-ter);padding:26px 0;font-size:13px}
+.mono{font-family:var(--mono);font-size:12px}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2.5px 9px;border-radius:999px;font-size:11.5px;font-weight:600;letter-spacing:.2px}
+.badge.available{background:var(--accent-dim);color:var(--accent)}
+.badge.exhausted{background:var(--orange-dim);color:var(--orange)}
+.badge.dead{background:var(--red-dim);color:var(--red)}
+.badge.idle{background:var(--blue-dim);color:#6c8aff}
+/* ---------- forms ---------- */
+.form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
+.field label{display:block;font-size:11.5px;font-weight:600;color:var(--text-sec);margin-bottom:5px;letter-spacing:.2px}
+.field input,.field select{width:100%;padding:8px 11px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:13px;font-family:var(--mono);background:var(--bg);color:var(--text);transition:border-color .15s,box-shadow .15s}
+.field input:focus,.field select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+.field .hint{font-size:11px;color:var(--text-ter);margin-top:4px;line-height:1.4}
+.check{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text-sec);cursor:pointer;user-select:none;padding:6px 0}
+.check input{accent-color:var(--accent);width:15px;height:15px}
+/* ---------- node editor rows ---------- */
+.nedit{display:grid;grid-template-columns:110px 1fr 1fr 90px 240px 60px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.nedit input,.nedit select{padding:5.5px 9px;font-size:12.5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);width:100%}
+.nedit details{margin-top:8px;grid-column:1/-1;font-size:12px}
+.nedit details summary{cursor:pointer;color:var(--text-sec);font-weight:500;letter-spacing:.3px}
+.nedit .extra{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;padding:10px 12px;background:var(--surface-2);border-radius:var(--radius-sm);margin-top:6px}
+.pill{display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);border:1px solid var(--border);border-radius:999px;padding:3px 10px;font-size:12px;font-family:var(--mono);color:var(--text-sec);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pill .x{cursor:pointer;color:var(--text-ter);font-weight:700;padding:0 2px}
+.pill .x:hover{color:var(--red)}
+.filter-chips{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 13px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:var(--text-sec);font-size:12.5px;font-weight:500;cursor:pointer;transition:all .15s}
+.chip:hover{border-color:var(--text-ter);color:var(--text)}
+.chip.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent);font-weight:600}
+/* ---------- misc ---------- */
+.page{display:none}
+.page.active{display:block;animation:fadeIn .18s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+#toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--text);color:var(--bg);padding:10px 22px;border-radius:10px;font-size:13.5px;font-weight:600;opacity:0;pointer-events:none;transition:all .2s;z-index:999}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.error{background:var(--red);color:#fff}
+@media(max-width:900px){.sidebar{width:64px;padding:16px 8px}.nav button span,.brand .txt{display:none}.nav button{justify-content:center}.sidebar-foot .txt{display:none}.main{padding:20px 14px 60px}}
+</style>
+</head>
+<body>
+<div class="app">
+<aside class="sidebar">
+<div class="brand">
+<div class="logo-mark"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20l6-8h4l-6 8z"/><path d="M4 20h4"/><path d="M12 10V4a2 2 0 00-2-2H4a2 2 0 00-2 2v9"/></svg></div>
+<div class="txt-brand"><div class="logo-text">OPENCODE TO API</div><div class="logo-sub">管理面板</div></div>
+</div>
+<nav class="nav" id="nav">
+<button data-page="overview" class="active" onclick="showPage('overview')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg><span>概览</span></button>
+<button data-page="nodes" onclick="showPage('nodes')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="15" cy="15" r="1.2" fill="currentColor"/><path d="M9 15l6-6"/></svg><span>节点池</span></button>
+<button data-page="subs" onclick="showPage('subs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10l3-3h3v14H4z"/><path d="M4 8v11a1 1 0 001 1h15"/></svg><span>订阅与配额</span></button>
+<button data-page="misc" onclick="showPage('misc')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="15" cy="6" r="2.4" fill="var(--surface)"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="18" r="2.4" fill="var(--surface)"/></svg><span>代理与模型</span></button>
+<button data-page="logs" onclick="showPage('logs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg><span>运行日志</span></button>
+</nav>
+<div class="sidebar-foot">
+<button class="btn btn-ghost" onclick="toggleTheme()" style="width:100%;justify-content:center">
+<span class="txt">主题切换</span> <span id="themeIcon">🌙</span>
+</button>
+<form method="post" action="/logout" style="margin:0"><button class="btn btn-ghost" type="submit" style="width:100%;justify-content:center"><span class="txt">退出登录</span></button></form>
+</div>
+</aside>
+<main class="main">
+<div class="topbar">
+<h1 id="pageTitle">概览</h1>
+<button class="btn btn-ghost btn-sm" onclick="reloadConfig()">刷新会话 &amp; 模型</button>
+<button class="btn btn-success btn-sm" onclick="loadAll()">刷新数据</button>
+</div>
+
+<!-- ============ 概览 ============ -->
+<section id="page-overview" class="page active">
+<div class="stats-row">
+<div class="stat"><div class="k"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6c8aff" stroke-width="2" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="#6c8aff"/><circle cx="15" cy="15" r="1.2" fill="#6c8aff"/></svg>节点总数</div><div class="v blue" id="ovTotal">-</div><div class="sub" id="ovActive">当前: -</div></div>
+<div class="stat"><div class="k"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12H4"/><path d="M4 12l5-5M4 12l5 5"/></svg>可用</div><div class="v green" id="ovHealthy">-</div><div class="sub" id="ovManual">当前节点指纹</div></div>
+<div class="stat"><div class="k"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--orange)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>配额冷却</div><div class="v orange" id="ovExhausted">-</div><div class="sub">24h 自动恢复</div></div>
+<div class="stat"><div class="k"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>故障</div><div class="v red" id="ovDead">-</div><div class="sub">60s 后自动重试</div></div>
+</div>
+<div class="card">
+<h2><span class="dot green"></span>Token 统计</h2>
+<div class="actions" style="margin-top:0;margin-bottom:12px">
+<button class="btn btn-ghost btn-sm" onclick="loadStats()">刷新</button>
+<button class="btn btn-danger btn-sm" onclick="resetStats()">清空统计</button>
 <span id="resetStatus" style="font-size:11px;color:var(--text-ter)"></span>
 </div>
+<div style="overflow-x:auto"><table class="tbl" id="statsTable"><thead><tr><th>模型</th><th>请求数</th><th>输入 Token</th><th>输出 Token</th><th>总计</th></tr></thead><tbody><tr><td colspan="5" class="empty-hint">加载中...</td></tr></tbody></table></div>
 </div>
-<div id="statsContent" style="font-size:12.5px">
-<div class="empty-hint">加载中...</div>
-</div>
-</div>
+</section>
 
-<div class="config-grid">
+<!-- ============ 节点池 ============ -->
+<section id="page-nodes" class="page">
+<div class="filter-chips" id="stateChips">
+<button class="chip active" data-f="all" onclick="setFilter('all')">全部</button>
+<button class="chip" data-f="available" onclick="setFilter('available')">可用</button>
+<button class="chip" data-f="exhausted" onclick="setFilter('exhausted')">已耗尽</button>
+<button class="chip" data-f="dead" onclick="setFilter('dead')">故障</button>
+</div>
+<div style="overflow-x:auto"><table class="tbl" id="nodeTable">
+<thead><tr><th style="width:20%">名称</th><th style="width:9%">协议</th><th style="width:10%">状态</th><th style="width:20%">冷却至</th><th style="width:31%">最近错误</th><th style="width:10%"></th></tr></thead>
+<tbody></tbody>
+</table></div>
+<div class="actions">
+<button class="btn btn-success" onclick="reloadSubs()">重新加载订阅</button>
+<button class="btn btn-ghost" onclick="resetAllMarks()">解除全部标记</button>
+<button class="btn btn-ghost" onclick="loadNodes()">刷新节点</button>
+<span id="nodeStatus" style="font-size:11px;color:var(--text-ter)"></span>
+</div>
+</section>
+
+<!-- ============ 订阅与配额 ============ -->
+<section id="page-subs" class="page">
 <div class="card">
-<h2><span class="dot" style="background:var(--orange)"></span>推理力度映射</h2>
-<div style="margin-bottom:12px">
-<table class="tbl" id="effortTable">
-<thead><tr><th style="width:35%">请求值</th><th style="width:42%">映射值</th><th style="width:23%"></th></tr></thead>
+<h2><span class="dot blue"></span>订阅源</h2>
+<p style="font-size:12.5px;color:var(--text-sec);margin:-6px 0 12px">Clash YAML / 行式 URI / base64 包裹。修改后点底部「保存订阅与节点」立即生效。</p>
+<div style="overflow-x:auto"><table class="tbl" id="subTable">
+<thead><tr><th style="width:15%">名称</th><th style="width:34%">URL</th><th style="width:9%">间隔(小时)</th><th style="width:8%">节点数</th><th style="width:20%">上次拉取</th><th style="width:14%"></th></tr></thead>
 <tbody></tbody>
-</table>
+</table></div>
+<div class="actions"><button class="btn btn-primary" onclick="addSub()">添加订阅源</button></div>
 </div>
-<div class="think-row">
-<input type="checkbox" id="force_disable_thinking">
-<label for="force_disable_thinking">强制禁用思考模式</label>
-<span class="hint">移除所有推理内容</span>
-</div>
-<div class="actions">
-<button class="btn btn-primary" onclick="addEffortRow()">添加映射</button>
-<button class="btn btn-success" onclick="saveConfig()">保存全部</button>
-</div>
-</div>
-
 <div class="card">
-<h2><span class="dot" style="background:var(--accent)"></span>模型映射</h2>
-<div style="margin-bottom:12px">
-<table class="tbl" id="aliasTable">
-<thead><tr><th style="width:35%">别名（请求名）</th><th style="width:42%">实际模型（上游名）</th><th style="width:23%"></th></tr></thead>
-<tbody></tbody>
-</table>
+<h2><span class="dot orange"></span>手动配置节点</h2>
+<p style="font-size:12.5px;color:var(--text-sec);margin:-6px 0 12px">与订阅合并进节点池（订阅节点优先按指纹去重）。</p>
+<div id="manualEditors"></div>
+<div class="actions"><button class="btn btn-primary" onclick="addNodeEditor()">添加节点</button></div>
 </div>
-<div class="actions">
-<button class="btn btn-primary" onclick="addAliasRow()">添加别名</button>
-<button class="btn btn-success" onclick="saveConfig()">保存全部</button>
+<div class="card">
+<h2><span class="dot orange"></span>免费额度切换</h2>
+<p style="font-size:12.5px;color:var(--text-sec);margin:-6px 0 14px">免费层请求遇到配额耗尽信号时自动标记当前节点并切换下一个节点重试。</p>
+<div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
+<div class="field"><label>error.type 命中（逗号分隔）</label><input id="q_error_types" placeholder="FreeUsageLimitError, insufficient_quota"></div>
+<div class="field"><label>error.message 关键词（逗号分隔）</label><input id="q_message_kw" placeholder="free usage limit, quota, limit exceeded"></div>
+<div class="field"><label>单请求最大切换次数</label><input id="q_max_switches" type="number" min="0" max="20" value="5"></div>
+<div class="field"><label>耗尽冷却（小时）</label><input id="q_cooldown_h" type="number" min="0" max="168" value="24"></div>
+<div class="field"><label>故障冷却（分钟）</label><input id="q_cooldown_m" type="number" min="0" max="1440" value="1"></div>
 </div>
+<div class="hint" style="font-size:11.5px;color:var(--text-ter);margin-top:8px">403 且无上述签名视为耗尽；429 无签名不视为耗尽。</div>
 </div>
+<div class="actions" style="margin-top:4px">
+<button class="btn btn-success" onclick="saveSubsConfig()">保存订阅与节点</button>
+<button class="btn btn-primary" onclick="saveQuotaConfig()">保存配额设置</button>
+<span id="subSaveStatus" style="font-size:11px;color:var(--text-ter)"></span>
+</div>
+</section>
 
-<div class="card full-row">
-<h2><span class="dot" style="background:var(--accent)"></span>SOCKS5 代理</h2>
-<div style="margin-bottom:12px">
-<table class="tbl" id="socks5Table">
-<thead><tr><th style="width:25%">名称</th><th style="width:28%">地址</th><th style="width:17%">用户名</th><th style="width:17%">密码</th><th style="width:13%"></th></tr></thead>
-<tbody></tbody>
-</table>
+<!-- ============ 代理与模型 ============ -->
+<section id="page-misc" class="page">
+<div class="card">
+<h2><span class="dot orange"></span>推理力度映射</h2>
+<div style="overflow-x:auto;margin-bottom:4px"><table class="tbl" id="effortTable"><thead><tr><th style="width:38%">请求值</th><th style="width:44%">映射值</th><th style="width:18%"></th></tr></thead><tbody></tbody></table></div>
+<div class="check"><input type="checkbox" id="force_disable_thinking"><label for="force_disable_thinking">强制禁用思考模式</label><span class="hint" style="font-size:11px;color:var(--text-ter)">移除所有推理内容</span></div>
+<div class="actions"><button class="btn btn-primary" onclick="addEffortRow()">添加映射</button><button class="btn btn-success" onclick="saveConfig()">保存全部</button></div>
 </div>
-<div class="form-group">
-<label>启用代理</label>
-<select id="activeSocks5" class="m-select">
-<option value="">直连（不使用代理）</option>
-</select>
+<div class="card">
+<h2><span class="dot blue"></span>模型映射</h2>
+<div style="overflow-x:auto"><table class="tbl" id="aliasTable"><thead><tr><th style="width:38%">别名（请求名）</th><th style="width:44%">实际模型（上游名）</th><th style="width:18%"></th></tr></thead><tbody></tbody></table></div>
+<div class="actions"><button class="btn btn-primary" onclick="addAliasRow()">添加别名</button><button class="btn btn-success" onclick="saveConfig()">保存全部</button></div>
 </div>
-<label class="check"><input type="checkbox" id="socks5_paid_direct"> 带 key / 付费请求直连（不走 SOCKS5）</label>
-<p style="margin:6px 0 12px;color:var(--muted);font-size:13px">默认关闭：只要启用了代理，public 与带 key 请求都走 SOCKS5。</p>
-<div class="actions">
-<button class="btn btn-primary" onclick="addSocks5Row()">添加代理</button>
-<button class="btn btn-success" onclick="saveConfig()">保存全部</button>
+<div class="card">
+<h2><span class="dot green"></span>SOCKS5 代理</h2>
+<div style="overflow-x:auto;margin-bottom:12px"><table class="tbl" id="socks5Table"><thead><tr><th style="width:22%">名称</th><th style="width:26%">地址</th><th style="width:16%">用户名</th><th style="width:16%">密码</th><th style="width:12%"></th></tr></thead><tbody></tbody></table></div>
+<div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
+<div class="field"><label>启用代理</label><select id="activeSocks5"><option value="">直连（不使用代理）</option></select></div>
+<div class="field"><label>带 key / 付费请求直连</label><select id="socks5_paid_direct"><option value="0">走代理（默认）</option><option value="1">直连</option></select></div>
+</div>
+<div class="actions"><button class="btn btn-primary" onclick="addSocks5Row()">添加代理</button><button class="btn btn-success" onclick="saveConfig()">保存全部</button></div>
+</div>
+</section>
+<section id="page-logs" class="page">
+<div class="card">
+<h2><span class="dot purple"></span>运行日志</h2>
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0 10px">
+<div class="filter-chips" id="logLevelChips" style="margin:0">
+<button class="chip active" data-l="all" onclick="setLogLevelFilter('all')">全部</button>
+<button class="chip" data-l="DEBUG" onclick="setLogLevelFilter('DEBUG')">Debug</button>
+<button class="chip" data-l="INFO" onclick="setLogLevelFilter('INFO')">Info</button>
+<button class="chip" data-l="WARN" onclick="setLogLevelFilter('WARN')">Warn</button>
+<button class="chip" data-l="ERROR" onclick="setLogLevelFilter('ERROR')">Error</button>
+</div>
+<input id="logKeyword" type="text" placeholder="关键词过滤（消息 / 字段值）" style="flex:1;min-width:180px" oninput="setLogKeyword(this.value)">
+</div>
+<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">
+<label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="logAutoRefresh" checked onchange="toggleLogStream(this.checked)">自动刷新</label>
+<label style="display:flex;align-items:center;gap:6px;font-size:13px">运行级别
+<select id="logRunLevel" onchange="setLogRunLevel(this.value)" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text)">
+<option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option>
+</select></label>
+<button class="btn btn-ghost" onclick="exportLogs()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg> 导出日志</button>
+<span id="logCount" style="font-size:12.5px;color:var(--muted);margin-left:auto">缓冲 0 条 / 显示 0 条</span>
+</div>
+<div id="logList" style="max-height:520px;overflow-y:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;border:1px solid var(--border);border-radius:8px;padding:6px 0;background:var(--bg)"></div>
+<div style="display:flex;align-items:center;margin-top:8px">
+<span id="logStatus" style="font-size:12px;color:var(--muted)">等待日志流…</span>
+<button id="logScrollBtn" class="btn btn-ghost" style="display:none;margin-left:auto" onclick="logScrollToBottom()">回到底部 ↓</button>
 </div>
 </div>
-</div>
+</section>
+</main>
 </div>
 <div id="toast"></div>
 <script>
-let aliasData={},effortData={},modelList=[],socks5Data=[];
-function toggleTheme(){const d=document.documentElement;const cur=d.getAttribute('data-theme');const next=cur==='dark'?null:'dark';if(next)d.setAttribute('data-theme',next);else d.removeAttribute('data-theme');localStorage.setItem('theme',next||'light');document.querySelector('.theme-toggle').textContent=next==='dark'?'🌙':'☀'}
-(function(){const t=localStorage.getItem('theme');if(t==='dark'){document.documentElement.setAttribute('data-theme','dark');document.addEventListener('DOMContentLoaded',()=>{const b=document.querySelector('.theme-toggle');if(b)b.textContent='🌙'})}})();
-function reloadConfig(){const sy=window.scrollY;fetch('/api/reload',{method:'POST'}).then(r=>r.json()).then(d=>{showToast('会话已刷新，模型 '+d.models+' 个','success')}).catch(()=>{}).finally(()=>{loadConfig();loadStats();setTimeout(()=>window.scrollTo(0,sy),100)})}
-async function loadConfig(){const sy=window.scrollY;try{const r=await fetch('/api/config');const cfg=await r.json();document.getElementById('force_disable_thinking').checked=cfg.force_disable_thinking||false;document.getElementById('socks5_paid_direct').checked=!!cfg.socks5_paid_direct;aliasData=cfg.model_alias||{};effortData=cfg.reasoning_effort_map||{};socks5Data=cfg.socks5_proxies||[];const mr=await fetch('/v1/models');const md=await mr.json();modelList=(md.data||[]).map(m=>m.id).sort();renderAliasTable();renderEffortTable();renderSocks5Table();document.getElementById('activeSocks5').value=cfg.active_socks5||'';setTimeout(()=>window.scrollTo(0,sy),0)}catch(e){showToast('失败: '+e.message,'error')}}
-function renderAliasTable(){const tb=document.querySelector('#aliasTable tbody');const ks=Object.keys(aliasData);if(!ks.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置</td></tr>';return}tb.innerHTML=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key"></td><td>'+modelSelectHtml(aliasData[k])+'</td><td><button class="btn btn-danger" onclick="delAlias(this)">删除</button></td></tr>').join('')}
-function modelSelectHtml(selected){let h='<select data-field="val" class="m-select">';h+='<option value="">-- 选择模型 --</option>';for(const m of modelList){h+='<option value="'+esc(m)+'"'+(selected===m?' selected':'')+'>'+esc(m)+'</option>'}h+='</select>';return h}
-function addAliasRow(){const tb=document.querySelector('#aliasTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';tb.insertAdjacentHTML('beforeend','<tr><td><input value="" placeholder="例如: gpt-5.5" data-field="key"></td><td>'+modelSelectHtml('')+'</td><td><button class="btn btn-danger" onclick="delAlias(this)">删除</button></td></tr>')}
-function delAlias(btn){const row=btn.closest('tr');const ki=row.querySelector('[data-field="key"]');if(ki&&ki.value&&aliasData[ki.value])delete aliasData[ki.value];row.remove();if(!Object.keys(aliasData).length)document.querySelector('#aliasTable tbody').innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置</td></tr>'}
-function collectAliases(){const r={};document.querySelectorAll('#aliasTable tbody tr').forEach(tr=>{const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});aliasData=r;return r}
-function renderEffortTable(){const tb=document.querySelector('#effortTable tbody');const ks=Object.keys(effortData);if(!ks.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无映射配置</td></tr>';return}tb.innerHTML=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key"></td><td><input value="'+esc(effortData[k])+'" data-field="val"></td><td><button class="btn btn-danger" onclick="delEffort(this)">删除</button></td></tr>').join('')}
-function addEffortRow(){const tb=document.querySelector('#effortTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';tb.insertAdjacentHTML('beforeend','<tr><td><input value="" placeholder="例如: low" data-field="key"></td><td><input value="" placeholder="例如: high" data-field="val"></td><td><button class="btn btn-danger" onclick="delEffort(this)">删除</button></td></tr>')}
-function delEffort(btn){const row=btn.closest('tr');const ki=row.querySelector('[data-field="key"]');if(ki&&ki.value&&effortData[ki.value])delete effortData[ki.value];row.remove();if(!Object.keys(effortData).length)document.querySelector('#effortTable tbody').innerHTML='<tr><td colspan="3" class="empty-hint">暂无映射配置</td></tr>'}
-function collectEfforts(){const r={};document.querySelectorAll('#effortTable tbody tr').forEach(tr=>{const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});effortData=r;return r}
-function renderSocks5Table(){const tb=document.querySelector('#socks5Table tbody');if(!socks5Data.length){tb.innerHTML='<tr><td colspan="5" class="empty-hint">暂无代理配置</td></tr>';return}tb.innerHTML=socks5Data.map((p,i)=>'<tr><td><input value="'+esc(p.name||'')+'" data-field="name"></td><td><input value="'+esc(p.addr)+'" data-field="addr" placeholder="例如: 127.0.0.1:1080"></td><td><input value="'+esc(p.username||'')+'" data-field="username"></td><td><input value="'+esc(p.password||'')+'" data-field="password" type="password"></td><td><button class="btn btn-danger" onclick="delSocks5('+i+')">删除</button></td></tr>').join('');renderSocks5Select()}
-function addSocks5Row(){const tb=document.querySelector('#socks5Table tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';socks5Data.push({addr:'',name:''});renderSocks5Table()}
-function delSocks5(i){socks5Data.splice(i,1);renderSocks5Table()}
-function collectSocks5(){const r=[];document.querySelectorAll('#socks5Table tbody tr').forEach(tr=>{const a=tr.querySelector('[data-field="addr"]');if(a&&a.value.trim())r.push({addr:a.value.trim(),name:(tr.querySelector('[data-field="name"]')||{}).value?.trim()||'',username:(tr.querySelector('[data-field="username"]')||{}).value?.trim()||'',password:(tr.querySelector('[data-field="password"]')||{}).value?.trim()||''})});socks5Data=r;return r}
-function renderSocks5Select(){const sel=document.getElementById('activeSocks5');const cur=sel.value;sel.innerHTML='<option value="">直连（不使用代理）</option>';socks5Data.forEach(p=>{if(p.addr){const label=p.name?p.name+' ('+p.addr+')':p.addr;const opt=document.createElement('option');opt.value=p.addr;opt.textContent=label;sel.appendChild(opt)}});if(socks5Data.length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cur;if(!sel.value)sel.value='';}
-async function saveConfig(){collectAliases();collectEfforts();collectSocks5();const cfg={model_alias:aliasData,reasoning_effort_map:effortData,force_disable_thinking:document.getElementById('force_disable_thinking').checked,socks5_proxies:socks5Data,active_socks5:document.getElementById('activeSocks5').value,socks5_paid_direct:document.getElementById('socks5_paid_direct').checked};try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)});if(!r.ok)throw new Error(await r.text());showToast('配置已保存','success');loadConfig()}catch(e){showToast('保存失败: '+e.message,'error')}}
-function esc(s){const d=document.createElement('div');d.textContent=s;return d.innerHTML}
-function showToast(msg,t){const e=document.getElementById('toast');e.textContent=msg;e.className=t+' show';clearTimeout(e._tid);e._tid=setTimeout(()=>e.classList.remove('show'),2500)}
-async function resetStats(){if(!confirm('确认清空所有 Token 统计？\n此操作不可撤销。'))return;const s=document.getElementById('resetStatus');s.textContent='清空中...';try{const r=await fetch('/api/stats',{method:'DELETE'});if(!r.ok)throw new Error(await r.text());document.getElementById('statsContent').innerHTML='<div class="empty-hint">暂无数据</div>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000)}catch(e){s.textContent='失败: '+e.message}}
-async function loadStats(){try{const r=await fetch('/api/stats');const d=await r.json();const ms=d.models||{};const ks=Object.keys(ms);let h='<table class="tbl" id="statsTable"><thead><tr><th>模型</th><th>请求数</th><th>输入 Token</th><th>输出 Token</th><th>总计 Token</th></tr></thead><tbody>';if(!ks.length){h+='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>'}else{let tr=0,pt=0,ct=0,tt=0;for(const k of ks){const m=ms[k];h+='<tr><td>'+esc(k)+'</td><td>'+fmt(m.request_count)+'</td><td>'+fmt(m.prompt_tokens)+'</td><td>'+fmt(m.completion_tokens)+'</td><td>'+fmt(m.total_tokens)+'</td></tr>';tr+=m.request_count;pt+=m.prompt_tokens;ct+=m.completion_tokens;tt+=m.total_tokens}h+='<tr><td>总计</td><td>'+fmt(tr)+'</td><td>'+fmt(pt)+'</td><td>'+fmt(ct)+'</td><td>'+fmt(tt)+'</td></tr>'}h+='</tbody></table>';document.getElementById('statsContent').innerHTML=h}catch(e){document.getElementById('statsContent').innerHTML='<div class="empty-hint">加载失败</div>'}}
-function fmt(n){return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')}window.onload=function(){loadConfig();loadStats()};setInterval(loadStats,5000);document.addEventListener('visibilitychange',function(){if(!document.hidden)loadStats()});
+let cfg={},nodeData=[],subData=[],nodeEditors=[],modelList=[],filterState='all';
+/* ---------- 主题：默认深色 ---------- */
+function applyTheme(){const t=localStorage.getItem('theme')||'dark';document.documentElement.setAttribute('data-theme',t);document.getElementById('themeIcon').textContent=t==='dark'?'🌙':'☀'}
+function toggleTheme(){const cur=document.documentElement.getAttribute('data-theme');const next=cur==='dark'?'light':'dark';localStorage.setItem('theme',next);applyTheme()}
+/* ---------- 导航 ---------- */
+const pageTitles={overview:'概览',nodes:'节点池',subs:'订阅与配额',misc:'代理与模型',logs:'运行日志'};
+function showPage(id){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-'+id).classList.add('active');document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===id));document.getElementById('pageTitle').textContent=pageTitles[id]}
+/* ---------- 工具 ---------- */
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
+function fmt(n){return Number(n||0).toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')}
+let toastT;
+function showToast(msg,t){const e=document.getElementById('toast');e.textContent=msg;e.className=t==='error'?'error show':'show';clearTimeout(toastT);toastT=setTimeout(()=>e.classList.remove('show'),2600)}
+/* ---------- 数据加载 ---------- */
+async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats()])}
+async function loadConfig(){try{const r=await fetch('/api/config');if(!r.ok)throw new Error(await r.text());cfg=await r.json();renderConfigEditors()}catch(e){showToast('配置加载失败: '+e.message,'error')}}
+async function loadNodes(){try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=d.subscriptions||[];renderOverview(d);renderNodeTable()}catch(e){document.querySelector('#nodeTable tbody').innerHTML='<tr><td colspan="6" class="empty-hint">加载失败: '+esc(e.message)+'</td></tr>'}}
+async function loadStats(){try{const r=await fetch('/api/stats');const d=await r.json();renderStats(d)}catch(e){document.getElementById('statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">加载失败</td></tr>'}}
+function renderOverview(d){document.getElementById('ovTotal').textContent=d.nodes?d.nodes.length:0;document.getElementById('ovHealthy').textContent=d.healthy??0;document.getElementById('ovExhausted').textContent=d.exhausted_count??0;document.getElementById('ovDead').textContent=d.dead_count??0;document.getElementById('ovActive').textContent=d.active_fp?'当前: '+shortFp(d.active_fp):'直连';document.getElementById('ovManual').textContent=d.manual_fp?shortFp(d.manual_fp):'自动轮询'}
+function shortFp(fp){return fp?fp.slice(0,8):''}
+function renderStats(d){const ms=d.models||{};const ks=Object.keys(ms);let h='';if(!ks.length){h='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>'}else{let tr=0,pt=0,ct=0,tt=0;for(const k of ks){const m=ms[k];h+='<tr><td class="mono">'+esc(k)+'</td><td>'+fmt(m.request_count)+'</td><td>'+fmt(m.prompt_tokens)+'</td><td>'+fmt(m.completion_tokens)+'</td><td>'+fmt(m.total_tokens)+'</td></tr>';tr+=m.request_count;pt+=m.prompt_tokens;ct+=m.completion_tokens;tt+=m.total_tokens}h+='<tr><td style="font-weight:700">总计</td><td style="font-weight:700">'+fmt(tr)+'</td><td style="font-weight:700">'+fmt(pt)+'</td><td style="font-weight:700">'+fmt(ct)+'</td><td style="font-weight:700">'+fmt(tt)+'</td></tr>'}document.getElementById('statsTable').innerHTML='<thead><tr><th>模型</th><th>请求数</th><th>输入 Token</th><th>输出 Token</th><th>总计</th></tr></thead><tbody>'+h+'</tbody>'}
+/* ---------- 节点表 ---------- */
+let filter='all';
+function setFilter(f){filter=f;document.querySelectorAll('#stateChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.f===f));renderNodeTable()}
+const badgeMap={available:'<span class="badge available">可用</span>',exhausted:'<span class="badge exhausted">已耗尽</span>',dead:'<span class="badge dead">故障</span>',idle:'<span class="badge idle">未知</span>'};
+function badgeHtml(s){return badgeMap[s]||badgeMap.idle}
+function fmtTime(t){return t?String(t).replace('T',' ').slice(0,16):'-'}
+function renderNodeTable(){const tb=document.querySelector('#nodeTable tbody');const rows=nodeData.filter(n=>filter==='all'||n.state===filter);if(!rows.length){tb.innerHTML='<tr><td colspan="6" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}tb.innerHTML=rows.map(n=>'<tr class="'+(n.active?'hl':'')+'"><td>'+esc(n.name)+(n.active?' <span style="font-size:11px;color:var(--text-ter)">(当前)</span>':'')+(n.manual?' <span style="font-size:11px;color:var(--accent)">(手动)</span>':'')+'</td><td><span class="mono">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="mono" style="font-size:12px;color:var(--text-sec)">'+esc(fmtTime(n.cooldown_until))+'</td><td class="mono" style="font-size:11.5px;color:var(--text-ter);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(n.last_error||'-')+'</td><td style="white-space:nowrap"><button class="btn btn-success btn-sm" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-ghost btn-sm" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button></td></tr>').join('')}
+async function nodeAction(action,fp){const st=document.getElementById('nodeStatus');st.textContent='操作中...';try{const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action,fingerprint:fp||''})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent=action==='switch'?'已切换':action==='reload'?('订阅已加载，节点 '+d.nodes+' 个'):'已解除';showToast(st.textContent,'success')}catch(e){st.textContent='失败: '+e.message;showToast('操作失败: '+e.message,'error')}finally{loadNodes()}}
+function reloadSubs(){nodeAction('reload','')}
+async function resetAllMarks(){if(!confirm('解除所有节点的耗尽/故障标记？'))return;nodeAction('reset_all','')}
+/* ---------- 订阅编辑 ---------- */
+function renderSubTable(){const tb=document.querySelector('#subTable tbody');if(!subData.length){tb.innerHTML='<tr><td colspan="6" class="empty-hint">暂无订阅源 — 添加 Clash/URI/base64 订阅，或直接用手动配置节点</td></tr>';return}tb.innerHTML=subData.map((s,i)=>'<tr><td><input value="'+esc(s.name||'')+'" data-f="name" placeholder="订阅名"></td><td><input value="'+esc(s.url||'')+'" data-f="url" placeholder="https://..."></td><td><input type="number" min="0" value="'+(s.update_interval_hours||'')+'" data-f="interval" placeholder="24"></td><td class="mono" style="color:var(--text-sec)">'+(s.nodes||0)+'</td><td class="mono" style="font-size:11.5px;color:var(--text-ter)">'+esc(fmtTime(s.last_updated_at))+'</td><td><button class="btn btn-danger btn-sm" onclick="delSub('+i+')">删除</button></td></tr>'+(s.last_error?'<tr><td colspan="6" style="color:var(--red);font-size:12px">'+esc(s.last_error)+'</td></tr>':'')).join('')}
+function addSub(){subData.push({name:'',url:'',update_interval_hours:24});renderSubTable()}
+function delSub(i){subData.splice(i,1);renderSubTable()}
+function collectSubs(){const rows=document.querySelectorAll('#subTable tbody tr');const seen=new Set();const out=[];rows.forEach(tr=>{const nf=tr.querySelector('[data-f="name"]');if(!nf)return;const name=nf.value||'';const u=(tr.querySelector('[data-f="url"]').value||'').trim();const iv=parseInt(tr.querySelector('[data-f="interval"]').value||'0',10)||0;if(!u||seen.has(u))return;seen.add(u);out.push({name:name,url:u,update_interval_hours:iv})});subData=out;return subData}
+/* ---------- 手动节点编辑 ---------- */
+function nodeExtras(p){const ck='<label class="check" style="padding:0"><input type="checkbox" data-f="insecure"> 跳过证书校验</label>';if(p==='vless')return '<div class="field"><label>user_id（UUID）</label><input data-f="user_id" placeholder="uuid"></div><div class="field"><label>flow（留空）</label><input data-f="flow"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="example.com"></div><div class="field"><label>reality public_key</label><input data-f="rp" placeholder=""></div><div class="field"><label>reality short_id</label><input data-f="rs" placeholder=""></div><div class="field"><label>reality spider_x</label><input data-f="rx" placeholder="/"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='ss')return '<div class="field"><label>method（加密）</label><input data-f="method" placeholder="chacha20-ietf-poly1305"></div><div class="field"><label>password</label><input data-f="password" type="password"></div>';if(p==='socks5')return '<div class="field"><label>用户名</label><input data-f="user_id"></div><div class="field"><label>密码</label><input data-f="password" type="password"></div>';if(p==='hysteria2')return '<div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='anytls')return '<div class="field"><label>user_id</label><input data-f="user_id"></div><div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';return ''}
+function renderNodeEditors(){const box=document.getElementById('manualEditors');if(!nodeEditors.length){box.innerHTML='<div class="empty-hint">暂无手动配置节点 — 点下方「添加节点」</div>';return}box.innerHTML=nodeEditors.map((n,i)=>nodeEditorHtml(n,i)).join('')}
+function nodeEditorHtml(n,i){const p=n.protocol||'vless';const protoOpts=['vless','ss','socks5','hysteria2','anytls'].map(x=>'<option value="'+x+'"'+(p===x?' selected':'')+'>'+x+'</option>').join('');return '<div class="nedit" data-i="'+i+'"><select data-f="protocol" onchange="fillExtra('+i+')">'+protoOpts+'</select><input data-f="name" value="'+esc(n.name||'')+'" placeholder="节点名"><input data-f="address" value="'+esc(n.address||'')+'" placeholder="服务器地址"><input data-f="port" type="number" value="'+(n.port||'')+'" placeholder="端口"><button class="btn btn-danger btn-sm" onclick="delNodeEditor('+i+')">删除</button><details><summary>凭据与高级设置</summary><div class="extra" id="extra-'+i+'"></div></details></div>'}
+function fillExtra(i){const row=document.querySelector('#manualEditors .nedit[data-i="'+i+'"]');if(!row)return;const n=nodeEditors[i]||{};const p=row.querySelector('[data-f="protocol"]').value;const box=row.querySelector('#extra-'+i);box.innerHTML=nodeExtras(p);const set=(f,v)=>{const el=box.querySelector('[data-f="'+f+'"]');if(el)el.value=v!=null?v:''};set('user_id',n.user_id);set('password',n.password);set('method',n.method);set('sni',n.sni);set('flow',n.flow);set('rp',(n.reality&&n.reality.public_key)||'');set('rs',(n.reality&&n.reality.short_id)||'');set('rx',(n.reality&&n.reality.spider_x)||'');const ic=box.querySelector('[data-f="insecure"]');if(ic)ic.checked=!!n.insecure}
+function addNodeEditor(){nodeEditors.push({protocol:'vless'});renderNodeEditors();const last=nodeEditors.length-1;fillExtra(last)}
+function delNodeEditor(i){nodeEditors.splice(i,1);renderNodeEditors()}
+function collectNodes(){const out=[];document.querySelectorAll('#manualEditors .nedit').forEach(row=>{const i=+row.dataset.i;const g=f=>row.querySelector('[data-f="'+f+'"]');const address=((g('address')||{}).value||'').trim();if(!address)return;const n={name:(g('name')||{}).value||'',protocol:g('protocol').value,address:address,port:parseInt((g('port')||{}).value||'0',10)||0};for(const f of ['user_id','password','method','sni','flow']){const el=g(f);if(el&&el.value)n[f]=el.value}if(g('insecure')&&g('insecure').checked)n.insecure=true;const rp=((g('rp')||{}).value||'').trim(),rs=((g('rs')||{}).value||'').trim(),rx=((g('rx')||{}).value||'').trim();if(n.protocol==='vless'&&(rp||rs)){n.reality={public_key:rp,short_id:rs,spider_x:rx||'/'}}nodeEditors[i]=n;out.push(n)});return out}
+/* ---------- 配额 ---------- */
+function renderQuota(c){document.getElementById('q_error_types').value=(c.quota_error_signals&&c.quota_error_signals.error_types||[]).join(', ');document.getElementById('q_message_kw').value=(c.quota_error_signals&&c.quota_error_signals.message_keywords||[]).join(', ');document.getElementById('q_max_switches').value=c.max_quota_node_switches||5;document.getElementById('q_cooldown_h').value=c.node_cooldown_exhausted_hours||24;document.getElementById('q_cooldown_m').value=c.node_cooldown_dead_minutes||1}
+function collectQuota(){return{quota_error_signals:{error_types:document.getElementById('q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:document.getElementById('q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(document.getElementById('q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(document.getElementById('q_cooldown_h').value||'24',10),node_cooldown_dead_minutes:parseInt(document.getElementById('q_cooldown_m').value||'1',10)}}
+async function saveSubsConfig(){const st=document.getElementById('subSaveStatus');st.textContent='保存中...';try{collectSubs();const nodes=collectNodes();const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'save',subscriptions:subData,manual_nodes:nodes})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent='已保存，节点 '+d.nodes+' 个';showToast('订阅与节点已保存，节点池已刷新','success')}catch(e){st.textContent='失败: '+e.message;showToast('保存失败: '+e.message,'error')}finally{loadNodes()}}
+async function saveQuotaConfig(){const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(collectQuota())});if(!r.ok){showToast('保存配额失败: '+await r.text(),'error');return}showToast('配额设置已保存','success')}
+/* ---------- 配置编辑（代理与模型） ---------- */
+function modelSelectHtml(selected){let h='<select data-field="val" class="m-select"><option value="">-- 选择模型 --</option>';for(const m of modelList){h+='<option value="'+esc(m)+'"'+(selected===m?' selected':'')+'>'+esc(m)+'</option>'}h+='</select>';return h}
+async function fetchModelList(){try{const m=await fetch('/v1/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(m=>m.id).sort()}}catch(e){}}
+function renderAliasTable(){const tb=document.querySelector('#aliasTable tbody');const ks=Object.keys(cfg.model_alias||{});if(!ks.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置</td></tr>';return}tb.innerHTML=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key"></td><td>'+modelSelectHtml(cfg.model_alias[k])+'</td><td><button class="btn btn-danger btn-sm" onclick="delAlias(this)">删除</button></td></tr>').join('')}
+function addAliasRow(){const tb=document.querySelector('#aliasTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: gpt-5.5" data-field="key"></td><td>'+modelSelectHtml('')+'</td><td><button class="btn btn-danger btn-sm" onclick="delAlias(this)">删除</button></td></tr>';tb.appendChild(tr)}
+function delAlias(b){b.closest('tr').remove()}
+function collectAliases(){const r={};document.querySelectorAll('#aliasTable tbody tr').forEach(tr=>{const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});cfg.model_alias=r;return r}
+function renderEffortTable(){const tb=document.querySelector('#effortTable tbody');const es=Object.keys(cfg.reasoning_effort_map||{});if(!es.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无映射配置</td></tr>';return}tb.innerHTML=es.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key"></td><td><input value="'+esc(cfg.reasoning_effort_map[k])+'" data-field="val"></td><td><button class="btn btn-danger btn-sm" onclick="delEffort(this)">删除</button></td></tr>').join('')}
+function addEffortRow(){const tb=document.querySelector('#effortTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: low" data-field="key"></td><td><input placeholder="例如: high" data-field="val"></td><td><button class="btn btn-danger btn-sm" onclick="delEffort(this)">删除</button></td></tr>';tb.appendChild(tr)}
+function delEffort(b){b.closest('tr').remove()}
+function collectEfforts(){const r={};document.querySelectorAll('#effortTable tbody tr').forEach(tr=>{const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});cfg.reasoning_effort_map=r;return r}
+function renderSocks5Table(){const tb=document.querySelector('#socks5Table tbody');const ps=cfg.socks5_proxies||[];if(!ps.length){tb.innerHTML='<tr><td colspan="5" class="empty-hint">暂无代理配置</td></tr>';return}tb.innerHTML=ps.map((p,i)=>'<tr><td><input value="'+esc(p.name||'')+'" data-field="name"></td><td><input value="'+esc(p.addr)+'" data-field="addr" placeholder="例如: 127.0.0.1:1080"></td><td><input value="'+esc(p.username||'')+'" data-field="username"></td><td><input value="'+esc(p.password||'')+'" data-field="password" type="password"></td><td><button class="btn btn-danger btn-sm" onclick="delSocks5(this)">删除</button></td></tr>').join('')}
+function addSocks5Row(){const tb=document.querySelector('#socks5Table tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input data-field="name"></td><td><input data-field="addr" placeholder="例如: 127.0.0.1:1080"></td><td><input data-field="username"></td><td><input data-field="password" type="password"></td><td><button class="btn btn-danger btn-sm" onclick="delSocks5(this)">删除</button></td></tr>';tb.appendChild(tr)}
+function delSocks5(b){b.closest('tr').remove()}
+function collectSocks5(){const r=[];document.querySelectorAll('#socks5Table tbody tr').forEach(tr=>{const a=tr.querySelector('[data-field="addr"]');if(a&&a.value.trim())r.push({addr:a.value.trim(),name:(tr.querySelector('[data-field="name"]')||{}).value||'',username:(tr.querySelector('[data-field="username"]')||{}).value||'',password:(tr.querySelector('[data-field="password"]')||{}).value||''})});cfg.socks5_proxies=r;return r}
+function renderSocks5Select(){const sel=document.getElementById('activeSocks5');sel.innerHTML='<option value="">直连（不使用代理）</option>';(cfg.socks5_proxies||[]).forEach(p=>{if(p.addr){const opt=document.createElement('option');opt.value=p.addr;opt.textContent=p.name?p.name+' ('+p.addr+')':p.addr;sel.appendChild(opt)}});if((cfg.socks5_proxies||[]).length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cfg.active_socks5||'';document.getElementById('socks5_paid_direct').value=cfg.socks5_paid_direct?'1':'0'}
+async function saveConfig(){collectEfforts();collectAliases();collectSocks5();const body={model_alias:cfg.model_alias,reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:document.getElementById('force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:document.getElementById('activeSocks5').value,socks5_paid_direct:document.getElementById('socks5_paid_direct').value==='1'};try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}}
+async function reloadConfig(){const r=await fetch('/api/reload',{method:'POST'});const d=await r.json();showToast('会话已刷新，模型 '+d.models+' 个','success')}
+async function resetStats(){if(!confirm('确认清空所有 Token 统计？此操作不可撤销。'))return;const s=document.getElementById('resetStatus');s.textContent='清空中...';try{const r=await fetch('/api/stats',{method:'DELETE'});if(!r.ok)throw new Error(await r.text());document.getElementById('statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000)}catch(e){s.textContent='失败: '+e.message}}
+/* ---------- 渲染入口 ---------- */
+function renderConfigEditors(){subData=(cfg.subscriptions||[]).map(s=>({...s}));nodeEditors=(cfg.manual_nodes||[]).map(n=>({...n}));renderAliasTable();renderEffortTable();renderSocks5Table();renderSocks5Select();renderQuota(cfg);renderSubTable();renderNodeEditors();document.getElementById('force_disable_thinking').checked=!!cfg.force_disable_thinking}
+applyTheme();window.onload=async function(){await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats()]);renderConfigEditors()};
+setInterval(()=>{if(document.getElementById('page-overview').classList.contains('active'))loadStats()},5000);
+
+/* ---------- 运行日志 ---------- */
+let logBuf=[],logES=null,logLastSeq=0,logFilterLevel='all',logKeyword='',logStick=true;
+const logListEl=document.getElementById('logList');
+const LOG_MAX_BUF=2000;
+function setLogLevelFilter(l){logFilterLevel=l;document.querySelectorAll('#logLevelChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.l===l));renderLogs()}
+function setLogKeyword(v){logKeyword=(v||'').toLowerCase();renderLogs()}
+function logMatches(e){if(logFilterLevel!=='all'&&e.level!==logFilterLevel)return false;if(!logKeyword)return true;if((e.msg||'').toLowerCase().includes(logKeyword))return true;return (e.attrs||[]).some(a=>String(a.v).toLowerCase().includes(logKeyword))}
+function renderLogs(){const rows=[];for(const e of logBuf){if(!logMatches(e))continue;rows.push(e)}logListEl.innerHTML=rows.map(logRowHtml).join('');const total=logBuf.length;const shown=rows.length;document.getElementById('logCount').textContent='缓冲 '+total+' 条 / 显示 '+shown+' 条';updateLogStick();logListEl.scrollTop=logListEl.scrollHeight}
+function logRowHtml(e){const dbg=e.level==='DEBUG'?'color:var(--muted)':'';return '<div class="log-line" data-seq="'+e.seq+'" style="padding:1px 10px;display:flex;gap:8px;align-items:baseline;'+(e.level==='ERROR'?'background:rgba(220,38,38,.08)':e.level==='WARN'?'background:rgba(234,179,8,.07)':'')+'">'+
+'<span style="color:var(--muted);white-space:nowrap;flex:none">'+fmtTime(e.time)+'</span>'+
+'<span class="log-lv" data-lv="'+e.level+'" style="flex:none;width:48px;font-weight:600;'+logLvColor(e.level)+'">'+e.level+'</span>'+
+'<span class="log-msg" style="white-space:pre-wrap;word-break:break-all">'+esc(e.msg||'')+'</span>'+
+(e.attrs&&e.attrs.length?'<button class="btn btn-ghost" style="padding:0 4px;flex:none" onclick="toggleLogAttrs('+e.seq+',this)">'+e.attrs.length+' 字段</button>':'')+
+'</div>'+(e.attrs&&e.attrs.length?'<div class="log-attrs" id="la-'+e.seq+'" style="display:none;padding:0 10px 2px 66px;color:var(--muted);font-size:12px">'+e.attrs.map(a=>'<span style="margin-right:10px"><b style="color:var(--accent)">'+esc(a.k)+'</b>='+esc(a.v)+'</span>').join('')+'</div>':'')}
+function logLvColor(l){switch(l){case 'ERROR':return 'color:var(--red)';case 'WARN':return 'color:var(--warning)';case 'DEBUG':return 'color:var(--muted)';default:return 'color:var(--green)'}}
+function toggleLogAttrs(seq,btn){const el=document.getElementById('la-'+seq);if(!el)return;const open=el.style.display!=='none';el.style.display=open?'none':'block';btn.textContent=(open?'':'隐藏 ')+el.querySelectorAll('span').length+' 字段'}
+function fmtTime(iso){const d=new Date(iso);const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
+function onLogEntry(e){if(e.seq<=logLastSeq)return;logLastSeq=e.seq;if(logBuf.length>=LOG_MAX_BUF)logBuf.shift();logBuf.push(e);if(logMatches(e)){logListEl.insertAdjacentHTML('beforeend',logRowHtml(e));}
+updateLogCount();updateLogStick();document.getElementById('logStatus').textContent='实时 · seq '+logLastSeq}
+function updateLogCount(){document.getElementById('logCount').textContent='缓冲 '+logBuf.length+' 条 / 显示 '+logListEl.querySelectorAll('.log-line').length+' 条'}
+function updateLogStick(){if(logStick)logListEl.scrollTop=logListEl.scrollHeight;document.getElementById('logScrollBtn').style.display=logStick?'none':'inline-block'}
+logListEl.addEventListener('scroll',()=>{const el=logListEl;logStick=(el.scrollTop+el.clientHeight>=el.scrollHeight-40);document.getElementById('logScrollBtn').style.display=logStick?'none':'inline-block'});
+function logScrollToBottom(){logStick=true;logListEl.scrollTop=logListEl.scrollHeight;document.getElementById('logScrollBtn').style.display='none'}
+function initLogs(){fetch('/api/config').then(r=>r.json()).then(c=>{const lv=c.log_level||'info';const sel=document.getElementById('logRunLevel');if(sel.value!==lv)sel.value=lv}).catch(()=>{});toggleLogStream(document.getElementById('logAutoRefresh').checked)}
+function toggleLogStream(on){const sel=document.getElementById('logAutoRefresh');if(sel&&sel.checked!==on)sel.checked=on;if(on){if(logES)return;logES=new EventSource('/api/logs/stream');logES.onmessage=ev=>{try{onLogEntry(JSON.parse(ev.data))}catch(_){}};logES.onerror=()=>{document.getElementById('logStatus').textContent='连接中断，重连中…';logES=null;setTimeout(()=>{if(sel&&sel.checked)toggleLogStream(true)},2000)};document.getElementById('logStatus').textContent='已连接'}else if(logES){logES.close();logES=null;document.getElementById('logStatus').textContent='已暂停'}}
+function setLogRunLevel(v){fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({log_level:v})}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status)}).then(()=>showToast('日志级别已切换为 '+v,'success')).catch(e=>showToast('切换级别失败: '+e.message,'error'))}
+function exportLogs(){const a=document.createElement('a');a.href='/api/logs/export';a.download='opencode2api-logs.txt';document.body.appendChild(a);a.click();a.remove()}
+initLogs();
 </script>
 </body>
-</html>`
+</html>
+`
 
 // ======================== Main ========================
 
@@ -5415,6 +5980,11 @@ func main() {
 	if err := saveConfig(configPath, cfg); err != nil {
 		slog.Warn("failed to save config", "path", configPath, "error", err)
 	}
+
+	// 订阅管理器：缓存 + 状态与配置文件同目录
+	cacheDir := filepath.Join(filepath.Dir(configPath), ".subscriptions")
+	subManager.configure(cfg.Subscriptions, cfg.ManualNodes, cacheDir)
+	startSubscriptionTicker()
 
 	loadTokenStats()
 	slog.Info("config loaded", "path", configPath)
@@ -5460,7 +6030,11 @@ func main() {
 	mux.HandleFunc("/login", loggingMiddleware(loginHandler))
 	mux.HandleFunc("/logout", loggingMiddleware(logoutHandler))
 	mux.HandleFunc("/api/config", loggingMiddleware(requireAuth(adminConfigHandler)))
+	mux.HandleFunc("/api/nodes", loggingMiddleware(requireAuth(adminNodesHandler)))
 	mux.HandleFunc("/api/stats", loggingMiddleware(requireAuth(adminStatsHandler)))
+	mux.HandleFunc("/api/logs", loggingMiddleware(requireAuth(adminLogsHandler)))
+	mux.HandleFunc("/api/logs/stream", loggingMiddleware(requireAuth(adminLogsHandler)))
+	mux.HandleFunc("/api/logs/export", loggingMiddleware(requireAuth(adminLogsHandler)))
 	mux.HandleFunc("/api/reload", loggingMiddleware(requireAuth(reloadHandler)))
 	mux.HandleFunc("/health", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
