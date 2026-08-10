@@ -11,8 +11,10 @@
 - Anthropic Messages 兼容接口：`/v1/messages`
 - 流式 SSE 转换和 token 用量统计
 - 模型别名、reasoning effort 映射、强制禁用 thinking
-- SOCKS5 直连、指定代理和轮询代理
-- Web 管理面板：配置、统计、刷新上游会话
+- 订阅/手配节点池（vless/reality、ss、hysteria2、anytls、socks5）：进程内直连，无需 mihomo 子进程
+- 免费额度耗尽自动切换节点（FreeUsageLimitError 等），标记机制 + 24h 冷却
+- SOCKS5 直连、指定代理和轮换代理
+- Web 管理面板：配置、统计、刷新上游会话、节点池管理（切换/解除标记/重新加载订阅）
 - GitHub Actions 自动构建 Linux、macOS、Windows、FreeBSD 多平台 release
 - GitHub Actions 自动发布 Docker 镜像到 GHCR
 
