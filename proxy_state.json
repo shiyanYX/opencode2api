@@ -1,0 +1,16 @@
+{
+  "nodes": {
+    "54a312a0511922448e684272f0de88ea": {
+      "state": "available",
+      "marked_at": "0001-01-01T00:00:00Z",
+      "cooldown_until": "0001-01-01T00:00:00Z",
+      "last_used_at": "0001-01-01T00:00:00Z"
+    },
+    "66cf7c7f921e5f4f406a6aa8b0877654": {
+      "state": "available",
+      "marked_at": "0001-01-01T00:00:00Z",
+      "cooldown_until": "0001-01-01T00:00:00Z",
+      "last_used_at": "0001-01-01T00:00:00Z"
+    }
+  }
+}
