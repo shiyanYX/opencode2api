@@ -184,7 +184,7 @@ func initLogger() *slog.Logger {
 		Level:       logLevelVar,
 		ReplaceAttr: redactLogAttr,
 	})
-	logger := slog.New(handler)
+	logger := slog.New(newCaptureHandler(handler))
 	slog.SetDefault(logger)
 
 	attrs := []any{
@@ -257,7 +257,7 @@ func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		log := reqLogger(ctx)
-		quiet := r.URL.Path == "/health" || r.URL.Path == "/"
+		quiet := r.URL.Path == "/health" || r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/api/logs")
 		if quiet {
 			log.Debug("request_started",
 				"method", r.Method,
