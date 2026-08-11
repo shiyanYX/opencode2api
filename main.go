@@ -439,17 +439,28 @@ func refreshOCSession() {
 // ======================== 模型 ========================
 
 type ModelInfo struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	OwnedBy string `json:"owned_by"`
+	ID              string   `json:"id"`
+	Object          string   `json:"object"`
+	Created         int64    `json:"created"`
+	OwnedBy         string   `json:"owned_by"`
+	ContextWindow   *int64   `json:"context_window,omitempty"`
+	MaxOutputTokens *int64   `json:"max_output_tokens,omitempty"`
+	InputModalities []string `json:"input_modalities,omitempty"`
+}
+
+type ModelLimit struct {
+	Context         int64
+	Output          int64
+	InputModalities []string
 }
 
 var (
-	modelsCache   []ModelInfo
-	goModelsCache []ModelInfo
-	modelMu       sync.RWMutex
-	modelsLoaded  bool
+	modelsCache    []ModelInfo
+	goModelsCache  []ModelInfo
+	modelMu        sync.RWMutex
+	modelsLoaded   bool
+	modelsDevMu    sync.RWMutex
+	modelsDevCache map[string]ModelLimit
 )
 
 func fetchModels() ([]ModelInfo, error) {
@@ -502,6 +513,62 @@ func fetchGoModels() ([]ModelInfo, error) {
 		models = append(models, ModelInfo{ID: m.ID, Object: "model", Created: now, OwnedBy: "opencode"})
 	}
 	return models, nil
+}
+
+// fetchModelsDevCatalog 抓取 models.dev 模型目录，构建模型 ID → 上下文/输出上限索引。
+// opencode 上游模型的 limit 元数据（context/output）仅在 models.dev 发布，上游 models 接口不提供。
+func fetchModelsDevCatalog() (map[string]ModelLimit, error) {
+	req, _ := http.NewRequest("GET", "https://models.dev/api.json", nil)
+	resp, err := getHTTPClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	var result map[string]struct {
+		Models map[string]struct {
+			Modalities struct {
+				Input []string `json:"input"`
+			} `json:"modalities"`
+			Limit struct {
+				Context int64 `json:"context"`
+				Output  int64 `json:"output"`
+			} `json:"limit"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+	out := make(map[string]ModelLimit)
+	for _, provider := range result {
+		for id, m := range provider.Models {
+			if m.Limit.Context > 0 && m.Limit.Output > 0 {
+				out[id] = ModelLimit{Context: m.Limit.Context, Output: m.Limit.Output, InputModalities: m.Modalities.Input}
+			}
+		}
+	}
+	return out, nil
+}
+
+func lookupModelLimit(modelID string) (ModelLimit, bool) {
+	modelsDevMu.RLock()
+	defer modelsDevMu.RUnlock()
+	limit, ok := modelsDevCache[modelID]
+	return limit, ok
+}
+
+func refreshModelsDevCatalog(logOK bool) {
+	cat, err := fetchModelsDevCatalog()
+	if err != nil {
+		slog.Error("models.dev catalog refresh failed", "error", err)
+		return
+	}
+	modelsDevMu.Lock()
+	modelsDevCache = cat
+	modelsDevMu.Unlock()
+	if logOK {
+		slog.Info("models.dev catalog loaded", "count", len(cat))
+	}
 }
 
 func containsModelWithID(models []ModelInfo, modelID string) bool {
@@ -602,6 +669,13 @@ func startModelRefresh() {
 	}()
 }
 
+// startModelsDevRefresh 启动时异步加载一次 models.dev 目录（上下文/输出上限元数据），不阻塞监听
+func startModelsDevRefresh() {
+	go func() {
+		refreshModelsDevCatalog(true)
+	}()
+}
+
 // ======================== 结构化日志 ========================
 
 type contextKey string
@@ -623,6 +697,7 @@ var (
 	modelAlias           = map[string]string{}
 	reasoningEffortMap   = map[string]string{}
 	forceDisableThinking bool
+	apiKey               string // 统一网关密钥（config.api_key），空 = 不启用
 	debugMode            bool
 	configMu             sync.RWMutex
 	storedResponses      = map[string]StoredResponseState{}
@@ -782,6 +857,9 @@ type AppConfig struct {
 	ModelAlias           map[string]string `json:"model_alias"`
 	ReasoningEffortMap   map[string]string `json:"reasoning_effort_map"`
 	ForceDisableThinking bool              `json:"force_disable_thinking"`
+	// ApiKey 统一网关密钥：客户端用它通过鉴权并按付费档获取全量模型；
+	// 留空时退回现状（任意有效 sk- key 或免密钥免费档）。
+	ApiKey string `json:"api_key,omitempty"`
 	Socks5Proxies        []Socks5Proxy     `json:"socks5_proxies,omitempty"`
 	ActiveSocks5         string            `json:"active_socks5,omitempty"`
 	// Socks5PaidDirect controls whether keyed/paid upstream calls bypass SOCKS5.
@@ -961,6 +1039,7 @@ func applyConfig(cfg AppConfig) {
 		reasoningEffortMap = cfg.ReasoningEffortMap
 	}
 	forceDisableThinking = cfg.ForceDisableThinking
+	apiKey = cfg.ApiKey
 
 	socks5Mu.Lock()
 	if cfg.Socks5Proxies != nil {
@@ -1782,6 +1861,14 @@ func extractUpstreamAuth(r *http.Request) UpstreamAuth {
 	if rest, ok := strings.CutPrefix(token, "zen:"); ok && isValidOpenCodeKey(rest) {
 		return UpstreamAuth{Token: rest, Mode: AuthRouteZen, Source: source}
 	}
+	// 统一网关密钥（config.api_key）：客户端用它通过工具 UI 的密钥校验，
+	// 网关只认这一把 key；上游仍按 public 免费档转发，不产生新的档位语义。
+	configMu.RLock()
+	unified := apiKey
+	configMu.RUnlock()
+	if unified != "" && token == unified {
+		return UpstreamAuth{Mode: AuthRoutePublic, Source: source}
+	}
 	// 只有 sk- 开头的才是有效 key，其余（no-key-required 等占位符）一律走 public
 	if isValidOpenCodeKey(token) {
 		return UpstreamAuth{Token: token, Mode: AuthRouteAuto, Source: source}
@@ -1969,7 +2056,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			b, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if readErr != nil {
-				return nil, 0, nil, readErr
+				return nil, http.StatusBadGateway, nil, readErr
 			}
 			if isAnthropicFormat(b) {
 				b = convertAnthropicToOpenAI(b, modelID)
@@ -2045,6 +2132,9 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		"final_status", lastStatus,
 		"fallback_used", false,
 	)
+	if lastStatus < 200 {
+		lastStatus = http.StatusBadGateway
+	}
 	return lastBody, lastStatus, lastHeader, lastErr
 }
 
@@ -2534,6 +2624,16 @@ func replaceModelIDsWithAliases(models []ModelInfo, aliases map[string]string) [
 			visibleModel.ID = visibleID
 			if visibleID != model.ID {
 				visibleModel.OwnedBy = "alias"
+			}
+			// 从 models.dev 目录填充上下文/输出上限/输入模态（按真实上游 ID 查，alias 名兜底）
+			if limit, ok := lookupModelLimit(model.ID); ok {
+				ctx, out := limit.Context, limit.Output
+				visibleModel.ContextWindow, visibleModel.MaxOutputTokens = &ctx, &out
+				visibleModel.InputModalities = limit.InputModalities
+			} else if limit, ok := lookupModelLimit(publicFacingModelID(model.ID)); ok {
+				ctx, out := limit.Context, limit.Output
+				visibleModel.ContextWindow, visibleModel.MaxOutputTokens = &ctx, &out
+				visibleModel.InputModalities = limit.InputModalities
 			}
 			result = append(result, visibleModel)
 			seen[visibleID] = struct{}{}
@@ -5236,6 +5336,7 @@ func reloadHandler(w http.ResponseWriter, r *http.Request) {
 		modelMu.Unlock()
 		slog.Info("go catalog refreshed", "count", len(goFetched))
 	}
+	refreshModelsDevCatalog(false)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"status":  "ok",
@@ -5274,6 +5375,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"node_cooldown_dead_minutes":    merged.NodeCooldownDeadMinutes,
 			"node_health_interval_minutes":  merged.NodeHealthIntervalMinutes,
 			"node_health_probe_url":         merged.NodeHealthProbeURL,
+			"api_key":                      merged.ApiKey,
 			"log_level":                     getLogLevelString(),
 			"log_bodies":                    getLogBodies(),
 		})
@@ -5336,6 +5438,7 @@ type configPatch struct {
 	NodeCooldownDeadMinutes    *int                 `json:"node_cooldown_dead_minutes"`
 	NodeHealthIntervalMinutes  *int                 `json:"node_health_interval_minutes"`
 	NodeHealthProbeURL         *string              `json:"node_health_probe_url"`
+	ApiKey                     *string              `json:"api_key"`
 }
 
 // mergeAppConfig 将补丁叠加到基础配置（GET 回显与订阅保存共用，AppConfig 语义）。
@@ -5436,6 +5539,9 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	}
 	if patch.NodeHealthProbeURL != nil {
 		out.NodeHealthProbeURL = *patch.NodeHealthProbeURL
+	}
+	if patch.ApiKey != nil {
+		out.ApiKey = *patch.ApiKey
 	}
 	return out
 }
@@ -5834,6 +5940,10 @@ button{font-family:var(--font)}
 </div>
 <div style="overflow-x:auto"><table class="tbl" id="statsTable"><thead><tr><th>模型</th><th>请求数</th><th>输入 Token</th><th>输出 Token</th><th>总计</th></tr></thead><tbody><tr><td colspan="5" class="empty-hint">加载中...</td></tr></tbody></table></div>
 </div>
+<div class="card">
+<h2><span class="dot blue"></span>模型能力</h2>
+<div style="overflow-x:auto"><table class="tbl" id="capTable"><thead><tr><th>模型</th><th>上下文窗口</th><th>最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载中...</td></tr></tbody></table></div>
+</div>
 </section>
 
 <!-- ============ 节点池 ============ -->
@@ -5863,7 +5973,7 @@ button{font-family:var(--font)}
 <h2><span class="dot blue"></span>订阅源</h2>
 <p style="font-size:12.5px;color:var(--text-sec);margin:-6px 0 12px">Clash YAML / 行式 URI / base64 包裹。修改后点底部「保存订阅与节点」立即生效。</p>
 <div style="overflow-x:auto"><table class="tbl" id="subTable">
-<thead><tr><th style="width:15%">名称</th><th style="width:34%">URL</th><th style="width:9%">间隔(小时)</th><th style="width:8%">节点数</th><th style="width:20%">上次拉取</th><th style="width:14%"></th></tr></thead>
+<thead><tr><th style="width:13%">名称</th><th style="width:28%">URL</th><th style="width:8%">间隔(小时)</th><th style="width:7%">节点数</th><th style="width:16%">流量</th><th style="width:14%">上次拉取</th><th style="width:14%"></th></tr></thead>
 <tbody></tbody>
 </table></div>
 <div class="actions"><button class="btn btn-primary" onclick="addSub()">添加订阅源</button></div>
@@ -5919,6 +6029,29 @@ button{font-family:var(--font)}
 </div>
 <div class="actions"><button class="btn btn-primary" onclick="addSocks5Row()">添加代理</button><button class="btn btn-success" onclick="saveConfig()">保存全部</button></div>
 </div>
+<div class="card">
+<h2><span class="dot purple"></span>统一网关</h2>
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px">
+<div class="gw-box" style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--bg)">
+<div class="gw-label" style="font-size:11.5px;color:var(--text-ter);margin-bottom:5px">统一 API 地址</div>
+<button class="gw-copy" onclick="copyText(location.protocol+'//'+location.host+'/v1','统一 API 地址')" style="display:flex;align-items:center;gap:6px;background:none;border:none;padding:0;cursor:pointer;color:var(--accent,#3b82f6);font-family:var(--mono);font-size:12.5px" title="点击复制">
+<code id="gwAddress"></code><span style="font-size:11px;opacity:.75">⧉ 复制</span>
+</button>
+<div style="font-size:11px;color:var(--text-ter);margin-top:4px">客户端 base_url 填此地址（自动取当前访问域名/端口）</div>
+</div>
+<div class="gw-box" style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--bg)">
+<div class="gw-label" style="font-size:11.5px;color:var(--text-ter);margin-bottom:5px">统一密钥</div>
+<button class="gw-copy" onclick="copyText(document.getElementById('apiKeyShow').dataset.v||'', '统一密钥')" style="display:flex;align-items:center;gap:6px;background:none;border:none;padding:0;cursor:pointer;color:var(--text);font-family:var(--mono);font-size:12.5px" title="点击复制">
+<code id="apiKeyShow"></code><span style="font-size:11px;opacity:.75">⧉ 复制</span>
+</button>
+<div style="font-size:11px;color:var(--text-ter);margin-top:4px">API key 填此值；留空 = 不启用（无 key 访问仍可用）</div>
+</div>
+</div>
+<div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-top:12px">
+<div class="field"><label>修改 api_key（统一密钥）</label><div style="display:flex;gap:8px"><input id="apiKeyInput" type="password" placeholder="留空 = 不启用" autocomplete="off"><button class="btn" onclick="genApiKey()" title="随机生成一把 sk- 开头的密钥">生成</button></div><span class="hint" style="font-size:11px;color:var(--text-ter)">客户端/工具统一填这把 key 即可通过密钥校验；上游仍走 public 免费档</span></div>
+</div>
+<div class="actions"><button class="btn btn-success" onclick="saveConfig()">保存全部</button></div>
+</div>
 </section>
 <section id="page-logs" class="page">
 <div class="card">
@@ -5965,13 +6098,18 @@ function esc(s){const d=document.createElement('div');d.textContent=s==null?'':S
 function fmt(n){return Number(n||0).toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')}
 let toastT;
 function showToast(msg,t){const e=document.getElementById('toast');e.textContent=msg;e.className=t==='error'?'error show':'show';clearTimeout(toastT);toastT=setTimeout(()=>e.classList.remove('show'),2600)}
+function copyText(text,label){if(!text){showToast('暂无可复制内容','error');return}const done=()=>showToast('已复制'+label,'success');if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(done).catch(()=>fallbackCopy(text,done))}else{fallbackCopy(text,done)}}
+function fallbackCopy(text,done){const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch{showToast('复制失败，请手动复制','error')}document.body.removeChild(ta)}
 /* ---------- 数据加载 ---------- */
-async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),fetchModelList()]);renderAliasTable()}
+async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),loadCaps(),fetchModelList()]);renderAliasTable()}
 async function loadConfig(){try{const r=await fetch('/api/config');if(!r.ok)throw new Error(await r.text());cfg=await r.json();renderConfigEditors()}catch(e){showToast('配置加载失败: '+e.message,'error')}}
 async function loadNodes(){try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=d.subscriptions||[];renderOverview(d);renderNodeTable()}catch(e){document.querySelector('#nodeTable tbody').innerHTML='<tr><td colspan="6" class="empty-hint">加载失败: '+esc(e.message)+'</td></tr>'}}
 async function loadStats(){try{const r=await fetch('/api/stats');const d=await r.json();renderStats(d)}catch(e){document.getElementById('statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">加载失败</td></tr>'}}
 function renderOverview(d){document.getElementById('ovTotal').textContent=d.nodes?d.nodes.length:0;document.getElementById('ovHealthy').textContent=d.healthy??0;document.getElementById('ovExhausted').textContent=d.exhausted_count??0;document.getElementById('ovDead').textContent=d.dead_count??0;document.getElementById('ovActive').textContent=d.active_name?('当前: '+d.active_name):(d.active_fp?'当前: '+shortFp(d.active_fp):'直连');document.getElementById('ovManual').textContent=d.manual_name?('手动: '+d.manual_name):(d.manual_fp?shortFp(d.manual_fp):'自动轮询')}
 function shortFp(fp){return fp?fp.slice(0,8):''}
+function fmtTokens(n){if(n==null||isNaN(n))return '-';if(n>=1000000)return (n/1000000).toFixed(n%1000000===0?0:1)+'M';if(n>=1000)return (n/1000).toFixed(n%1000===0?0:1)+'K';return ''+n}
+function fmtModalities(list){if(!list||!list.length)return '-';const names={text:'文本',image:'图像',audio:'音频',video:'视频',pdf:'PDF'};return list.map(m=>names[m]||m).join(' / ')}
+async function loadCaps(){try{const r=await fetch('/v1/models');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();const rows=(d.data||[]).map(x=>({id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities})).filter(x=>x.id);rows.sort((a,b)=>a.id.localeCompare(b.id));let h='';if(!rows.length){h='<tr><td colspan="4" class="empty-hint">暂无模型数据</td></tr>'}else{for(const m of rows){h+='<tr><td class="mono">'+esc(m.id)+'</td><td>'+fmtTokens(m.cw)+'</td><td>'+fmtTokens(m.mo)+'</td><td>'+fmtModalities(m.mod)+'</td></tr>'}}document.getElementById('capTable').innerHTML='<thead><tr><th>模型</th><th>上下文窗口</th><th>最大输出</th><th>输入类型</th></tr></thead><tbody>'+h+'</tbody>'}catch(e){document.getElementById('capTable').innerHTML='<thead><tr><th>模型</th><th>上下文窗口</th><th>最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载失败: '+esc(e.message)+'</td></tr></tbody>'}}
 function renderStats(d){const ms=d.models||{};const ks=Object.keys(ms);let h='';if(!ks.length){h='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>'}else{let tr=0,pt=0,ct=0,tt=0;for(const k of ks){const m=ms[k];h+='<tr><td class="mono">'+esc(k)+'</td><td>'+fmt(m.request_count)+'</td><td>'+fmt(m.prompt_tokens)+'</td><td>'+fmt(m.completion_tokens)+'</td><td>'+fmt(m.total_tokens)+'</td></tr>';tr+=m.request_count;pt+=m.prompt_tokens;ct+=m.completion_tokens;tt+=m.total_tokens}h+='<tr><td style="font-weight:700">总计</td><td style="font-weight:700">'+fmt(tr)+'</td><td style="font-weight:700">'+fmt(pt)+'</td><td style="font-weight:700">'+fmt(ct)+'</td><td style="font-weight:700">'+fmt(tt)+'</td></tr>'}document.getElementById('statsTable').innerHTML='<thead><tr><th>模型</th><th>请求数</th><th>输入 Token</th><th>输出 Token</th><th>总计</th></tr></thead><tbody>'+h+'</tbody>'}
 /* ---------- 节点表 ---------- */
 let filter='all';
@@ -5985,18 +6123,20 @@ function reloadSubs(){nodeAction('reload','')}
 function probeAll(){nodeAction('probe','')}
 async function resetAllMarks(){if(!confirm('解除所有节点的耗尽/故障标记？'))return;nodeAction('reset_all','')}
 /* ---------- 订阅编辑 ---------- */
-function renderSubTable(){const tb=document.querySelector('#subTable tbody');if(!subData.length){tb.innerHTML='<tr><td colspan="6" class="empty-hint">暂无订阅源 — 添加 Clash/URI/base64 订阅，或直接用手动配置节点</td></tr>';return}tb.innerHTML=subData.map((s,i)=>'<tr><td><input value="'+esc(s.name||'')+'" data-f="name" placeholder="订阅名"></td><td><input value="'+esc(s.url||'')+'" data-f="url" placeholder="https://..."></td><td><input type="number" min="0" value="'+(s.update_interval_hours||'')+'" data-f="interval" placeholder="24"></td><td class="mono" style="color:var(--text-sec)">'+(s.nodes||0)+'</td><td class="mono" style="font-size:11.5px;color:var(--text-ter)">'+esc(fmtTime(s.last_updated_at))+'</td><td><button class="btn btn-danger btn-sm" onclick="delSub('+i+')">删除</button></td></tr>'+(s.last_error?'<tr><td colspan="6" style="color:var(--red);font-size:12px">'+esc(s.last_error)+'</td></tr>':'')).join('')}
+function renderSubTable(){const tb=document.querySelector('#subTable tbody');if(!subData.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">暂无订阅源 — 添加 Clash/URI/base64 订阅，或直接用手动配置节点</td></tr>';return}tb.innerHTML=subData.map((s,i)=>'<tr><td><input value="'+esc(s.name||'')+'" data-f="name" placeholder="订阅名"></td><td><input value="'+esc(s.url||'')+'" data-f="url" placeholder="https://..."></td><td><input type="number" min="0" value="'+(s.update_interval_hours||'')+'" data-f="interval" placeholder="24"></td><td class="mono" style="color:var(--text-sec)">'+(s.nodes||0)+'</td><td class="mono" style="font-size:11.5px;color:var(--text-sec)">'+subUsageHtml(s)+'</td><td class="mono" style="font-size:11.5px;color:var(--text-ter)">'+esc(fmtTime(s.last_updated_at))+'</td><td><button class="btn btn-danger btn-sm" onclick="delSub('+i+')">删除</button></td></tr>'+(s.last_error?'<tr><td colspan="7" style="color:var(--red);font-size:12px">'+esc(s.last_error)+'</td></tr>':'')).join('')}
+function subUsageHtml(s){if(!s.usage_total&&!s.usage_used&&!s.usage_expire)return '-';let parts=[];if(s.usage_total||s.usage_used)parts.push(fmtBytes(s.usage_used)+' / '+fmtBytes(s.usage_total));if(s.usage_expire)parts.push('到期 '+new Date(s.usage_expire*1000).toLocaleDateString());return parts.join(' ')}
+function fmtBytes(b){b=Number(b)||0;if(b<=0)return '0B';const u=['B','KB','MB','GB','TB'];let i=0;while(b>=1024&&i<u.length-1){b/=1024;i++}return (b>=100?b.toFixed(0):b.toFixed(1))+u[i]}
 function addSub(){subData.push({name:'',url:'',update_interval_hours:24});renderSubTable()}
 function delSub(i){subData.splice(i,1);renderSubTable()}
 function collectSubs(){const rows=document.querySelectorAll('#subTable tbody tr');const seen=new Set();const out=[];rows.forEach(tr=>{const nf=tr.querySelector('[data-f="name"]');if(!nf)return;const name=nf.value||'';const u=(tr.querySelector('[data-f="url"]').value||'').trim();const iv=parseInt(tr.querySelector('[data-f="interval"]').value||'0',10)||0;if(!u||seen.has(u))return;seen.add(u);out.push({name:name,url:u,update_interval_hours:iv})});subData=out;return subData}
 /* ---------- 手动节点编辑 ---------- */
-function nodeExtras(p){const ck='<label class="check" style="padding:0"><input type="checkbox" data-f="insecure"> 跳过证书校验</label>';if(p==='vless')return '<div class="field"><label>user_id（UUID）</label><input data-f="user_id" placeholder="uuid"></div><div class="field"><label>flow（留空）</label><input data-f="flow"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="example.com"></div><div class="field"><label>reality public_key</label><input data-f="rp" placeholder=""></div><div class="field"><label>reality short_id</label><input data-f="rs" placeholder=""></div><div class="field"><label>reality spider_x</label><input data-f="rx" placeholder="/"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='ss')return '<div class="field"><label>method（加密）</label><input data-f="method" placeholder="chacha20-ietf-poly1305"></div><div class="field"><label>password</label><input data-f="password" type="password"></div>';if(p==='socks5')return '<div class="field"><label>用户名</label><input data-f="user_id"></div><div class="field"><label>密码</label><input data-f="password" type="password"></div>';if(p==='hysteria2')return '<div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='anytls')return '<div class="field"><label>user_id</label><input data-f="user_id"></div><div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';return ''}
+function nodeExtras(p){const ck='<label class="check" style="padding:0"><input type="checkbox" data-f="insecure"> 跳过证书校验</label>';if(p==='vless')return '<div class="field"><label>user_id（UUID）</label><input data-f="user_id" placeholder="uuid"></div><div class="field"><label>flow（留空）</label><input data-f="flow"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="example.com"></div><div class="field"><label>reality public_key</label><input data-f="rp" placeholder=""></div><div class="field"><label>reality short_id</label><input data-f="rs" placeholder=""></div><div class="field"><label>reality spider_x</label><input data-f="rx" placeholder="/"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='vmess')return '<div class="field"><label>user_id（UUID）</label><input data-f="user_id" placeholder="uuid"></div><div class="field"><label>security（auto/none/aes-128-gcm）</label><input data-f="security" placeholder="auto"></div><div class="field"><label>network（tcp/ws）</label><input data-f="network" placeholder="tcp"></div><div class="field"><label>path（ws 时）</label><input data-f="path"></div><div class="field"><label>host（ws 时）</label><input data-f="host"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label class="check" style="padding:0"><input type="checkbox" data-f="tls"> TLS 加密</label></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='trojan')return '<div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label>network（tcp/ws）</label><input data-f="network" placeholder="tcp"></div><div class="field"><label>path（ws 时）</label><input data-f="path"></div><div class="field"><label>host（ws 时）</label><input data-f="host"></div><div class="field"><label class="check" style="padding:0"><input type="checkbox" data-f="tls"> TLS 加密</label></div><div class="field"><label>reality public_key</label><input data-f="rp" placeholder=""></div><div class="field"><label>reality short_id</label><input data-f="rs" placeholder=""></div><div class="field"><label>reality spider_x</label><input data-f="rx" placeholder="/"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='ss')return '<div class="field"><label>method（加密）</label><input data-f="method" placeholder="chacha20-ietf-poly1305"></div><div class="field"><label>password</label><input data-f="password" type="password"></div>';if(p==='socks5')return '<div class="field"><label>用户名</label><input data-f="user_id"></div><div class="field"><label>密码</label><input data-f="password" type="password"></div>';if(p==='hysteria2')return '<div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='anytls')return '<div class="field"><label>user_id</label><input data-f="user_id"></div><div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';return ''}
 function renderNodeEditors(){const box=document.getElementById('manualEditors');if(!nodeEditors.length){box.innerHTML='<div class="empty-hint">暂无手动配置节点 — 点下方「添加节点」</div>';return}box.innerHTML=nodeEditors.map((n,i)=>nodeEditorHtml(n,i)).join('')}
-function nodeEditorHtml(n,i){const p=n.protocol||'vless';const protoOpts=['vless','ss','socks5','hysteria2','anytls'].map(x=>'<option value="'+x+'"'+(p===x?' selected':'')+'>'+x+'</option>').join('');return '<div class="nedit" data-i="'+i+'"><select data-f="protocol" onchange="fillExtra('+i+')">'+protoOpts+'</select><input data-f="name" value="'+esc(n.name||'')+'" placeholder="节点名"><input data-f="address" value="'+esc(n.address||'')+'" placeholder="服务器地址"><input data-f="port" type="number" value="'+(n.port||'')+'" placeholder="端口"><button class="btn btn-danger btn-sm" onclick="delNodeEditor('+i+')">删除</button><details><summary>凭据与高级设置</summary><div class="extra" id="extra-'+i+'"></div></details></div>'}
-function fillExtra(i){const row=document.querySelector('#manualEditors .nedit[data-i="'+i+'"]');if(!row)return;const n=nodeEditors[i]||{};const p=row.querySelector('[data-f="protocol"]').value;const box=row.querySelector('#extra-'+i);box.innerHTML=nodeExtras(p);const set=(f,v)=>{const el=box.querySelector('[data-f="'+f+'"]');if(el)el.value=v!=null?v:''};set('user_id',n.user_id);set('password',n.password);set('method',n.method);set('sni',n.sni);set('flow',n.flow);set('rp',(n.reality&&n.reality.public_key)||'');set('rs',(n.reality&&n.reality.short_id)||'');set('rx',(n.reality&&n.reality.spider_x)||'');const ic=box.querySelector('[data-f="insecure"]');if(ic)ic.checked=!!n.insecure}
+function nodeEditorHtml(n,i){const p=n.protocol||'vless';const protoOpts=['vless','vmess','trojan','ss','socks5','hysteria2','anytls'].map(x=>'<option value="'+x+'"'+(p===x?' selected':'')+'>'+x+'</option>').join('');return '<div class="nedit" data-i="'+i+'"><select data-f="protocol" onchange="fillExtra('+i+')">'+protoOpts+'</select><input data-f="name" value="'+esc(n.name||'')+'" placeholder="节点名"><input data-f="address" value="'+esc(n.address||'')+'" placeholder="服务器地址"><input data-f="port" type="number" value="'+(n.port||'')+'" placeholder="端口"><button class="btn btn-danger btn-sm" onclick="delNodeEditor('+i+')">删除</button><details><summary>凭据与高级设置</summary><div class="extra" id="extra-'+i+'"></div></details></div>'}
+function fillExtra(i){const row=document.querySelector('#manualEditors .nedit[data-i="'+i+'"]');if(!row)return;const n=nodeEditors[i]||{};const p=row.querySelector('[data-f="protocol"]').value;const box=row.querySelector('#extra-'+i);box.innerHTML=nodeExtras(p);const set=(f,v)=>{const el=box.querySelector('[data-f="'+f+'"]');if(el)el.value=v!=null?v:''};set('user_id',n.user_id);set('password',n.password);set('method',n.method);set('sni',n.sni);set('flow',n.flow);set('network',n.network);set('security',n.security);set('path',n.path);set('host',n.host);set('rp',(n.reality&&n.reality.public_key)||'');set('rs',(n.reality&&n.reality.short_id)||'');set('rx',(n.reality&&n.reality.spider_x)||'');const ic=box.querySelector('[data-f="insecure"]');if(ic)ic.checked=!!n.insecure;const tls=box.querySelector('[data-f="tls"]');if(tls)tls.checked=!!n.tls}
 function addNodeEditor(){nodeEditors.push({protocol:'vless'});renderNodeEditors();const last=nodeEditors.length-1;fillExtra(last)}
 function delNodeEditor(i){nodeEditors.splice(i,1);renderNodeEditors()}
-function collectNodes(){const out=[];document.querySelectorAll('#manualEditors .nedit').forEach(row=>{const i=+row.dataset.i;const g=f=>row.querySelector('[data-f="'+f+'"]');const address=((g('address')||{}).value||'').trim();if(!address)return;const n={name:(g('name')||{}).value||'',protocol:g('protocol').value,address:address,port:parseInt((g('port')||{}).value||'0',10)||0};for(const f of ['user_id','password','method','sni','flow']){const el=g(f);if(el&&el.value)n[f]=el.value}if(g('insecure')&&g('insecure').checked)n.insecure=true;const rp=((g('rp')||{}).value||'').trim(),rs=((g('rs')||{}).value||'').trim(),rx=((g('rx')||{}).value||'').trim();if(n.protocol==='vless'&&(rp||rs)){n.reality={public_key:rp,short_id:rs,spider_x:rx||'/'}}nodeEditors[i]=n;out.push(n)});return out}
+function collectNodes(){const out=[];document.querySelectorAll('#manualEditors .nedit').forEach(row=>{const i=+row.dataset.i;const g=f=>row.querySelector('[data-f="'+f+'"]');const address=((g('address')||{}).value||'').trim();if(!address)return;const n={name:(g('name')||{}).value||'',protocol:g('protocol').value,address:address,port:parseInt((g('port')||{}).value||'0',10)||0};for(const f of ['user_id','password','method','sni','flow','network','security','path','host']){const el=g(f);if(el&&el.value)n[f]=el.value}if(g('insecure')&&g('insecure').checked)n.insecure=true;if(g('tls')&&g('tls').checked)n.tls=true;const rp=((g('rp')||{}).value||'').trim(),rs=((g('rs')||{}).value||'').trim(),rx=((g('rx')||{}).value||'').trim();if((n.protocol==='vless'||n.protocol==='trojan')&&(rp||rs)){n.reality={public_key:rp,short_id:rs,spider_x:rx||'/'}}nodeEditors[i]=n;out.push(n)});return out}
 /* ---------- 配额 ---------- */
 function renderQuota(c){document.getElementById('q_error_types').value=(c.quota_error_signals&&c.quota_error_signals.error_types||[]).join(', ');document.getElementById('q_message_kw').value=(c.quota_error_signals&&c.quota_error_signals.message_keywords||[]).join(', ');document.getElementById('q_max_switches').value=c.max_quota_node_switches||5;document.getElementById('q_cooldown_h').value=c.node_cooldown_exhausted_hours||24;document.getElementById('q_cooldown_m').value=c.node_cooldown_dead_minutes||1;document.getElementById('q_health_interval').value=c.node_health_interval_minutes||15;document.getElementById('q_health_url').value=c.node_health_probe_url||''}
 function collectQuota(){return{quota_error_signals:{error_types:document.getElementById('q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:document.getElementById('q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(document.getElementById('q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(document.getElementById('q_cooldown_h').value||'24',10),node_cooldown_dead_minutes:parseInt(document.getElementById('q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(document.getElementById('q_health_interval').value||'15',10),node_health_probe_url:document.getElementById('q_health_url').value.trim()}}
@@ -6018,12 +6158,14 @@ function addSocks5Row(){const tb=document.querySelector('#socks5Table tbody');if
 function delSocks5(b){b.closest('tr').remove()}
 function collectSocks5(){const r=[];document.querySelectorAll('#socks5Table tbody tr').forEach(tr=>{const a=tr.querySelector('[data-field="addr"]');if(a&&a.value.trim())r.push({addr:a.value.trim(),name:(tr.querySelector('[data-field="name"]')||{}).value||'',username:(tr.querySelector('[data-field="username"]')||{}).value||'',password:(tr.querySelector('[data-field="password"]')||{}).value||''})});cfg.socks5_proxies=r;return r}
 function renderSocks5Select(){const sel=document.getElementById('activeSocks5');sel.innerHTML='<option value="">直连（不使用代理）</option>';(cfg.socks5_proxies||[]).forEach(p=>{if(p.addr){const opt=document.createElement('option');opt.value=p.addr;opt.textContent=p.name?p.name+' ('+p.addr+')':p.addr;sel.appendChild(opt)}});if((cfg.socks5_proxies||[]).length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cfg.active_socks5||'';document.getElementById('socks5_paid_direct').value=cfg.socks5_paid_direct?'1':'0'}
-async function saveConfig(){collectEfforts();collectAliases();collectSocks5();const body={model_alias:cfg.model_alias,reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:document.getElementById('force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:document.getElementById('activeSocks5').value,socks5_paid_direct:document.getElementById('socks5_paid_direct').value==='1'};try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}}
+async function saveConfig(){collectEfforts();collectAliases();collectSocks5();const body={model_alias:cfg.model_alias,reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:document.getElementById('force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:document.getElementById('activeSocks5').value,socks5_paid_direct:document.getElementById('socks5_paid_direct').value==='1',api_key:document.getElementById('apiKeyInput').value};try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}}
 async function reloadConfig(){const r=await fetch('/api/reload',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');showToast('会话已刷新，模型 '+((d.models??d.free)||0)+' 个','success');fetchModelList().then(()=>renderAliasTable())}
 async function resetStats(){if(!confirm('确认清空所有 Token 统计？此操作不可撤销。'))return;const s=document.getElementById('resetStatus');s.textContent='清空中...';try{const r=await fetch('/api/stats',{method:'DELETE'});if(!r.ok)throw new Error(await r.text());document.getElementById('statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000)}catch(e){s.textContent='失败: '+e.message}}
 /* ---------- 渲染入口 ---------- */
-function renderConfigEditors(){subData=(cfg.subscriptions||[]).map(s=>({...s}));nodeEditors=(cfg.manual_nodes||[]).map(n=>({...n}));renderAliasTable();renderEffortTable();renderSocks5Table();renderSocks5Select();renderQuota(cfg);renderSubTable();renderNodeEditors();document.getElementById('force_disable_thinking').checked=!!cfg.force_disable_thinking}
-applyTheme();window.onload=async function(){await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats()]);renderConfigEditors()};
+function renderConfigEditors(){subData=(cfg.subscriptions||[]).map(s=>({...s}));nodeEditors=(cfg.manual_nodes||[]).map(n=>({...n}));renderAliasTable();renderEffortTable();renderSocks5Table();renderSocks5Select();renderQuota(cfg);renderSubTable();renderNodeEditors();document.getElementById('force_disable_thinking').checked=!!cfg.force_disable_thinking;document.getElementById('apiKeyInput').value=cfg.api_key||'';syncGatewayBox()}
+function syncGatewayBox(){const a=document.getElementById('gwAddress');if(a)a.textContent=location.protocol+'//'+location.host+'/v1';const s=document.getElementById('apiKeyShow');if(s){const v=(cfg.api_key||document.getElementById('apiKeyInput').value||'');s.dataset.v=v;s.textContent=v||'未启用（留空）';s.style.opacity=v?'1':'.5'}}
+function genApiKey(){const b=new Uint8Array(24);if(window.crypto&&crypto.getRandomValues){crypto.getRandomValues(b)}else{for(let i=0;i<b.length;i++)b[i]=Math.floor(Math.random()*256)}let k='';const chars='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';for(let i=0;i<b.length;i++)k+=chars[b[i]%chars.length];const el=document.getElementById('apiKeyInput');el.value='sk-'+k;syncGatewayBox();showToast('已生成，点保存生效','info')}
+applyTheme();window.onload=async function(){await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats(),loadCaps()]);renderConfigEditors()};
 setInterval(()=>{if(document.getElementById('page-overview').classList.contains('active'))loadStats()},5000);
 
 /* ---------- 运行日志 ---------- */
@@ -6122,6 +6264,7 @@ func main() {
 		slog.Info("go catalog loaded", "count", len(goModels))
 	}
 	startModelRefresh()
+	startModelsDevRefresh()
 	slog.Info("server starting",
 		"port", port,
 		"log_level", getLogLevelString(),
