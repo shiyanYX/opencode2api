@@ -63,16 +63,24 @@ type RealityConfig struct {
 // ProxyNode 表示一个出口代理节点。凭据部分为配置期数据，状态部分为运行时数据。
 type ProxyNode struct {
 	Name     string         `json:"name"`               // 显示名，订阅节点通常为 "订阅名::节点名"
-	Protocol string         `json:"protocol"`           // socks5 | ss | vless | anytls | hy2
+	Protocol string         `json:"protocol"`           // socks5 | ss | vless | vmess | trojan | anytls | hy2
 	Address  string         `json:"address"`            // 服务器地址（IP 或域名）
 	Port     int            `json:"port"`               // 服务器端口
-	UserID   string         `json:"user_id,omitempty"`  // vless uuid / socks5 用户名
-	Password string         `json:"password,omitempty"` // ss/anytls/hy2 密码、socks5 密码
+	UserID   string         `json:"user_id,omitempty"`  // vless/vmess uuid / socks5 用户名
+	Password string         `json:"password,omitempty"` // ss/trojan/anytls/hy2 密码、socks5 密码
 	Method   string         `json:"method,omitempty"`   // ss 加密方式
 	SNI      string         `json:"sni,omitempty"`      // TLS server name
 	Flow     string         `json:"flow,omitempty"`     // vless flow（仅支持空 ""）
 	Insecure bool           `json:"insecure,omitempty"` // 跳过 TLS 证书校验
 	Reality  *RealityConfig `json:"reality,omitempty"`
+
+	// vmess/trojan 传输与安全选项
+	Network  string `json:"network,omitempty"`  // tcp | ws（默认 tcp）
+	Path     string `json:"path,omitempty"`     // ws path
+	Host     string `json:"host,omitempty"`     // ws Host 头
+	AlterIDs uint16 `json:"alter_id,omitempty"` // vmess alterId
+	Security string `json:"security,omitempty"` // vmess 加密: auto/aes-128-gcm/chacha20-poly1305/zero/none
+	TLS      bool   `json:"tls,omitempty"`      // 是否 TLS 包裹
 
 	Fingerprint string `json:"-"` // 跨订阅去重与状态挂载键
 
@@ -100,6 +108,13 @@ type ProxyNodeConfig struct {
 	Flow     string `json:"flow,omitempty"`
 	Insecure bool   `json:"insecure,omitempty"`
 
+	Network  string `json:"network,omitempty"`
+	Path     string `json:"path,omitempty"`
+	Host     string `json:"host,omitempty"`
+	AlterIDs uint16 `json:"alter_id,omitempty"`
+	Security string `json:"security,omitempty"`
+	TLS      bool   `json:"tls,omitempty"`
+
 	Reality *RealityConfig `json:"reality,omitempty"`
 }
 
@@ -123,6 +138,12 @@ func (c ProxyNodeConfig) toNode() *ProxyNode {
 		SNI:      c.SNI,
 		Flow:     c.Flow,
 		Insecure: c.Insecure,
+		Network:  strings.ToLower(c.Network),
+		Path:     c.Path,
+		Host:     c.Host,
+		AlterIDs: c.AlterIDs,
+		Security: c.Security,
+		TLS:      c.TLS,
 	}
 	if c.Reality != nil {
 		r := *c.Reality
@@ -138,8 +159,9 @@ func computeFingerprint(n *ProxyNode) string {
 	if n.Reality != nil {
 		rk, sid, fpr = n.Reality.PublicKey, n.Reality.ShortID, n.Reality.Fingerprint
 	}
-	fmt.Fprintf(h, "%s|%s|%d|%s|%s|%s|%s|%t|%s|%s|%s|%s",
-		n.Protocol, strings.ToLower(n.Address), n.Port, n.UserID, n.Password, n.Method, n.SNI, n.Insecure, n.Flow, rk, sid, fpr)
+	fmt.Fprintf(h, "%s|%s|%d|%s|%s|%s|%s|%t|%s|%s|%s|%s|%s|%s|%s|%d|%s|%t",
+		n.Protocol, strings.ToLower(n.Address), n.Port, n.UserID, n.Password, n.Method, n.SNI, n.Insecure, n.Flow, rk, sid, fpr,
+		strings.ToLower(n.Network), n.Path, n.Host, n.AlterIDs, strings.ToLower(n.Security), n.TLS)
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }
 
