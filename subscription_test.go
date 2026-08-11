@@ -107,10 +107,10 @@ proxies:
     password: hpass
 `
 	nodes := parseClashYAML(y)
-	if len(nodes) != 3 {
-		t.Fatalf("expected 3 nodes, got %d", len(nodes))
+	if len(nodes) != 4 {
+		t.Fatalf("expected 4 nodes, got %d", len(nodes))
 	}
-	var ss, vl, hy *ProxyNode
+	var ss, vl, hy, tr *ProxyNode
 	for _, n := range nodes {
 		switch n.Protocol {
 		case "ss":
@@ -119,6 +119,8 @@ proxies:
 			vl = n
 		case "hy2":
 			hy = n
+		case "trojan":
+			tr = n
 		}
 	}
 	if ss == nil || ss.Method != "aes-128-gcm" || ss.Password != "p1" {
@@ -126,6 +128,9 @@ proxies:
 	}
 	if hy == nil || hy.Password != "hpass" {
 		t.Fatalf("hy2: %+v", hy)
+	}
+	if tr == nil || tr.Password != "x" || !tr.TLS || tr.SNI != "" || tr.Network != "tcp" {
+		t.Fatalf("trojan: %+v", tr)
 	}
 	if vl == nil || vl.Reality == nil || vl.Reality.PublicKey != "pk1" || vl.Flow != "xtls-rprx-vision" {
 		t.Fatalf("vless: %+v", vl)
@@ -199,5 +204,60 @@ func TestManualNodeConfigCarriesReality(t *testing.T) {
 	n := c.toNode()
 	if n.Reality == nil || n.Reality.PublicKey != "pk" || n.Reality.ShortID != "sid" {
 		t.Fatalf("reality not carried: %#v", n.Reality)
+	}
+}
+
+func TestClashVlessWSAndServernamePrecedence(t *testing.T) {
+	// servername 与 sni 同时存在时 servername 优先（与借鉴仓库 sing-box 一致）。
+	// vless+ws 传输字段（network/path/host）应解析保留。
+	y := `
+proxies:
+  - name: "CF-ws"
+    type: vless
+    server: cf.example.com
+    port: 2096
+    uuid: 7a3bac2b-b3ae-4bf6-845a-31fa95bfde26
+    tls: true
+    servername: edt.example.org
+    sni: sni.example.org
+    network: ws
+    ws-opts:
+      path: /
+      headers:
+        Host: edt.example.org
+  - name: "SNI-only"
+    type: vmess
+    server: 1.2.3.4
+    port: 443
+    uuid: d6e7f8a9-0123-4567-89ab-cdef01234567
+    sni: sni2.example.net
+`
+	nodes := parseClashYAML(y)
+	if len(nodes) != 2 {
+		t.Fatalf("expected 2 nodes, got %d", len(nodes))
+	}
+	v := nodes[0]
+	if v.Protocol != "vless" || v.SNI != "edt.example.org" || v.Network != "ws" ||
+		v.Path != "/" || v.Host != "edt.example.org" || !v.TLS {
+		t.Fatalf("vless-ws: %+v", v)
+	}
+	if nodes[1].SNI != "sni2.example.net" {
+		t.Fatalf("vmess sni-only: %+v", nodes[1])
+	}
+}
+
+func TestParseVmessAndTrojanURIs(t *testing.T) {
+	vmessJSON := `{"v":"2","ps":"HK-vmess","add":"9.9.9.9","port":"443","id":"8f9c1b3e-5a2d-4e7f-9a1c-2b3d4e5f6a7b","aid":"0","scy":"auto","net":"tcp","type":"none","host":"","path":"","tls":"tls","sni":"cdn.example.com"}`
+	vmessURL := "vmess://" + base64.StdEncoding.EncodeToString([]byte(vmessJSON)) + "#HK-vmess"
+	vm := parseNodeURI(vmessURL)
+	if vm == nil || vm.Protocol != "vmess" || vm.Address != "9.9.9.9" || vm.Port != 443 ||
+		vm.UserID != "8f9c1b3e-5a2d-4e7f-9a1c-2b3d4e5f6a7b" || !vm.TLS || vm.SNI != "cdn.example.com" {
+		t.Fatalf("vmess: %+v", vm)
+	}
+
+	tr := parseNodeURI("trojan://pw123@3.4.5.6:8443?security=tls&sni=t.example.com#T-node")
+	if tr == nil || tr.Protocol != "trojan" || tr.Address != "3.4.5.6" || tr.Port != 8443 ||
+		tr.Password != "pw123" || !tr.TLS || tr.SNI != "t.example.com" {
+		t.Fatalf("trojan: %+v", tr)
 	}
 }

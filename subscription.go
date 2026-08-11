@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,15 @@ func (s SubscriptionConfig) updateInterval() time.Duration {
 
 // ======================= 订阅管理器 =======================
 
+// SubscriptionMeta 订阅响应头元信息（subscription-userinfo / Content-Disposition）。
+type SubscriptionMeta struct {
+	Upload     int64  `json:"upload,omitempty"`
+	Download   int64  `json:"download,omitempty"`
+	Total      int64  `json:"total,omitempty"`
+	Expire     int64  `json:"expire,omitempty"`
+	RemoteName string `json:"remote_name,omitempty"`
+}
+
 // subscriptionManager 负责拉取订阅、解析文本、与自定义/遗留节点合并且写入节点池。
 type subscriptionManager struct {
 	mu       sync.Mutex
@@ -45,12 +55,14 @@ type subscriptionManager struct {
 	lastUpdated map[string]time.Time
 	lastError   map[string]string
 	lastCount   map[string]int
+	lastMeta    map[string]SubscriptionMeta
 }
 
 var subManager = &subscriptionManager{
 	lastUpdated: map[string]time.Time{},
 	lastError:   map[string]string{},
 	lastCount:   map[string]int{},
+	lastMeta:    map[string]SubscriptionMeta{},
 }
 
 // SubInfo 订阅源运行时快照（面板展示用）。
@@ -61,9 +73,13 @@ type SubInfo struct {
 	Nodes         int    `json:"nodes"`
 	LastUpdatedAt string `json:"last_updated_at,omitempty"`
 	LastError     string `json:"last_error,omitempty"`
+	RemoteName    string `json:"remote_name,omitempty"`
+	UsageTotal    int64  `json:"usage_total,omitempty"`
+	UsageUsed     int64  `json:"usage_used,omitempty"`
+	UsageExpire   int64  `json:"usage_expire,omitempty"`
 }
 
-// snapshot 返回订阅源当前状态（URL/间隔/节点数/上次拉取/错误）。
+// snapshot 返回订阅源当前状态（URL/间隔/节点数/上次拉取/错误/流量）。
 func (m *subscriptionManager) snapshot() []SubInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -78,6 +94,12 @@ func (m *subscriptionManager) snapshot() []SubInfo {
 		}
 		if t, ok := m.lastUpdated[s.URL]; ok && !t.IsZero() {
 			info.LastUpdatedAt = t.Format(time.RFC3339)
+		}
+		if meta, ok := m.lastMeta[s.URL]; ok {
+			info.RemoteName = meta.RemoteName
+			info.UsageTotal = meta.Total
+			info.UsageUsed = meta.Upload + meta.Download
+			info.UsageExpire = meta.Expire
 		}
 		out = append(out, info)
 	}
@@ -127,6 +149,7 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 	type result struct {
 		sub   SubscriptionConfig
 		nodes []*ProxyNode
+		meta  SubscriptionMeta
 		err   error
 	}
 	results := make(chan result, len(subs))
@@ -137,8 +160,8 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 				results <- result{sub: s}
 				return
 			}
-			nodes, err := m.fetchOnce(ctx, s.URL, cacheDir)
-			results <- result{sub: s, nodes: nodes, err: err}
+			nodes, meta, err := m.fetchOnce(ctx, s.URL, cacheDir)
+			results <- result{sub: s, nodes: nodes, meta: meta, err: err}
 		}(s)
 	}
 	for range subs {
@@ -151,6 +174,7 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 		} else {
 			m.lastUpdated[key] = time.Now()
 			m.lastCount[key] = len(r.nodes)
+			m.lastMeta[key] = r.meta
 			delete(m.lastError, key)
 			for _, n := range r.nodes {
 				if r.sub.Name != "" {
@@ -166,6 +190,9 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 		return 0, fmt.Errorf("没有任何可用节点: %s", strings.Join(errs, "; "))
 	}
 	proxyPool.setNodes(all)
+	if err := mihomoMgr.apply(all); err != nil {
+		slog.Error("mihomo 配置重建失败", "error", err)
+	}
 	slog.Info("节点池已刷新", "total", len(all), "subscriptions", len(subs), "errors", len(errs))
 	return len(all), nil
 }
@@ -173,56 +200,118 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 func (s SubscriptionConfig) Key() string { return s.URL }
 
 // fetchOnce 拉取单个订阅；网络失败回退磁盘缓存。
-func (m *subscriptionManager) fetchOnce(ctx context.Context, rawURL, cacheDir string) ([]*ProxyNode, error) {
-	text, err := m.fetch(ctx, rawURL)
+func (m *subscriptionManager) fetchOnce(ctx context.Context, rawURL, cacheDir string) ([]*ProxyNode, SubscriptionMeta, error) {
+	text, meta, err := m.fetch(ctx, rawURL)
 	if err != nil {
 		if cached, cerr := readCachedSubscription(cacheDir, rawURL); cerr == nil {
 			slog.Warn("订阅拉取失败，使用缓存", "url", rawURL, "error", err)
-			return parseSubscriptionText(cached), nil
+			return parseSubscriptionText(cached), SubscriptionMeta{}, nil
 		}
-		return nil, err
+		return nil, SubscriptionMeta{}, err
 	}
 	_ = writeCachedSubscription(cacheDir, rawURL, text)
-	return parseSubscriptionText(text), nil
+	return parseSubscriptionText(text), meta, nil
 }
 
-// fetch 获取订阅原始文本（http/https/data URI）。
-func (m *subscriptionManager) fetch(ctx context.Context, rawURL string) (string, error) {
+// fetch 获取订阅原始文本（http/https/data URI），并解析响应头元信息。
+func (m *subscriptionManager) fetch(ctx context.Context, rawURL string) (string, SubscriptionMeta, error) {
 	if strings.HasPrefix(rawURL, "data:") {
 		body := rawURL[strings.Index(rawURL, ",")+1:]
 		dec, err := base64DecodeLoose(body)
 		if err != nil {
-			return "", fmt.Errorf("data URI 解码: %w", err)
+			return "", SubscriptionMeta{}, fmt.Errorf("data URI 解码: %w", err)
 		}
-		return string(dec), nil
+		return string(dec), SubscriptionMeta{}, nil
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "", err
+		return "", SubscriptionMeta{}, err
 	}
 	switch u.Scheme {
 	case "http", "https":
 	default:
-		return "", fmt.Errorf("不支持的订阅协议 %q", u.Scheme)
+		return "", SubscriptionMeta{}, fmt.Errorf("不支持的订阅协议 %q", u.Scheme)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", err
+		return "", SubscriptionMeta{}, err
 	}
 	req.Header.Set("User-Agent", "opencode2api/"+versionString()+" (node subscription)")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", SubscriptionMeta{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("订阅 HTTP %d", resp.StatusCode)
+		return "", SubscriptionMeta{}, fmt.Errorf("订阅 HTTP %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
 	if err != nil {
-		return "", err
+		return "", SubscriptionMeta{}, err
 	}
-	return string(body), nil
+	return string(body), parseSubscriptionMeta(resp.Header), nil
+}
+
+// parseSubscriptionMeta 解析订阅响应头：
+//   - 任意以 "subscription-userinfo" 结尾的 header（如 x-amz-meta-subscription-userinfo）
+//     携带 upload/download/total/expire 流量与到期信息；
+//   - Content-Disposition 提供订阅文件名（filename*= 优先，percent-decode）。
+func parseSubscriptionMeta(h http.Header) SubscriptionMeta {
+	var meta SubscriptionMeta
+	for name, vals := range h {
+		if strings.HasSuffix(strings.ToLower(name), "subscription-userinfo") {
+			for _, v := range vals {
+				for _, kv := range strings.Fields(v) {
+					key, val, ok := strings.Cut(kv, "=")
+					if !ok {
+						continue
+					}
+					n, _ := strconv.ParseInt(val, 10, 64)
+					switch strings.ToLower(key) {
+					case "upload":
+						meta.Upload = n
+					case "download":
+						meta.Download = n
+					case "total":
+						meta.Total = n
+					case "expire":
+						meta.Expire = n
+					}
+				}
+			}
+		}
+	}
+	if cd := h.Get("Content-Disposition"); cd != "" {
+		for _, part := range strings.Split(cd, ";") {
+			part = strings.TrimSpace(part)
+			if strings.HasPrefix(part, "filename*=") {
+				if name := parseExtValue(part[len("filename*="):]); name != "" {
+					meta.RemoteName = name
+					break
+				}
+			}
+			if strings.HasPrefix(part, "filename=") {
+				meta.RemoteName = strings.Trim(strings.TrimSpace(part[len("filename="):]), `"`)
+			}
+		}
+	}
+	return meta
+}
+
+// parseExtValue 解析 RFC 5987 扩展值：UTF-8”<percent-encoded>。
+func parseExtValue(v string) string {
+	rest := v
+	if _, after, ok := strings.Cut(v, "'"); ok {
+		if _, after2, ok := strings.Cut(after, "'"); ok {
+			rest = after2
+		} else {
+			rest = after
+		}
+	}
+	if dec, err := url.QueryUnescape(rest); err == nil {
+		return dec
+	}
+	return rest
 }
 
 // ======================= 订阅缓存 =======================
@@ -265,18 +354,18 @@ func parseSubscriptionText(text string) []*ProxyNode {
 	// 1) Clash YAML
 	if strings.Contains(text, "proxies:") {
 		if clash := parseClashYAML(text); len(clash) > 0 {
-			return clash
+			return uniqueNodeNames(clash)
 		}
 	}
 	// 2) 整文 base64（常见订阅格式）
 	if dec, err := base64DecodeLoose(text); err == nil && len(dec) > 20 && strings.Contains(string(dec), "://") {
 		if inner := parseLines(string(dec)); len(inner) > 0 {
-			return inner
+			return uniqueNodeNames(inner)
 		}
 	}
 	// 3) 逐行 URI
 	if nodes := parseLines(text); len(nodes) > 0 {
-		return nodes
+		return uniqueNodeNames(nodes)
 	}
 	return nil
 }
@@ -288,9 +377,11 @@ func parseLines(chunk string) []*ProxyNode {
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
 		}
-		if n := parseNodeURI(line); n != nil {
-			out = appendNodeUnique(out, n)
+		n := parseNodeURI(line)
+		if n == nil || isInfoPseudoNode(n.Name) {
+			continue
 		}
+		out = appendNodeUnique(out, n)
 	}
 	return out
 }
@@ -309,23 +400,31 @@ func appendNodeUnique(list []*ProxyNode, n *ProxyNode) []*ProxyNode {
 // ======================= Clash YAML =======================
 
 type clashProxyEntry struct {
-	Name        string `yaml:"name"`
-	Type        string `yaml:"type"`
-	Server      string `yaml:"server"`
-	Port        int    `yaml:"port"`
-	UUID        string `yaml:"uuid"`
-	Password    string `yaml:"password"`
-	Username    string `yaml:"username"`
-	Cipher      string `yaml:"cipher"`
-	Method      string `yaml:"method"`
-	Network     string `yaml:"network"`
-	TLS         bool   `yaml:"tls"`
-	ServerName  string `yaml:"servername"`
-	SNI         string `yaml:"sni"`
-	Flow        string `yaml:"flow"`
-	SkipVerify  bool   `yaml:"skip-cert-verify"`
-	Insecure    bool   `yaml:"insecure"`
-	Auth        string `yaml:"auth"`
+	Name              string `yaml:"name"`
+	Type              string `yaml:"type"`
+	Server            string `yaml:"server"`
+	Port              int    `yaml:"port"`
+	UUID              string `yaml:"uuid"`
+	Password          string `yaml:"password"`
+	Username          string `yaml:"username"`
+	Cipher            string `yaml:"cipher"`
+	Method            string `yaml:"method"`
+	AlterID           int    `yaml:"alterId"`
+	Network           string `yaml:"network"`
+	TLS               bool   `yaml:"tls"`
+	ServerName        string `yaml:"servername"`
+	SNI               string `yaml:"sni"`
+	Flow              string `yaml:"flow"`
+	SkipVerify        bool   `yaml:"skip-cert-verify"`
+	Insecure          bool   `yaml:"insecure"`
+	Auth              string `yaml:"auth"`
+	ClientFingerprint string `yaml:"client-fingerprint"`
+	WSOpts            struct {
+		Path                string            `yaml:"path"`
+		Headers             map[string]string `yaml:"headers"`
+		MaxEarlyData        int               `yaml:"max-early-data"`
+		EarlyDataHeaderName string            `yaml:"early-data-header-name"`
+	} `yaml:"ws-opts"`
 	RealityOpts struct {
 		PublicKey   string `yaml:"public-key"`
 		ShortID     string `yaml:"short-id"`
@@ -346,6 +445,12 @@ func parseClashYAML(text string) []*ProxyNode {
 	for _, p := range doc.Proxies {
 		n := clashEntryToNode(p)
 		if n != nil {
+			if name, err := url.QueryUnescape(n.Name); err == nil && name != "" {
+				n.Name = name
+			}
+			if isInfoPseudoNode(n.Name) {
+				continue
+			}
 			nodes = appendNodeUnique(nodes, n)
 		} else {
 			slog.Warn("跳过不支持的 Clash 代理类型", "name", p.Name, "type", p.Type)
@@ -374,15 +479,72 @@ func clashEntryToNode(p clashProxyEntry) *ProxyNode {
 		n := &ProxyNode{
 			Name: p.Name, Protocol: "vless", Address: p.Server, Port: p.Port,
 			UserID: p.UUID, Flow: p.Flow,
-			Insecure: p.SkipVerify || p.Insecure,
+			Insecure: p.SkipVerify || p.Insecure, TLS: p.TLS,
+			Network: strings.ToLower(p.Network),
+			Path:    p.WSOpts.Path,
 		}
-		n.SNI = firstNonEmpty(p.SNI, p.ServerName)
+		for k, v := range p.WSOpts.Headers {
+			if strings.EqualFold(k, "Host") {
+				n.Host = v
+				break
+			}
+		}
+		n.SNI = firstNonEmpty(p.ServerName, p.SNI)
 		if p.TLS && p.RealityOpts.PublicKey != "" {
 			n.Reality = &RealityConfig{
 				PublicKey:   p.RealityOpts.PublicKey,
 				ShortID:     p.RealityOpts.ShortID,
 				SpiderX:     p.RealityOpts.SpiderX,
 				Fingerprint: p.RealityOpts.Fingerprint,
+			}
+		}
+		return n
+	case "vmess":
+		n := &ProxyNode{
+			Name: p.Name, Protocol: "vmess", Address: p.Server, Port: p.Port,
+			UserID: p.UUID, AlterIDs: uint16(p.AlterID),
+			Insecure: p.SkipVerify || p.Insecure, TLS: p.TLS,
+			Network: strings.ToLower(p.Network),
+			Path:    p.WSOpts.Path,
+		}
+		for k, v := range p.WSOpts.Headers {
+			if strings.EqualFold(k, "Host") {
+				n.Host = v
+				break
+			}
+		}
+		n.SNI = firstNonEmpty(p.ServerName, p.SNI)
+		if p.Cipher != "" {
+			n.Security = p.Cipher
+		}
+		if n.Network == "" {
+			n.Network = "tcp"
+		}
+		return n
+	case "trojan":
+		n := &ProxyNode{
+			Name: p.Name, Protocol: "trojan", Address: p.Server, Port: p.Port,
+			Password: p.Password, Insecure: p.SkipVerify || p.Insecure,
+			TLS:     p.TLS || p.RealityOpts.PublicKey == "",
+			Network: strings.ToLower(p.Network),
+			Path:    p.WSOpts.Path,
+		}
+		for k, v := range p.WSOpts.Headers {
+			if strings.EqualFold(k, "Host") {
+				n.Host = v
+				break
+			}
+		}
+		n.SNI = firstNonEmpty(p.ServerName, p.SNI)
+		if n.Network == "" {
+			n.Network = "tcp"
+		}
+		if p.RealityOpts.PublicKey != "" {
+			n.Reality = &RealityConfig{
+				PublicKey:   p.RealityOpts.PublicKey,
+				ShortID:     p.RealityOpts.ShortID,
+				SpiderX:     p.RealityOpts.SpiderX,
+				Fingerprint: firstNonEmpty(p.RealityOpts.Fingerprint, p.ClientFingerprint),
 			}
 		}
 		return n
@@ -399,7 +561,7 @@ func clashEntryToNode(p clashProxyEntry) *ProxyNode {
 		return &ProxyNode{
 			Name: p.Name, Protocol: "anytls", Address: p.Server, Port: p.Port,
 			Password: p.Password, Insecure: p.SkipVerify || p.Insecure,
-			SNI: firstNonEmpty(p.SNI, p.ServerName),
+			SNI: firstNonEmpty(p.ServerName, p.SNI),
 		}
 	default:
 		return nil // 暂不支持（trojan/vmess/ssr 等）

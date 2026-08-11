@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net/url"
 	"strconv"
 	"strings"
@@ -11,7 +13,7 @@ import (
 
 func defaultPortFor(scheme string) int {
 	switch scheme {
-	case "vless", "anytls", "trojan":
+	case "vless", "vmess", "trojan", "anytls":
 		return 443
 	case "hysteria2", "hy2":
 		return 443
@@ -31,15 +33,18 @@ func qBool(v string) bool {
 	return false
 }
 
-// parseNodeURI 解析单个 vless:// ss:// hysteria2:// anytls:// socks5:// 链接。
+// parseNodeURI 解析单个 vless:// ss:// hysteria2:// trojan:// vmess:// anytls:// socks5:// 链接。
 // 返回 nil 表示不支持（调用方记录 warning）。
 func parseNodeURI(uri string) *ProxyNode {
+	if strings.HasPrefix(strings.ToLower(uri), "vmess://") {
+		return parseVmessURI(uri)
+	}
 	u, err := url.Parse(uri)
 	if err != nil || u.Scheme == "" {
 		return nil
 	}
 	scheme := strings.ToLower(u.Scheme)
-	if _, ok := map[string]bool{"vless": true, "ss": true, "hysteria2": true, "hy2": true, "anytls": true, "socks5": true, "socks": true}[scheme]; !ok {
+	if _, ok := map[string]bool{"vless": true, "ss": true, "hysteria2": true, "hy2": true, "anytls": true, "socks5": true, "socks": true, "trojan": true}[scheme]; !ok {
 		return nil
 	}
 	name := strings.TrimSpace(u.Fragment)
@@ -84,8 +89,8 @@ func parseNodeURI(uri string) *ProxyNode {
 				SpiderX:     getQ("spx"),
 				Fingerprint: getQ("fp"),
 			}
-		case "tls":
-			// SNI 已在上面赋值
+		case "tls", "":
+			n.TLS = true
 		}
 		switch getQ("type") {
 		case "", "tcp":
@@ -131,6 +136,28 @@ func parseNodeURI(uri string) *ProxyNode {
 			Password: u.User.Username(), Insecure: qBool(inscureParam),
 			SNI: getQ("sni", "serverName"),
 		}
+	case "trojan":
+		if u.User == nil || u.User.Username() == "" {
+			return nil
+		}
+		n := &ProxyNode{
+			Name: name, Protocol: "trojan", Address: host, Port: port,
+			Password: u.User.Username(), Insecure: qBool(inscureParam),
+			Network: strings.ToLower(getQ("type")), Path: getQ("path"), Host: getQ("host"),
+		}
+		n.SNI = getQ("sni", "peer", "serverName")
+		if n.Network == "" {
+			n.Network = "tcp"
+		}
+		if strings.EqualFold(getQ("security"), "tls") || getQ("security") == "" {
+			n.TLS = true
+			if fp, pbk, sid := getQ("fp"), getQ("pbk"), getQ("sid"); pbk != "" && fp != "" {
+				n.Reality = &RealityConfig{
+					PublicKey: pbk, ShortID: sid, Fingerprint: fp,
+				}
+			}
+		}
+		return n
 	case "socks5", "socks":
 		n := &ProxyNode{
 			Name: name, Protocol: "socks5", Address: host, Port: port,
@@ -176,19 +203,141 @@ func splitMethodPassword(s string) (string, string, bool) {
 
 // ======================= base64 工具 =======================
 
-// base64DecodeLoose 尝试多种 base64 变体解码。
+// base64DecodeLoose 尝试多种 base64 变体解码，容错对齐 mihomo/v2rayN：
+// 去换行与空白、URL-safe 变体（-_ → /+）归一、自动补 padding，四引擎递进。
 func base64DecodeLoose(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	s = strings.NewReplacer("\r", "", "\n", "", "\t", "", " ", "", "_", "/", "-", "+").Replace(s)
+	switch len(s) % 4 {
+	case 2:
+		s += "=="
+	case 3:
+		s += "="
+	}
 	encodings := []*base64.Encoding{
 		base64.StdEncoding,
 		base64.RawStdEncoding,
 		base64.URLEncoding,
 		base64.RawURLEncoding,
 	}
-	s = strings.TrimSpace(s)
 	for _, e := range encodings {
 		if b, err := e.DecodeString(s); err == nil {
 			return b, nil
 		}
 	}
 	return nil, base64.CorruptInputError(0)
+}
+
+// isInfoPseudoNode 判断节点名是否为机场插播的公告/信息伪节点
+// （剩余流量、套餐到期、官网等，多为全角冒号句式）。
+func isInfoPseudoNode(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return true
+	}
+	lower := strings.ToLower(name)
+	if strings.Contains(lower, "：") {
+		return true
+	}
+	for _, kw := range []string{
+		"剩余流量", "已用流量", "套餐到期", "到期时间", "重置时间", "距离下次重置", "重置剩余",
+		"官网", "官方网址", "官方网站", "发布页", "更新于", "更新时间", "公告", "温馨提示", "通知",
+		"usage", "traffic", "expire", "expiry", "reset", "official", "website", "announcement",
+	} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseVmessURI 解析 vmess:// 链接（body 为 base64 编码的 v2rayN 风格 JSON）。
+func parseVmessURI(uri string) *ProxyNode {
+	body := uri[len("vmess://"):]
+	if i := strings.IndexAny(body, "\r\n#"); i >= 0 {
+		body = body[:i]
+	}
+	if body == "" {
+		return nil
+	}
+	var raw []byte
+	if dec, err := base64DecodeLoose(body); err == nil {
+		raw = dec
+	} else {
+		raw = []byte(body)
+	}
+	var vm struct {
+		PS   string `json:"ps"`
+		Add  string `json:"add"`
+		Port string `json:"port"`
+		ID   string `json:"id"`
+		AID  string `json:"aid"`
+		SCY  string `json:"scy"`
+		Net  string `json:"net"`
+		Type string `json:"type"`
+		Host string `json:"host"`
+		Path string `json:"path"`
+		TLS  string `json:"tls"`
+		SNI  string `json:"sni"`
+		FP   string `json:"fp"`
+	}
+	if err := json.Unmarshal(raw, &vm); err != nil {
+		return nil
+	}
+	if vm.Add == "" || vm.ID == "" {
+		return nil
+	}
+	n := &ProxyNode{
+		Name:     vm.PS,
+		Protocol: "vmess",
+		Address:  vm.Add,
+		UserID:   vm.ID,
+		Network:  strings.ToLower(vm.Net),
+		Host:     vm.Host,
+		Path:     vm.Path,
+		Security: vm.SCY,
+	}
+	if vm.PS == "" {
+		n.Name = vm.Add
+	}
+	if p, err := strconv.Atoi(vm.Port); err == nil && p > 0 {
+		n.Port = p
+	} else {
+		n.Port = defaultPortFor("vmess")
+	}
+	if v, err := strconv.Atoi(vm.AID); err == nil && v > 0 {
+		n.AlterIDs = uint16(v)
+	}
+	if n.Network == "" {
+		n.Network = "tcp"
+	}
+	if strings.EqualFold(vm.TLS, "tls") || strings.EqualFold(vm.TLS, "reality") {
+		n.TLS = true
+	}
+	if vm.SNI != "" {
+		n.SNI = vm.SNI
+	} else if n.TLS && vm.Host != "" {
+		n.SNI = vm.Host
+	}
+	return n
+}
+
+// uniqueNodeNames 对重名节点追加 -02/-03 后缀（mihomo uniqueName 语义），
+// 保证面板与路由中节点名唯一。
+func uniqueNodeNames(nodes []*ProxyNode) []*ProxyNode {
+	counts := map[string]int{}
+	for _, n := range nodes {
+		counts[n.Name]++
+	}
+	seen := map[string]int{}
+	for _, n := range nodes {
+		if counts[n.Name] <= 1 {
+			continue
+		}
+		seen[n.Name]++
+		if seen[n.Name] > 1 {
+			n.Name = fmt.Sprintf("%s-%02d", n.Name, seen[n.Name])
+		}
+	}
+	return nodes
 }
