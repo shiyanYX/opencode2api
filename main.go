@@ -5720,482 +5720,1292 @@ func renderLoginPage(w http.ResponseWriter, msg string) {
 }
 
 const adminLoginHTML = `
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OPENCODE TO API 管理面板</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<title>OPENCODE TO API · 管理面板</title>
 <style>
-:root{--bg:#020617;--surface:#0f172a;--surface-2:#1e293b;--border:#334155;--text:#f8fafc;--text-sec:#94a3b8;--text-ter:#64748b;--accent:#22c55e;--accent-hover:#16a34a;--blue:#6c8aff;--radius:14px;--radius-sm:8px;--mono:'JetBrains Mono',Consolas,monospace}
-[data-theme="light"]{--bg:#f4f6fa;--surface:#ffffff;--surface-2:#f0f2f7;--border:#d0d4df;--text:#1a1d26;--text-sec:#5b6372;--text-ter:#8a92a3;--accent:#16a34a;--accent-hover:#15803d}
+/* ============================================================
+   OPENCODE TO API · 管理面板 (重构版)
+   设计方向：tech-utility · 深色优先 · 无外网字体依赖
+   - CJK 系统字体栈（PingFang / 微软雅黑 / Noto Sans SC）
+   - 语义色：accent=健康/主操作 · blue=信息 · orange=耗尽 · red=故障
+   - 全部交互契约与原版一致，可直接替换 main.go 中的 adminHTML
+   ============================================================ */
+:root{
+  --bg:#0a0f1c; --surface:#101828; --surface-2:#1a2336;
+  --border:rgba(148,163,184,.14); --border-strong:rgba(148,163,184,.28);
+  --line:rgba(148,163,184,.08);
+  --text:#e9eef8; --text-sec:#97a3bb; --text-ter:#7b87a5;
+  --accent:#6f96ff; --accent-hover:#5d88ff; --accent-dim:rgba(111,150,255,.15);
+  --blue:#7ea2ff; --blue-dim:rgba(126,162,255,.12);
+  --ok:#2fd489; --ok-dim:rgba(47,212,137,.13);
+  --orange:#f0b04a; --orange-dim:rgba(240,176,74,.12);
+  --red:#ff6b6b; --red-dim:rgba(255,107,107,.12);
+  --radius:12px; --radius-sm:8px;
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif;
+  --mono:ui-monospace,'SF Mono','JetBrains Mono','Cascadia Code',Consolas,monospace;
+  --shadow:0 10px 34px rgba(3,8,20,.55);
+  --btn-text:#0a0f1e;
+}
+[data-theme="light"]{
+  --bg:#f4f6fb; --surface:#ffffff; --surface-2:#eef1f8;
+  --border:#e1e5ee; --border-strong:#c9d1e0; --line:rgba(20,30,60,.06);
+  --text:#161a26; --text-sec:#59637a; --text-ter:#616d88;
+  --accent:#3b63c9; --accent-hover:#3457b6; --accent-dim:rgba(59,99,201,.12);
+  --blue:#3b63c9; --blue-dim:rgba(59,99,201,.1);
+  --ok:#0a6f42; --ok-dim:rgba(10,111,66,.10);
+  --orange:#a1530a; --orange-dim:rgba(161,83,10,.10);
+  --red:#b42318; --red-dim:rgba(180,35,24,.09);
+  --shadow:0 10px 30px rgba(30,40,70,.1);
+  --btn-text:#ffffff;
+}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Noto Sans SC',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:38px 40px;width:100%;max-width:380px;box-shadow:0 20px 60px rgba(0,0,0,.4)}
-[data-theme="light"] .card{box-shadow:0 20px 60px rgba(15,23,42,.1)}
-.logo{display:flex;align-items:center;gap:12px;margin-bottom:28px}
-.logo-mark{width:44px;height:44px;border-radius:12px;background:linear-gradient(135deg,var(--accent),#22d3ee);display:flex;align-items:center;justify-content:center;color:#fff}
-.logo-text{font-size:20px;font-weight:700;letter-spacing:-.5px;line-height:1.2}
-.logo-sub{font-size:12px;color:var(--text-ter);font-weight:400}
-.msg{display:none;background:var(--red-d,rgba(239,68,68,.12));color:#f87171;padding:11px 14px;border-radius:var(--radius-sm);margin-bottom:16px;font-size:13px;text-align:center;border:1px solid rgba(239,68,68,.25)}
-.field label{display:block;font-size:12px;font-weight:600;color:var(--text-sec);margin-bottom:7px;letter-spacing:.4px}
-.field input{width:100%;padding:12px 15px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:14.5px;font-family:var(--mono);background:var(--bg);color:var(--text);transition:border-color .15s,box-shadow .15s}
-.field input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(34,197,94,.15)}
-.btn{width:100%;padding:11px;margin-top:18px;border:none;border-radius:var(--radius-sm);font-size:14.5px;font-weight:700;cursor:pointer;font-family:inherit;background:var(--accent);color:#fff;transition:background .15s;letter-spacing:.5px}
-.btn:hover{background:var(--accent-hover)}
-.theme-bar{display:flex;justify-content:flex-end;margin-bottom:14px}
-.theme-toggle{background:transparent;border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 12px;cursor:pointer;font-size:13px;color:var(--text-sec);font-family:inherit;transition:all .15s}
-.theme-toggle:hover{border-color:var(--accent);color:var(--accent)}
-.foot{margin-top:22px;text-align:center;font-size:11.5px;color:var(--text-ter);font-family:var(--mono)}
-@media(max-width:500px){.card{padding:30px 24px}}
+html,body{height:100%}
+body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+button{font-family:inherit}
+input,select,textarea{font-family:inherit;color:inherit}
+::selection{background:var(--accent-dim)}
+:focus-visible{outline:none;box-shadow:0 0 0 2px var(--accent-dim),0 0 0 1px var(--accent)}
+.muted{color:var(--text-ter)}
+.mono{font-family:var(--mono)}
+.num{font-variant-numeric:tabular-nums}
+.lat-warn{color:var(--orange)}
+.lat-high{color:var(--red)}
+.empty-hint{text-align:center;color:var(--text-ter);padding:26px 0;font-size:13px}
+/* 主题图标：随 data-theme 切换显示月亮/太阳 */
+.ic-sun{display:none}
+[data-theme="dark"] .ic-moon{display:inline-block}
+[data-theme="dark"] .ic-sun{display:none}
+[data-theme="light"] .ic-moon{display:none}
+[data-theme="light"] .ic-sun{display:inline-block}
+.theme-btn-ic{display:inline-flex;align-items:center;gap:6px}
+
+/* ---------- 通用按钮 ---------- */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border:1px solid transparent;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;transition:background .14s,border-color .14s,color .14s,transform .05s;white-space:nowrap;line-height:1.2}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:var(--accent);color:var(--btn-text)}.btn-primary:hover{background:var(--accent-hover)}
+.btn-secondary{background:var(--blue);color:var(--btn-text)}.btn-secondary:hover{filter:brightness(1.07)}
+.btn-ghost{background:var(--surface);color:var(--text-sec);border-color:var(--border)}.btn-ghost:hover{color:var(--text);border-color:var(--border-strong)}
+.btn-danger{background:transparent;color:var(--red);border-color:color-mix(in srgb,var(--red) 45%,transparent)}.btn-danger:hover{background:var(--red-dim)}
+.btn-sm{padding:4px 9px;font-size:12px;border-radius:7px}
+.btn-block{width:100%;justify-content:center;padding:11px}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px}
+
+/* ---------- 登录 ---------- */
+.login-view{position:relative;z-index:1;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.login-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:34px 38px;width:100%;max-width:384px;box-shadow:var(--shadow)}
+.login-bar{display:flex;justify-content:flex-end;margin-bottom:12px}
+.theme-toggle{background:transparent;border:1px solid var(--border);border-radius:9px;padding:6px 12px;cursor:pointer;font-size:13px;color:var(--text-sec);font-family:inherit;transition:all .15s}
+.theme-toggle:hover{border-color:var(--border-strong);color:var(--accent)}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:26px}
+.logo-mark{width:36px;height:36px;border-radius:10px;background:var(--accent);display:grid;place-items:center;color:var(--btn-text);flex-shrink:0}
+.logo-text{font-size:15px;font-weight:600;font-family:var(--mono);letter-spacing:-.01em;line-height:1.15}
+.logo-accent{color:var(--accent);font-weight:700}
+.logo-sub{font-size:9.5px;color:var(--text-ter);letter-spacing:.18em;text-transform:uppercase;margin-top:3px}
+.msg{display:none;background:var(--red-dim);color:var(--red);padding:11px 14px;border-radius:9px;margin-bottom:16px;font-size:13px;text-align:center;border:1px solid color-mix(in srgb,var(--red) 30%,transparent)}
+.field label{display:block;font-size:11.5px;font-weight:600;color:var(--text-sec);margin-bottom:6px;letter-spacing:.03em}
+.field input,.field select{width:100%;padding:8px 11px;border:1px solid var(--border);border-radius:9px;font-size:13px;font-family:var(--mono);background:var(--bg);color:var(--text);transition:border-color .14s,box-shadow .14s}
+.field input:focus,.field select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+.field .hint{font-size:11px;color:var(--text-ter);margin-top:4px;line-height:1.4}
+.login-card .foot{margin-top:20px;text-align:center;font-size:11.5px;color:var(--text-ter);font-family:var(--mono)}
+
+/* ---------- 主面板骨架 ---------- */
+.app{position:relative;z-index:1;display:flex;min-height:100vh}
+.sidebar{width:204px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;padding:18px 12px}
+.sidebar .brand{padding:0 6px 16px;border-bottom:1px solid var(--border);margin-bottom:10px}
+.nav{display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto}
+.nav button{position:relative;display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:9px 11px;border:none;border-radius:9px;background:transparent;color:var(--text-sec);font-size:13.5px;font-weight:500;cursor:pointer;transition:background .14s,color .14s}
+.nav button:hover{background:var(--surface-2);color:var(--text)}
+.nav button.active{background:var(--accent-dim);color:var(--accent);font-weight:600}
+.nav button.active::before{content:"";position:absolute;left:0;top:20%;bottom:20%;width:2.5px;border-radius:2px;background:var(--accent)}
+.sidebar-foot{border-top:1px solid var(--border);padding-top:10px;display:flex;flex-direction:column;gap:8px}
+.conn{display:flex;align-items:center;gap:7px;padding:3px 8px;font-size:11.5px;color:var(--text-ter);min-width:0}
+.conn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.conn .cshort{display:none}
+.conn .pulse{width:7px;height:7px;border-radius:50%;background:var(--ok);position:relative;flex-shrink:0}
+.conn .pulse::after{content:"";position:absolute;inset:-3px;border-radius:50%;background:var(--ok);opacity:.35;animation:pulse 2s ease-out infinite}
+@keyframes pulse{0%{transform:scale(.6);opacity:.5}70%{transform:scale(1.7);opacity:0}100%{opacity:0}}
+.conn.offline .pulse{background:var(--text-ter)}
+.conn.offline .pulse::after{animation:none;background:var(--text-ter)}
+.mini{font-size:11px;letter-spacing:.02em;color:var(--text-sec);font-family:var(--mono);padding:0 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.main{flex:1;min-width:0;padding:32px 36px 72px;max-width:1280px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--border)}
+.topbar h1{font-size:20px;font-weight:700;letter-spacing:-.4px;flex:1;display:flex;align-items:baseline;gap:10px}
+.topbar .crumb{font-size:12px;color:var(--text-ter);font-weight:500;letter-spacing:.04em}
+
+/* ---------- 统计卡 ---------- */
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:22px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden}
+.stat .k{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--text-ter);margin-bottom:9px;display:flex;align-items:center;gap:7px}
+.stat .v{font-size:30px;font-weight:700;font-family:var(--mono);letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums}
+.stat .sub{font-size:11.5px;color:var(--text-ter);margin-top:7px;font-family:var(--mono)}
+.stat .v.green{color:var(--ok)}.stat .v.orange{color:var(--orange)}.stat .v.red{color:var(--red)}.stat .v.blue{color:var(--blue)}
+
+/* ---------- 卡片 ---------- */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:22px 24px;margin-bottom:16px}
+.card h2{font-size:14.5px;font-weight:700;letter-spacing:-.2px;margin-bottom:14px;display:flex;align-items:center;gap:9px}
+.card .hint{font-size:12.5px;color:var(--text-sec);margin:-8px 0 14px}
+.card .card-actions{display:flex;gap:8px;align-items:center;margin:0 0 12px}
+
+/* ---------- 表格 ---------- */
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-size:11px;font-weight:600;color:var(--text-ter);text-transform:uppercase;letter-spacing:.07em;padding:9px 12px;border-bottom:1px solid var(--border)}
+.tbl td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
+.tbl tbody tr{transition:background .12s}
+.tbl tbody tr:hover{background:color-mix(in srgb,var(--surface-2) 55%,transparent)}
+.tbl tbody tr:last-child td{border-bottom:none}
+.tbl tbody tr.hl{background:var(--accent-dim)}
+.tbl th.num,.tbl td.num{text-align:right}
+.tbl input[type=text],.tbl input[type=password],.tbl input:not([type]),.tbl select{padding:5px 8px;font-size:12.5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);width:100%;min-width:60px;transition:border-color .14s,box-shadow .14s}
+.tbl input:focus,.tbl select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+
+/* ---------- 状态徽章 / 标签 / 节点名 ---------- */
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2.5px 9px;border-radius:999px;font-size:11.5px;font-weight:600;letter-spacing:.02em}
+.badge .bdot{width:6px;height:6px;border-radius:50%}
+.badge.available{background:var(--ok-dim);color:var(--ok)}.badge.available .bdot{background:var(--ok)}
+.badge.exhausted{background:var(--orange-dim);color:var(--orange)}.badge.exhausted .bdot{background:var(--orange)}
+.badge.dead{background:var(--red-dim);color:var(--red)}.badge.dead .bdot{background:var(--red)}
+.badge.idle{background:var(--blue-dim);color:var(--blue)}.badge.idle .bdot{background:var(--blue)}
+.tag{display:inline-flex;align-items:center;padding:1px 7px;border-radius:6px;font-size:10.5px;font-weight:600;letter-spacing:.03em;vertical-align:1px}
+.tag.cur{background:var(--accent-dim);color:var(--accent);margin-left:6px}
+.tag.man{background:var(--blue-dim);color:var(--blue);margin-left:6px}
+.node-name{font-weight:600}
+.proto{font-family:var(--mono);font-size:12px;color:var(--text-sec)}
+.err{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;color:var(--text-ter)}
+.acts{white-space:nowrap}
+.acts .btn{margin-right:4px}
+
+/* ---------- 筛选 chips ---------- */
+.filter-chips{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 13px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:var(--text-sec);font-size:12.5px;font-weight:500;cursor:pointer;transition:all .14s}
+.chip:hover{border-color:var(--border-strong);color:var(--text)}
+.chip.active{background:var(--accent-dim);border-color:transparent;color:var(--accent);font-weight:600}
+.chip .cnt{font-family:var(--mono);font-size:11px;opacity:.7}
+
+/* ---------- 节点编辑器 / 流量条 / 网关 ---------- */
+.nedit{display:grid;grid-template-columns:110px 1fr 1fr 90px 64px;gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+.nedit input,.nedit select{padding:5.5px 9px;font-size:12.5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);width:100%}
+.nedit details{margin-top:8px;grid-column:1/-1;font-size:12px}
+.nedit details summary{cursor:pointer;color:var(--text-sec);font-weight:500;letter-spacing:.02em}
+.nedit .extra{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;padding:10px 12px;background:var(--surface-2);border-radius:9px;margin-top:6px}
+.check{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text-sec);cursor:pointer;user-select:none;padding:6px 0}
+.check input{accent-color:var(--accent);width:15px;height:15px}
+.usage{display:flex;align-items:center;gap:8px;min-width:150px}
+.usage-bar{flex:1;height:5px;border-radius:99px;background:var(--surface-2);overflow:hidden}
+.usage-bar i{display:block;height:100%;border-radius:99px;background:var(--accent)}
+.usage span{font-size:11.5px;color:var(--text-sec);font-family:var(--mono);white-space:nowrap}
+.gw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
+.gw-box{border:1px solid var(--border);border-radius:9px;padding:10px 12px;background:var(--bg)}
+.gw-label{font-size:11.5px;color:var(--text-ter);margin-bottom:5px;letter-spacing:.03em}
+.gw-copy{display:flex;align-items:center;gap:6px;background:none;border:none;padding:0;cursor:pointer;color:var(--text);font-family:var(--mono);font-size:12.5px;transition:color .14s}
+.gw-copy:hover{color:var(--accent)}
+.gw-copy code{font-family:var(--mono);word-break:break-all}
+.gw-copy .glyph{display:inline-flex;align-items:center;gap:4px;font-size:11px;opacity:.7}
+
+/* ---------- 请求分布（Token 卡片） ---------- */
+.model-bars{display:grid;gap:6px;margin:2px 0 16px}
+.model-bars .mb-head{font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-ter);margin-bottom:8px}
+.mbar{display:grid;grid-template-columns:minmax(120px,180px) 1fr 88px;gap:12px;align-items:center;font-size:11.5px}
+.mbar .lbl{font-family:var(--mono);color:var(--text-sec);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mbar .track{height:6px;border-radius:99px;background:var(--surface-2);overflow:hidden}
+.mbar .track i{display:block;height:100%;border-radius:99px;background:var(--accent)}
+.mbar .val{font-family:var(--mono);color:var(--text-ter);text-align:right;font-variant-numeric:tabular-nums}
+
+/* ---------- 延迟分布（节点页） ---------- */
+.latdist{margin:-4px 0 16px;padding:12px 16px;border:1px solid var(--border);border-radius:9px;background:var(--surface)}
+.latdist .row{display:flex;align-items:center;gap:12px}
+.latdist .ld-title{font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-ter);flex:none}
+.latdist .ld-track{flex:1;display:flex;height:8px;border-radius:99px;overflow:hidden;background:var(--surface-2);min-width:0}
+.latdist .ld-seg{height:100%}
+.latdist .ld-seg.g{background:var(--ok)}
+.latdist .ld-seg.b{background:var(--accent)}
+.latdist .ld-seg.o{background:var(--orange)}
+.latdist .ld-seg.r{background:var(--red)}
+.latdist .ld-legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:11px;font-family:var(--mono);color:var(--text-sec)}
+.latdist .ld-key{display:inline-flex;align-items:center;gap:5px}
+.latdist .ld-key i{width:8px;height:8px;border-radius:2px;flex:none}
+.latdist .ld-key i.g{background:var(--ok)}
+.latdist .ld-key i.b{background:var(--accent)}
+.latdist .ld-key i.o{background:var(--orange)}
+.latdist .ld-key i.r{background:var(--red)}
+
+/* ---------- 实时趋势（概览） ---------- */
+.trends-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-top:2px}
+.trend{border:1px solid var(--border);border-radius:9px;background:var(--bg);padding:12px 14px 8px}
+.trend-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
+.trend-label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-ter)}
+.trend-cur{font-family:var(--mono);font-size:12px;color:var(--text);font-variant-numeric:tabular-nums;white-space:nowrap}
+.spark{display:block;width:100%;height:64px}
+.trends-empty{text-align:center;color:var(--text-ter);font-size:12.5px;padding:18px 0}
+@media(max-width:560px){.trends-grid{grid-template-columns:1fr}}
+@media(max-width:560px){.mbar{grid-template-columns:1fr 1fr}}
+
+/* ---------- 页面切换 ---------- */
+.page{display:none}
+.page.active{display:block;animation:fadeIn .18s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* ---------- Toast ---------- */
+#toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(16px);background:var(--text);color:var(--bg);padding:10px 22px;border-radius:10px;font-size:13.5px;font-weight:600;opacity:0;pointer-events:none;transition:all .22s cubic-bezier(.2,.7,.3,1);z-index:999;box-shadow:var(--shadow)}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.error{background:var(--red);color:#fff}
+
+/* ---------- 运行日志 ---------- */
+.log-wrap{max-height:520px;overflow-y:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;border:1px solid var(--border);border-radius:9px;padding:6px 0;background:var(--bg)}
+.log-line{display:flex;gap:10px;align-items:baseline;padding:1px 12px;border-left:2px solid transparent}
+.log-line:hover{background:color-mix(in srgb,var(--surface-2) 50%,transparent)}
+.log-line.lv-error{border-left-color:var(--red);background:var(--red-dim)}
+.log-line.lv-warn{border-left-color:var(--orange);background:var(--orange-dim)}
+.log-time{color:var(--text-ter);white-space:nowrap;flex:none}
+.log-lv{flex:none;width:48px;font-weight:700;letter-spacing:.06em;font-size:11px}
+.lv-info{color:var(--ok)}.lv-warn{color:var(--orange)}.lv-error{color:var(--red)}.lv-debug{color:var(--text-ter)}
+.log-msg{white-space:pre-wrap;word-break:break-all}
+.log-attrs{padding:0 12px 2px 72px;color:var(--text-ter);font-size:12px}
+.log-attrs b{color:var(--accent);font-weight:600}
+.log-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0 10px}
+
+/* ---------- 响应式 ---------- */
+@media(max-width:960px){
+  .sidebar{width:64px;padding:16px 8px}
+  .nav button span,.brand .txt,.sidebar-foot .txt{display:none}
+  .conn .ctxt{display:none}
+  .conn .cshort{display:inline}
+  .mini{display:none}
+  .nav button{justify-content:center}
+  .nav button.active::before{top:14%;bottom:14%}
+  .main{padding:20px 16px 60px}
+  .stats-row{grid-template-columns:repeat(2,1fr)}
+  .nedit{grid-template-columns:1fr 1fr 90px 64px}
+  .nedit select{grid-column:1/-1}
+}
+@media(max-width:560px){
+  .stats-row{grid-template-columns:1fr}
+}
+/* 尊重系统减弱动态偏好：去掉非必要脉冲与转场动画 */
+@media (prefers-reduced-motion:reduce){
+  .conn .pulse::after{animation:none}
+  .page.active{animation:none}
+}
 </style>
 </head>
 <body>
-<div class="card">
-<div class="theme-bar"><button class="theme-toggle" onclick="toggleTheme()" id="tt">🌙</button></div>
-<div class="logo">
-<div class="logo-mark"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20l6-8h4l-6 8z"/><path d="M4 20h4"/><path d="M12 10V4a2 2 0 00-2-2H4a2 2 0 00-2 2v9"/></svg></div>
-<div><div class="logo-text">OPENCODE TO API</div><div class="logo-sub">管理面板</div></div>
+
+<!-- ============ 登录视图 ============ -->
+<div id="view-login" class="login-view">
+  <div class="login-card">
+    <div class="login-bar"><button class="theme-toggle" onclick="toggleTheme()" aria-label="切换主题"><svg class="ic-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg><svg class="ic-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button></div>
+    <div class="brand">
+      <div class="logo-mark"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20l6-8h4l-6 8z"/><path d="M4 20h4"/><path d="M12 10V4a2 2 0 00-2-2H4a2 2 0 00-2 2v9"/></svg></div>
+      <div><div class="logo-text">opencode<span class="logo-accent">2api</span></div><div class="logo-sub">ADMIN · LOCAL PROXY</div></div>
+    </div>
+    <div class="msg" id="login-msg"></div>
+    <form method="post" action="/login">
+      <div class="field">
+        <label for="pwd">管理密码</label>
+        <input id="pwd" name="password" type="password" placeholder="输入管理密码" autocomplete="current-password" required>
+      </div>
+      <button class="btn btn-primary btn-block" type="submit">登 录</button>
+    </form>
+    <div class="foot">默认密码 123456 · 生产部署务必修改 -password</div>
+  </div>
 </div>
-<div class="msg" id="login-msg"></div>
-<form method="post" action="/login">
-<div class="field">
-<label>管理密码</label>
-<input id="pwd" name="password" type="password" placeholder="输入管理密码" autocomplete="current-password" required>
-</div>
-<button class="btn" type="submit">登 录</button>
-</form>
-<div class="foot">默认密码 123456 · 生产部署务必修改 -password</div>
-</div>
+
+<!-- ============ 主面板 ============ -->
+
 <script>
-(function(){var t=localStorage.getItem('theme')||'dark';document.documentElement.setAttribute('data-theme',t);document.getElementById('tt').textContent=t==='dark'?'🌙':'☀'})();
-function toggleTheme(){var d=document.documentElement;var n=d.getAttribute('data-theme')==='dark'?'light':'dark';d.setAttribute('data-theme',n);localStorage.setItem('theme',n);document.getElementById('tt').textContent=n==='dark'?'🌙':'☀'}
+(function(){document.documentElement.setAttribute('data-theme',localStorage.getItem('theme')||'dark')})();
+function toggleTheme(){var d=document.documentElement;d.setAttribute('data-theme',d.getAttribute('data-theme')==='dark'?'light':'dark');localStorage.setItem('theme',d.getAttribute('data-theme'))}
 </script>
 </body>
 </html>
 `
 
 const adminHTML = `
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OPENCODE TO API 管理面板</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<title>OPENCODE TO API · 管理面板</title>
 <style>
+/* ============================================================
+   OPENCODE TO API · 管理面板 (重构版)
+   设计方向：tech-utility · 深色优先 · 无外网字体依赖
+   - CJK 系统字体栈（PingFang / 微软雅黑 / Noto Sans SC）
+   - 语义色：accent=健康/主操作 · blue=信息 · orange=耗尽 · red=故障
+   - 全部交互契约与原版一致，可直接替换 main.go 中的 adminHTML
+   ============================================================ */
 :root{
-  --bg:#020617;--surface:#0f172a;--surface-2:#1e293b;--muted:#1a1e2f;
-  --border:#334155;--border-2:#475569;
-  --text:#f8fafc;--text-sec:#94a3b8;--text-ter:#64748b;
-  --accent:#22c55e;--accent-hover:#16a34a;--accent-dim:rgba(34,197,94,.12);
-  --blue:#6c8aff;--blue-dim:rgba(108,138,255,.12);
-  --orange:#f0a050;--orange-dim:rgba(240,160,80,.12);
-  --red:#ef4444;--red-dim:rgba(239,68,68,.12);
-  --radius:12px;--radius-sm:8px;
-  --font:'Noto Sans SC',-apple-system,BlinkMacSystemFont,sans-serif;
-  --mono:'JetBrains Mono','SFMono-Regular',Consolas,monospace;
-  --shadow:0 8px 30px rgba(0,0,0,.35);
+  --bg:#0a0f1c; --surface:#101828; --surface-2:#1a2336;
+  --border:rgba(148,163,184,.14); --border-strong:rgba(148,163,184,.28);
+  --line:rgba(148,163,184,.08);
+  --text:#e9eef8; --text-sec:#97a3bb; --text-ter:#7b87a5;
+  --accent:#6f96ff; --accent-hover:#5d88ff; --accent-dim:rgba(111,150,255,.15);
+  --blue:#7ea2ff; --blue-dim:rgba(126,162,255,.12);
+  --ok:#2fd489; --ok-dim:rgba(47,212,137,.13);
+  --orange:#f0b04a; --orange-dim:rgba(240,176,74,.12);
+  --red:#ff6b6b; --red-dim:rgba(255,107,107,.12);
+  --radius:12px; --radius-sm:8px;
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif;
+  --mono:ui-monospace,'SF Mono','JetBrains Mono','Cascadia Code',Consolas,monospace;
+  --shadow:0 10px 34px rgba(3,8,20,.55);
+  --btn-text:#0a0f1e;
 }
 [data-theme="light"]{
-  --bg:#f4f6fa; --surface:#ffffff; --surface-2:#f0f2f7;
-  --line:#e2e6ed; --border:#d0d4df;
-  --text:#1a1d26; --text-sec:#5b6372; --text-ter:#8a92a3;
-  --accent:#16a34a; --accent-hover:#15803d; --accent-dim:rgba(34,197,94,.1);
-  --blue-dim:rgba(108,138,255,.1);
-  --orange:#d9600a; --orange-dim:rgba(217,96,10,.1);
-  --red:#dc2626; --red-dim:rgba(220,38,38,.1);
-  --shadow:0 8px 30px rgba(15,23,42,.08);
+  --bg:#f4f6fb; --surface:#ffffff; --surface-2:#eef1f8;
+  --border:#e1e5ee; --border-strong:#c9d1e0; --line:rgba(20,30,60,.06);
+  --text:#161a26; --text-sec:#59637a; --text-ter:#616d88;
+  --accent:#3b63c9; --accent-hover:#3457b6; --accent-dim:rgba(59,99,201,.12);
+  --blue:#3b63c9; --blue-dim:rgba(59,99,201,.1);
+  --ok:#0a6f42; --ok-dim:rgba(10,111,66,.10);
+  --orange:#a1530a; --orange-dim:rgba(161,83,10,.10);
+  --red:#b42318; --red-dim:rgba(180,35,24,.09);
+  --shadow:0 10px 30px rgba(30,40,70,.1);
+  --btn-text:#ffffff;
 }
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.6;min-height:100vh}
-button{font-family:var(--font)}
-.app{display:flex;min-height:100vh}
-/* ---------- sidebar ---------- */
-.sidebar{width:218px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--line);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;padding:20px 12px}
-.brand{display:flex;align-items:center;gap:10px;padding:0 8px 18px;border-bottom:1px solid var(--border);margin-bottom:14px}
-.logo-mark{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--accent),#22d3ee);display:flex;align-items:center;justify-content:center;color:#fff;flex-shrink:0}
-.logo-text{font-size:16px;font-weight:700;letter-spacing:-.3px;line-height:1.2}
-.logo-sub{font-size:11px;color:var(--text-ter);font-weight:400}
-.nav{display:flex;flex-direction:column;gap:2px;flex:1}
-.nav button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:9px 12px;border:none;border-radius:var(--radius-sm);background:transparent;color:var(--text-sec);font-size:13.5px;font-weight:500;cursor:pointer;transition:background .15s,color .15s}
-.nav button:hover{background:var(--surface-2);color:var(--text)}
-.nav button.active{background:var(--accent-dim);color:var(--accent);font-weight:600}
-.nav button svg{flex-shrink:0}
-.sidebar-foot{border-top:1px solid var(--border);padding-top:12px;display:flex;flex-direction:column;gap:8px}
-/* ---------- main ---------- */
-.main{flex:1;min-width:0;padding:26px 30px 60px;max-width:1180px}
-.topbar{display:flex;align-items:center;gap:12px;margin-bottom:22px;padding-bottom:16px;border-bottom:1px solid var(--border)}
-.topbar h1{font-size:19px;font-weight:700;letter-spacing:-.3px;flex:1}
-.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border:none;border-radius:var(--radius-sm);font-size:13px;font-weight:600;cursor:pointer;color:#fff;background:var(--blue);transition:background .15s;white-space:nowrap}
-.btn:hover{background:var(--blue-2,#5a78f0)}
-.btn-success{background:var(--accent)}.btn-success:hover{background:var(--accent-hover)}
-.btn-danger{background:transparent;color:var(--red);border:1px solid var(--red)}.btn-danger:hover{background:var(--red-dim)}
-.btn-ghost{background:var(--surface);color:var(--text-sec);border:1px solid var(--border)}.btn-ghost:hover{color:var(--text);border-color:var(--text-ter)}
-.btn-sm{padding:4px 9px;font-size:12px}
-.btn[disabled]{opacity:.5;cursor:not-allowed}
-/* ---------- stat cards ---------- */
-.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}
-.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden}
-.stat .k{font-size:12px;color:var(--text-ter);margin-bottom:6px;display:flex;align-items:center;gap:7px}
-.stat .v{font-size:26px;font-weight:700;font-family:var(--mono);letter-spacing:-.5px}
-.stat .v.green{color:var(--accent)}.stat .v.orange{color:var(--orange)}.stat .v.red{color:var(--red)}.stat .v.blue{color:#6c8aff}
-.stat .sub{font-size:11.5px;color:var(--text-ter);margin-top:4px;font-family:var(--mono)}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px;margin-bottom:16px}
-.card h2{font-size:15px;font-weight:700;margin-bottom:14px;display:flex;align-items:center;gap:8px}
-.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex-shrink:0}
-.dot.green{background:var(--accent)}.dot.orange{background:var(--orange)}.dot.blue{background:#6c8aff}.dot.red{background:var(--red)}
-.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px}
-/* ---------- table ---------- */
-.tbl{width:100%;border-collapse:collapse;font-size:13px}
-.tbl th{text-align:left;font-size:11.5px;font-weight:600;color:var(--text-ter);text-transform:uppercase;letter-spacing:.4px;padding:8px 10px;border-bottom:1px solid var(--border)}
-.tbl td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
-.tbl tbody tr:last-child td{border-bottom:none}
-.tbl tbody tr.hl{background:var(--accent-dim)}
-.tbl input[type=text],.tbl input[type=password],.tbl input:not([type]),.tbl select{padding:5px 8px;font-size:12.5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);width:100%;min-width:60px}
-.tbl input:focus,.tbl select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}
+html,body{height:100%}
+body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+button{font-family:inherit}
+input,select,textarea{font-family:inherit;color:inherit}
+::selection{background:var(--accent-dim)}
+:focus-visible{outline:none;box-shadow:0 0 0 2px var(--accent-dim),0 0 0 1px var(--accent)}
+.muted{color:var(--text-ter)}
+.mono{font-family:var(--mono)}
+.num{font-variant-numeric:tabular-nums}
+.lat-warn{color:var(--orange)}
+.lat-high{color:var(--red)}
 .empty-hint{text-align:center;color:var(--text-ter);padding:26px 0;font-size:13px}
-.mono{font-family:var(--mono);font-size:12px}
-.badge{display:inline-flex;align-items:center;gap:5px;padding:2.5px 9px;border-radius:999px;font-size:11.5px;font-weight:600;letter-spacing:.2px}
-.badge.available{background:var(--accent-dim);color:var(--accent)}
-.badge.exhausted{background:var(--orange-dim);color:var(--orange)}
-.badge.dead{background:var(--red-dim);color:var(--red)}
-.badge.idle{background:var(--blue-dim);color:#6c8aff}
-/* ---------- forms ---------- */
-.form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px}
-.field label{display:block;font-size:11.5px;font-weight:600;color:var(--text-sec);margin-bottom:5px;letter-spacing:.2px}
-.field input,.field select{width:100%;padding:8px 11px;border:1px solid var(--border);border-radius:var(--radius-sm);font-size:13px;font-family:var(--mono);background:var(--bg);color:var(--text);transition:border-color .15s,box-shadow .15s}
+/* 主题图标：随 data-theme 切换显示月亮/太阳 */
+.ic-sun{display:none}
+[data-theme="dark"] .ic-moon{display:inline-block}
+[data-theme="dark"] .ic-sun{display:none}
+[data-theme="light"] .ic-moon{display:none}
+[data-theme="light"] .ic-sun{display:inline-block}
+.theme-btn-ic{display:inline-flex;align-items:center;gap:6px}
+
+/* ---------- 通用按钮 ---------- */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border:1px solid transparent;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;transition:background .14s,border-color .14s,color .14s,transform .05s;white-space:nowrap;line-height:1.2}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:var(--accent);color:var(--btn-text)}.btn-primary:hover{background:var(--accent-hover)}
+.btn-secondary{background:var(--blue);color:var(--btn-text)}.btn-secondary:hover{filter:brightness(1.07)}
+.btn-ghost{background:var(--surface);color:var(--text-sec);border-color:var(--border)}.btn-ghost:hover{color:var(--text);border-color:var(--border-strong)}
+.btn-danger{background:transparent;color:var(--red);border-color:color-mix(in srgb,var(--red) 45%,transparent)}.btn-danger:hover{background:var(--red-dim)}
+.btn-sm{padding:4px 9px;font-size:12px;border-radius:7px}
+.btn-block{width:100%;justify-content:center;padding:11px}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px}
+
+/* ---------- 登录 ---------- */
+.login-view{position:relative;z-index:1;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.login-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:34px 38px;width:100%;max-width:384px;box-shadow:var(--shadow)}
+.login-bar{display:flex;justify-content:flex-end;margin-bottom:12px}
+.theme-toggle{background:transparent;border:1px solid var(--border);border-radius:9px;padding:6px 12px;cursor:pointer;font-size:13px;color:var(--text-sec);font-family:inherit;transition:all .15s}
+.theme-toggle:hover{border-color:var(--border-strong);color:var(--accent)}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:26px}
+.logo-mark{width:36px;height:36px;border-radius:10px;background:var(--accent);display:grid;place-items:center;color:var(--btn-text);flex-shrink:0}
+.logo-text{font-size:15px;font-weight:600;font-family:var(--mono);letter-spacing:-.01em;line-height:1.15}
+.logo-accent{color:var(--accent);font-weight:700}
+.logo-sub{font-size:9.5px;color:var(--text-ter);letter-spacing:.18em;text-transform:uppercase;margin-top:3px}
+.msg{display:none;background:var(--red-dim);color:var(--red);padding:11px 14px;border-radius:9px;margin-bottom:16px;font-size:13px;text-align:center;border:1px solid color-mix(in srgb,var(--red) 30%,transparent)}
+.field label{display:block;font-size:11.5px;font-weight:600;color:var(--text-sec);margin-bottom:6px;letter-spacing:.03em}
+.field input,.field select{width:100%;padding:8px 11px;border:1px solid var(--border);border-radius:9px;font-size:13px;font-family:var(--mono);background:var(--bg);color:var(--text);transition:border-color .14s,box-shadow .14s}
 .field input:focus,.field select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
 .field .hint{font-size:11px;color:var(--text-ter);margin-top:4px;line-height:1.4}
-.check{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text-sec);cursor:pointer;user-select:none;padding:6px 0}
-.check input{accent-color:var(--accent);width:15px;height:15px}
-/* ---------- node editor rows ---------- */
-.nedit{display:grid;grid-template-columns:110px 1fr 1fr 90px 240px 60px;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.login-card .foot{margin-top:20px;text-align:center;font-size:11.5px;color:var(--text-ter);font-family:var(--mono)}
+
+/* ---------- 主面板骨架 ---------- */
+.app{position:relative;z-index:1;display:flex;min-height:100vh}
+.sidebar{width:204px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;position:sticky;top:0;height:100vh;padding:18px 12px}
+.sidebar .brand{padding:0 6px 16px;border-bottom:1px solid var(--border);margin-bottom:10px}
+.nav{display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto}
+.nav button{position:relative;display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:9px 11px;border:none;border-radius:9px;background:transparent;color:var(--text-sec);font-size:13.5px;font-weight:500;cursor:pointer;transition:background .14s,color .14s}
+.nav button:hover{background:var(--surface-2);color:var(--text)}
+.nav button.active{background:var(--accent-dim);color:var(--accent);font-weight:600}
+.nav button.active::before{content:"";position:absolute;left:0;top:20%;bottom:20%;width:2.5px;border-radius:2px;background:var(--accent)}
+.sidebar-foot{border-top:1px solid var(--border);padding-top:10px;display:flex;flex-direction:column;gap:8px}
+.conn{display:flex;align-items:center;gap:7px;padding:3px 8px;font-size:11.5px;color:var(--text-ter);min-width:0}
+.conn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.conn .cshort{display:none}
+.conn .pulse{width:7px;height:7px;border-radius:50%;background:var(--ok);position:relative;flex-shrink:0}
+.conn .pulse::after{content:"";position:absolute;inset:-3px;border-radius:50%;background:var(--ok);opacity:.35;animation:pulse 2s ease-out infinite}
+@keyframes pulse{0%{transform:scale(.6);opacity:.5}70%{transform:scale(1.7);opacity:0}100%{opacity:0}}
+.conn.offline .pulse{background:var(--text-ter)}
+.conn.offline .pulse::after{animation:none;background:var(--text-ter)}
+.mini{font-size:11px;letter-spacing:.02em;color:var(--text-sec);font-family:var(--mono);padding:0 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.main{flex:1;min-width:0;padding:32px 36px 72px;max-width:1280px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--border)}
+.topbar h1{font-size:20px;font-weight:700;letter-spacing:-.4px;flex:1;display:flex;align-items:baseline;gap:10px}
+.topbar .crumb{font-size:12px;color:var(--text-ter);font-weight:500;letter-spacing:.04em}
+
+/* ---------- 统计卡 ---------- */
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:22px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden}
+.stat .k{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--text-ter);margin-bottom:9px;display:flex;align-items:center;gap:7px}
+.stat .v{font-size:30px;font-weight:700;font-family:var(--mono);letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums}
+.stat .sub{font-size:11.5px;color:var(--text-ter);margin-top:7px;font-family:var(--mono)}
+.stat .v.green{color:var(--ok)}.stat .v.orange{color:var(--orange)}.stat .v.red{color:var(--red)}.stat .v.blue{color:var(--blue)}
+
+/* ---------- 卡片 ---------- */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:22px 24px;margin-bottom:16px}
+.card h2{font-size:14.5px;font-weight:700;letter-spacing:-.2px;margin-bottom:14px;display:flex;align-items:center;gap:9px}
+.card .hint{font-size:12.5px;color:var(--text-sec);margin:-8px 0 14px}
+.card .card-actions{display:flex;gap:8px;align-items:center;margin:0 0 12px}
+
+/* ---------- 表格 ---------- */
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-size:11px;font-weight:600;color:var(--text-ter);text-transform:uppercase;letter-spacing:.07em;padding:9px 12px;border-bottom:1px solid var(--border)}
+.tbl td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
+.tbl tbody tr{transition:background .12s}
+.tbl tbody tr:hover{background:color-mix(in srgb,var(--surface-2) 55%,transparent)}
+.tbl tbody tr:last-child td{border-bottom:none}
+.tbl tbody tr.hl{background:var(--accent-dim)}
+.tbl th.num,.tbl td.num{text-align:right}
+.tbl input[type=text],.tbl input[type=password],.tbl input:not([type]),.tbl select{padding:5px 8px;font-size:12.5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);width:100%;min-width:60px;transition:border-color .14s,box-shadow .14s}
+.tbl input:focus,.tbl select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+
+/* ---------- 状态徽章 / 标签 / 节点名 ---------- */
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2.5px 9px;border-radius:999px;font-size:11.5px;font-weight:600;letter-spacing:.02em}
+.badge .bdot{width:6px;height:6px;border-radius:50%}
+.badge.available{background:var(--ok-dim);color:var(--ok)}.badge.available .bdot{background:var(--ok)}
+.badge.exhausted{background:var(--orange-dim);color:var(--orange)}.badge.exhausted .bdot{background:var(--orange)}
+.badge.dead{background:var(--red-dim);color:var(--red)}.badge.dead .bdot{background:var(--red)}
+.badge.idle{background:var(--blue-dim);color:var(--blue)}.badge.idle .bdot{background:var(--blue)}
+.tag{display:inline-flex;align-items:center;padding:1px 7px;border-radius:6px;font-size:10.5px;font-weight:600;letter-spacing:.03em;vertical-align:1px}
+.tag.cur{background:var(--accent-dim);color:var(--accent);margin-left:6px}
+.tag.man{background:var(--blue-dim);color:var(--blue);margin-left:6px}
+.node-name{font-weight:600}
+.proto{font-family:var(--mono);font-size:12px;color:var(--text-sec)}
+.err{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;color:var(--text-ter)}
+.acts{white-space:nowrap}
+.acts .btn{margin-right:4px}
+
+/* ---------- 筛选 chips ---------- */
+.filter-chips{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 13px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:var(--text-sec);font-size:12.5px;font-weight:500;cursor:pointer;transition:all .14s}
+.chip:hover{border-color:var(--border-strong);color:var(--text)}
+.chip.active{background:var(--accent-dim);border-color:transparent;color:var(--accent);font-weight:600}
+.chip .cnt{font-family:var(--mono);font-size:11px;opacity:.7}
+
+/* ---------- 节点编辑器 / 流量条 / 网关 ---------- */
+.nedit{display:grid;grid-template-columns:110px 1fr 1fr 90px 64px;gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
 .nedit input,.nedit select{padding:5.5px 9px;font-size:12.5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);width:100%}
 .nedit details{margin-top:8px;grid-column:1/-1;font-size:12px}
-.nedit details summary{cursor:pointer;color:var(--text-sec);font-weight:500;letter-spacing:.3px}
-.nedit .extra{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;padding:10px 12px;background:var(--surface-2);border-radius:var(--radius-sm);margin-top:6px}
-.pill{display:inline-flex;align-items:center;gap:6px;background:var(--surface-2);border:1px solid var(--border);border-radius:999px;padding:3px 10px;font-size:12px;font-family:var(--mono);color:var(--text-sec);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pill .x{cursor:pointer;color:var(--text-ter);font-weight:700;padding:0 2px}
-.pill .x:hover{color:var(--red)}
-.filter-chips{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
-.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 13px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:var(--text-sec);font-size:12.5px;font-weight:500;cursor:pointer;transition:all .15s}
-.chip:hover{border-color:var(--text-ter);color:var(--text)}
-.chip.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent);font-weight:600}
-/* ---------- misc ---------- */
+.nedit details summary{cursor:pointer;color:var(--text-sec);font-weight:500;letter-spacing:.02em}
+.nedit .extra{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;padding:10px 12px;background:var(--surface-2);border-radius:9px;margin-top:6px}
+.check{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text-sec);cursor:pointer;user-select:none;padding:6px 0}
+.check input{accent-color:var(--accent);width:15px;height:15px}
+.usage{display:flex;align-items:center;gap:8px;min-width:150px}
+.usage-bar{flex:1;height:5px;border-radius:99px;background:var(--surface-2);overflow:hidden}
+.usage-bar i{display:block;height:100%;border-radius:99px;background:var(--accent)}
+.usage span{font-size:11.5px;color:var(--text-sec);font-family:var(--mono);white-space:nowrap}
+.gw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
+.gw-box{border:1px solid var(--border);border-radius:9px;padding:10px 12px;background:var(--bg)}
+.gw-label{font-size:11.5px;color:var(--text-ter);margin-bottom:5px;letter-spacing:.03em}
+.gw-copy{display:flex;align-items:center;gap:6px;background:none;border:none;padding:0;cursor:pointer;color:var(--text);font-family:var(--mono);font-size:12.5px;transition:color .14s}
+.gw-copy:hover{color:var(--accent)}
+.gw-copy code{font-family:var(--mono);word-break:break-all}
+.gw-copy .glyph{display:inline-flex;align-items:center;gap:4px;font-size:11px;opacity:.7}
+
+/* ---------- 请求分布（Token 卡片） ---------- */
+.model-bars{display:grid;gap:6px;margin:2px 0 16px}
+.model-bars .mb-head{font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-ter);margin-bottom:8px}
+.mbar{display:grid;grid-template-columns:minmax(120px,180px) 1fr 88px;gap:12px;align-items:center;font-size:11.5px}
+.mbar .lbl{font-family:var(--mono);color:var(--text-sec);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mbar .track{height:6px;border-radius:99px;background:var(--surface-2);overflow:hidden}
+.mbar .track i{display:block;height:100%;border-radius:99px;background:var(--accent)}
+.mbar .val{font-family:var(--mono);color:var(--text-ter);text-align:right;font-variant-numeric:tabular-nums}
+
+/* ---------- 延迟分布（节点页） ---------- */
+.latdist{margin:-4px 0 16px;padding:12px 16px;border:1px solid var(--border);border-radius:9px;background:var(--surface)}
+.latdist .row{display:flex;align-items:center;gap:12px}
+.latdist .ld-title{font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-ter);flex:none}
+.latdist .ld-track{flex:1;display:flex;height:8px;border-radius:99px;overflow:hidden;background:var(--surface-2);min-width:0}
+.latdist .ld-seg{height:100%}
+.latdist .ld-seg.g{background:var(--ok)}
+.latdist .ld-seg.b{background:var(--accent)}
+.latdist .ld-seg.o{background:var(--orange)}
+.latdist .ld-seg.r{background:var(--red)}
+.latdist .ld-legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:11px;font-family:var(--mono);color:var(--text-sec)}
+.latdist .ld-key{display:inline-flex;align-items:center;gap:5px}
+.latdist .ld-key i{width:8px;height:8px;border-radius:2px;flex:none}
+.latdist .ld-key i.g{background:var(--ok)}
+.latdist .ld-key i.b{background:var(--accent)}
+.latdist .ld-key i.o{background:var(--orange)}
+.latdist .ld-key i.r{background:var(--red)}
+
+/* ---------- 实时趋势（概览） ---------- */
+.trends-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-top:2px}
+.trend{border:1px solid var(--border);border-radius:9px;background:var(--bg);padding:12px 14px 8px}
+.trend-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
+.trend-label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-ter)}
+.trend-cur{font-family:var(--mono);font-size:12px;color:var(--text);font-variant-numeric:tabular-nums;white-space:nowrap}
+.spark{display:block;width:100%;height:64px}
+.trends-empty{text-align:center;color:var(--text-ter);font-size:12.5px;padding:18px 0}
+@media(max-width:560px){.trends-grid{grid-template-columns:1fr}}
+@media(max-width:560px){.mbar{grid-template-columns:1fr 1fr}}
+
+/* ---------- 页面切换 ---------- */
 .page{display:none}
 .page.active{display:block;animation:fadeIn .18s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
-#toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(20px);background:var(--text);color:var(--bg);padding:10px 22px;border-radius:10px;font-size:13.5px;font-weight:600;opacity:0;pointer-events:none;transition:all .2s;z-index:999}
+
+/* ---------- Toast ---------- */
+#toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(16px);background:var(--text);color:var(--bg);padding:10px 22px;border-radius:10px;font-size:13.5px;font-weight:600;opacity:0;pointer-events:none;transition:all .22s cubic-bezier(.2,.7,.3,1);z-index:999;box-shadow:var(--shadow)}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 #toast.error{background:var(--red);color:#fff}
-@media(max-width:900px){.sidebar{width:64px;padding:16px 8px}.nav button span,.brand .txt{display:none}.nav button{justify-content:center}.sidebar-foot .txt{display:none}.main{padding:20px 14px 60px}}
+
+/* ---------- 运行日志 ---------- */
+.log-wrap{max-height:520px;overflow-y:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;border:1px solid var(--border);border-radius:9px;padding:6px 0;background:var(--bg)}
+.log-line{display:flex;gap:10px;align-items:baseline;padding:1px 12px;border-left:2px solid transparent}
+.log-line:hover{background:color-mix(in srgb,var(--surface-2) 50%,transparent)}
+.log-line.lv-error{border-left-color:var(--red);background:var(--red-dim)}
+.log-line.lv-warn{border-left-color:var(--orange);background:var(--orange-dim)}
+.log-time{color:var(--text-ter);white-space:nowrap;flex:none}
+.log-lv{flex:none;width:48px;font-weight:700;letter-spacing:.06em;font-size:11px}
+.lv-info{color:var(--ok)}.lv-warn{color:var(--orange)}.lv-error{color:var(--red)}.lv-debug{color:var(--text-ter)}
+.log-msg{white-space:pre-wrap;word-break:break-all}
+.log-attrs{padding:0 12px 2px 72px;color:var(--text-ter);font-size:12px}
+.log-attrs b{color:var(--accent);font-weight:600}
+.log-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0 10px}
+
+/* ---------- 响应式 ---------- */
+@media(max-width:960px){
+  .sidebar{width:64px;padding:16px 8px}
+  .nav button span,.brand .txt,.sidebar-foot .txt{display:none}
+  .conn .ctxt{display:none}
+  .conn .cshort{display:inline}
+  .mini{display:none}
+  .nav button{justify-content:center}
+  .nav button.active::before{top:14%;bottom:14%}
+  .main{padding:20px 16px 60px}
+  .stats-row{grid-template-columns:repeat(2,1fr)}
+  .nedit{grid-template-columns:1fr 1fr 90px 64px}
+  .nedit select{grid-column:1/-1}
+}
+@media(max-width:560px){
+  .stats-row{grid-template-columns:1fr}
+}
+/* 尊重系统减弱动态偏好：去掉非必要脉冲与转场动画 */
+@media (prefers-reduced-motion:reduce){
+  .conn .pulse::after{animation:none}
+  .page.active{animation:none}
+}
 </style>
 </head>
 <body>
-<div class="app">
+
+<!-- ============ 登录视图 ============ -->
+<div id="view-app" class="app">
 <aside class="sidebar">
-<div class="brand">
-<div class="logo-mark"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20l6-8h4l-6 8z"/><path d="M4 20h4"/><path d="M12 10V4a2 2 0 00-2-2H4a2 2 0 00-2 2v9"/></svg></div>
-<div class="txt-brand"><div class="logo-text">OPENCODE TO API</div><div class="logo-sub">管理面板</div></div>
-</div>
-<nav class="nav" id="nav">
-<button data-page="overview" class="active" onclick="showPage('overview')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg><span>概览</span></button>
-<button data-page="nodes" onclick="showPage('nodes')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="15" cy="15" r="1.2" fill="currentColor"/><path d="M9 15l6-6"/></svg><span>节点池</span></button>
-<button data-page="subs" onclick="showPage('subs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10l3-3h3v14H4z"/><path d="M4 8v11a1 1 0 001 1h15"/></svg><span>订阅与配额</span></button>
-<button data-page="misc" onclick="showPage('misc')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="15" cy="6" r="2.4" fill="var(--surface)"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="18" r="2.4" fill="var(--surface)"/></svg><span>代理与模型</span></button>
-<button data-page="logs" onclick="showPage('logs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg><span>运行日志</span></button>
-</nav>
-<div class="sidebar-foot">
-<button class="btn btn-ghost" onclick="toggleTheme()" style="width:100%;justify-content:center">
-<span class="txt">主题切换</span> <span id="themeIcon">🌙</span>
-</button>
-<form method="post" action="/logout" style="margin:0"><button class="btn btn-ghost" type="submit" style="width:100%;justify-content:center"><span class="txt">退出登录</span></button></form>
-</div>
+  <div class="brand">
+    <div class="logo-mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20l6-8h4l-6 8z"/><path d="M4 20h4"/><path d="M12 10V4a2 2 0 00-2-2H4a2 2 0 00-2 2v9"/></svg></div>
+    <div class="txt"><div class="logo-text">opencode<span class="logo-accent">2api</span></div><div class="logo-sub">ADMIN · LOCAL PROXY</div></div>
+  </div>
+  <nav class="nav" id="nav">
+    <button data-page="overview" class="active" onclick="showPage('overview')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg><span>概览</span></button>
+    <button data-page="nodes" onclick="showPage('nodes')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="15" cy="15" r="1.2" fill="currentColor"/><path d="M9 15l6-6"/></svg><span>节点池</span></button>
+    <button data-page="subs" onclick="showPage('subs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10l3-3h3v14H4z"/><path d="M4 8v11a1 1 0 001 1h15"/></svg><span>订阅与配额</span></button>
+    <button data-page="misc" onclick="showPage('misc')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="15" cy="6" r="2.4" fill="var(--surface)"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="18" r="2.4" fill="var(--surface)"/></svg><span>代理与模型</span></button>
+    <button data-page="logs" onclick="showPage('logs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg><span>运行日志</span></button>
+  </nav>
+  <div class="sidebar-foot">
+    <div class="mini mono" id="sideAddr">-</div>
+    <div class="conn" id="connState"><span class="pulse"></span><span class="ctxt">连接中…</span><span class="cshort">演示</span></div>
+    <button class="btn btn-ghost btn-block theme-btn-ic" type="button" onclick="toggleTheme()" style="justify-content:center" aria-label="切换主题"><span class="txt">主题切换</span><svg class="ic-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg><svg class="ic-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
+    <form method="post" action="/logout" style="margin:0"><button class="btn btn-ghost btn-block" type="submit" style="justify-content:center" aria-label="退出登录"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg><span class="txt">退出登录</span></button></form>
+  </div>
 </aside>
+
 <main class="main">
-<div class="topbar">
-<h1 id="pageTitle">概览</h1>
-<button class="btn btn-ghost btn-sm" onclick="reloadConfig()">刷新会话 &amp; 模型</button>
-<button class="btn btn-success btn-sm" onclick="loadAll()">刷新数据</button>
-</div>
+  <div class="topbar">
+    <h1 id="pageTitle">概览<span class="crumb" id="pageCrumb">OPENCODE TO API</span></h1>
+    <button class="btn btn-ghost btn-sm" onclick="reloadConfig()"><span class="lbl">刷新会话 &amp; 模型</span></button>
+    <button class="btn btn-primary btn-sm" onclick="loadAll()"><span class="lbl">刷新数据</span></button>
+  </div>
 
-<!-- ============ 概览 ============ -->
-<section id="page-overview" class="page active">
-<div class="stats-row">
-<div class="stat"><div class="k"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6c8aff" stroke-width="2" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="#6c8aff"/><circle cx="15" cy="15" r="1.2" fill="#6c8aff"/></svg>节点总数</div><div class="v blue" id="ovTotal">-</div><div class="sub" id="ovActive">当前: -</div></div>
-<div class="stat"><div class="k"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12H4"/><path d="M4 12l5-5M4 12l5 5"/></svg>可用</div><div class="v green" id="ovHealthy">-</div><div class="sub" id="ovManual">当前节点指纹</div></div>
-<div class="stat"><div class="k"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--orange)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>配额冷却</div><div class="v orange" id="ovExhausted">-</div><div class="sub">24h 自动恢复</div></div>
-<div class="stat"><div class="k"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>故障</div><div class="v red" id="ovDead">-</div><div class="sub">60s 后自动重试</div></div>
-</div>
-<div class="card">
-<h2><span class="dot green"></span>Token 统计</h2>
-<div class="actions" style="margin-top:0;margin-bottom:12px">
-<button class="btn btn-ghost btn-sm" onclick="loadStats()">刷新</button>
-<button class="btn btn-danger btn-sm" onclick="resetStats()">清空统计</button>
-<span id="resetStatus" style="font-size:11px;color:var(--text-ter)"></span>
-</div>
-<div style="overflow-x:auto"><table class="tbl" id="statsTable"><thead><tr><th>模型</th><th>请求数</th><th>输入 Token</th><th>输出 Token</th><th>总计</th></tr></thead><tbody><tr><td colspan="5" class="empty-hint">加载中...</td></tr></tbody></table></div>
-</div>
-<div class="card">
-<h2><span class="dot blue"></span>模型能力</h2>
-<div style="overflow-x:auto"><table class="tbl" id="capTable"><thead><tr><th>模型</th><th>上下文窗口</th><th>最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载中...</td></tr></tbody></table></div>
-</div>
-</section>
+  <!-- ============ 概览 ============ -->
+  <section id="page-overview" class="page active" data-od-id="overview">
+    <div class="stats-row">
+      <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="15" cy="15" r="1.2" fill="currentColor"/></svg>节点总数</div><div class="v blue" id="ovTotal">-</div><div class="sub" id="ovActive">当前: -</div></div>
+      <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12H4"/><path d="M4 12l5-5M4 12l5 5"/></svg>可用</div><div class="v green" id="ovHealthy">-</div><div class="sub" id="ovManual">当前节点指纹</div></div>
+      <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>配额冷却</div><div class="v orange" id="ovExhausted">-</div><div class="sub">24h 自动恢复</div></div>
+      <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>故障</div><div class="v red" id="ovDead">-</div><div class="sub">60s 后自动重试</div></div>
+    </div>
+    <div class="card" data-od-id="trends">
+      <h2>实时趋势</h2>
+      <p class="hint">每 5 秒采样一次 · 最近 30 个样本（请求量来自 /api/stats，节点健康与延迟来自 /api/nodes）。</p>
+      <div class="trends-grid" id="trendsGrid"></div>
+    </div>
+    <div class="card" data-od-id="gateway">
+      <h2>快速接入</h2>
+      <p class="hint">客户端 base_url 与 API key 统一从这里复制，自动取当前访问域名 / 端口。</p>
+      <div class="gw-grid">
+        <div class="gw-box">
+          <div class="gw-label">统一 API 地址</div>
+          <button class="gw-copy" onclick="copyText(gwBase(),'统一 API 地址')" title="点击复制"><code id="gwAddress"></code><span class="glyph"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>复制</span></button>
+          <div style="font-size:11px;color:var(--text-ter);margin-top:4px">客户端 base_url 填此地址</div>
+        </div>
+        <div class="gw-box">
+          <div class="gw-label">统一密钥</div>
+          <button class="gw-copy" onclick="copyText(document.getElementById('apiKeyShow').dataset.v||'','统一密钥')" title="点击复制"><code id="apiKeyShow"></code><span class="glyph"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>复制</span></button>
+          <div style="font-size:11px;color:var(--text-ter);margin-top:4px">留空 = 不启用（无 key 访问仍可用）</div>
+        </div>
+      </div>
+    </div>
+    <div class="card" data-od-id="token-stats">
+      <h2>Token 统计</h2>
+      <div class="card-actions">
+        <button class="btn btn-ghost btn-sm" onclick="loadStats()">刷新</button>
+        <button class="btn btn-danger btn-sm" onclick="resetStats()">清空统计</button>
+        <span id="resetStatus" class="muted" style="font-size:11px"></span>
+      </div>
+      <div class="model-bars" id="modelBars"></div>
+      <div style="overflow-x:auto"><table class="tbl" id="statsTable"><thead><tr><th>模型</th><th class="num">请求数</th><th class="num">输入 Token</th><th class="num">输出 Token</th><th class="num">总计</th></tr></thead><tbody><tr><td colspan="5" class="empty-hint">加载中…</td></tr></tbody></table></div>
+    </div>
+    <div class="card" data-od-id="model-caps">
+      <h2>模型能力</h2>
+      <div style="overflow-x:auto"><table class="tbl" id="capTable"><thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载中…</td></tr></tbody></table></div>
+    </div>
+  </section>
 
-<!-- ============ 节点池 ============ -->
-<section id="page-nodes" class="page">
-<div class="filter-chips" id="stateChips">
-<button class="chip active" data-f="all" onclick="setFilter('all')">全部</button>
-<button class="chip" data-f="available" onclick="setFilter('available')">可用</button>
-<button class="chip" data-f="exhausted" onclick="setFilter('exhausted')">已耗尽</button>
-<button class="chip" data-f="dead" onclick="setFilter('dead')">故障</button>
-</div>
-<div style="overflow-x:auto"><table class="tbl" id="nodeTable">
-<thead><tr><th style="width:18%">名称</th><th style="width:8%">协议</th><th style="width:8%">状态</th><th style="width:9%">延迟</th><th style="width:16%">冷却至</th><th style="width:31%">最近错误</th><th style="width:10%"></th></tr></thead>
-<tbody></tbody>
-</table></div>
-<div class="actions">
-<button class="btn btn-success" onclick="reloadSubs()">重新加载订阅</button>
-<button class="btn btn-ghost" onclick="resetAllMarks()">解除全部标记</button>
-<button class="btn btn-ghost" onclick="probeAll()">测速</button>
-<button class="btn btn-ghost" onclick="loadNodes()">刷新节点</button>
-<span id="nodeStatus" style="font-size:11px;color:var(--text-ter)"></span>
-</div>
-</section>
+  <!-- ============ 节点池 ============ -->
+  <section id="page-nodes" class="page" data-od-id="nodes">
+    <div class="filter-chips" id="stateChips">
+      <button class="chip active" data-f="all" onclick="setFilter('all')">全部 <span class="cnt" id="cntAll"></span></button>
+      <button class="chip" data-f="available" onclick="setFilter('available')">可用 <span class="cnt" id="cntAvail"></span></button>
+      <button class="chip" data-f="exhausted" onclick="setFilter('exhausted')">已耗尽 <span class="cnt" id="cntExh"></span></button>
+      <button class="chip" data-f="dead" onclick="setFilter('dead')">故障 <span class="cnt" id="cntDead"></span></button>
+    </div>
+    <div class="latdist" id="latdist"></div>
+    <div class="card" style="padding:14px 0 6px">
+      <div style="overflow-x:auto"><table class="tbl" id="nodeTable">
+        <thead><tr><th style="width:20%">名称</th><th style="width:9%">协议</th><th style="width:9%">状态</th><th class="num" style="width:9%">延迟</th><th style="width:16%">冷却至</th><th style="width:27%">最近错误</th><th style="width:10%"></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="reloadSubs()">重新加载订阅</button>
+      <button class="btn btn-ghost" onclick="resetAllMarks()">解除全部标记</button>
+      <button class="btn btn-ghost" onclick="probeAll()">测速</button>
+      <button class="btn btn-ghost" onclick="loadNodes()">刷新节点</button>
+      <span id="nodeStatus" class="muted" style="font-size:11px"></span>
+    </div>
+  </section>
 
-<!-- ============ 订阅与配额 ============ -->
-<section id="page-subs" class="page">
-<div class="card">
-<h2><span class="dot blue"></span>订阅源</h2>
-<p style="font-size:12.5px;color:var(--text-sec);margin:-6px 0 12px">Clash YAML / 行式 URI / base64 包裹。修改后点底部「保存订阅与节点」立即生效。</p>
-<div style="overflow-x:auto"><table class="tbl" id="subTable">
-<thead><tr><th style="width:13%">名称</th><th style="width:28%">URL</th><th style="width:8%">间隔(小时)</th><th style="width:7%">节点数</th><th style="width:16%">流量</th><th style="width:14%">上次拉取</th><th style="width:14%"></th></tr></thead>
-<tbody></tbody>
-</table></div>
-<div class="actions"><button class="btn btn-primary" onclick="addSub()">添加订阅源</button></div>
-</div>
-<div class="card">
-<h2><span class="dot orange"></span>手动配置节点</h2>
-<p style="font-size:12.5px;color:var(--text-sec);margin:-6px 0 12px">与订阅合并进节点池（订阅节点优先按指纹去重）。</p>
-<div id="manualEditors"></div>
-<div class="actions"><button class="btn btn-primary" onclick="addNodeEditor()">添加节点</button></div>
-</div>
-<div class="card">
-<h2><span class="dot orange"></span>免费额度切换</h2>
-<p style="font-size:12.5px;color:var(--text-sec);margin:-6px 0 14px">免费层请求遇到配额耗尽信号时自动标记当前节点并切换下一个节点重试。</p>
-<div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))">
-<div class="field"><label>error.type 命中（逗号分隔）</label><input id="q_error_types" placeholder="FreeUsageLimitError, insufficient_quota"></div>
-<div class="field"><label>error.message 关键词（逗号分隔）</label><input id="q_message_kw" placeholder="free usage limit, quota, limit exceeded"></div>
-<div class="field"><label>单请求最大切换次数</label><input id="q_max_switches" type="number" min="0" max="20" value="5"></div>
-<div class="field"><label>耗尽冷却（小时）</label><input id="q_cooldown_h" type="number" min="0" max="168" value="24"></div>
-<div class="field"><label>故障冷却（分钟）</label><input id="q_cooldown_m" type="number" min="0" max="1440" value="1"></div>
-</div>
-<div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-top:12px">
-<div class="field"><label>健康检查间隔（分钟，0=默认15）</label><input id="q_health_interval" type="number" min="1" max="1440" value="15"></div>
-<div class="field"><label>健康检查探针 URL</label><input id="q_health_url" placeholder="https://www.gstatic.com/generate_204"></div>
-</div>
-<div class="hint" style="font-size:11.5px;color:var(--text-ter);margin-top:8px">403 且无上述签名视为耗尽；429 无签名不视为耗尽。</div>
-</div>
-<div class="actions" style="margin-top:4px">
-<button class="btn btn-success" onclick="saveSubsConfig()">保存订阅与节点</button>
-<button class="btn btn-primary" onclick="saveQuotaConfig()">保存配额设置</button>
-<span id="subSaveStatus" style="font-size:11px;color:var(--text-ter)"></span>
-</div>
-</section>
+  <!-- ============ 订阅与配额 ============ -->
+  <section id="page-subs" class="page" data-od-id="subs">
+    <div class="card">
+      <h2>订阅源</h2>
+      <p class="hint">Clash YAML / 行式 URI / base64 包裹。修改后点底部「保存订阅与节点」立即生效。</p>
+      <div style="overflow-x:auto"><table class="tbl" id="subTable">
+        <thead><tr><th style="width:13%">名称</th><th style="width:26%">URL</th><th style="width:8%">间隔(小时)</th><th class="num" style="width:7%">节点数</th><th style="width:18%">流量</th><th style="width:14%">上次拉取</th><th style="width:9%"></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addSub()">添加订阅源</button></div>
+    </div>
+    <div class="card">
+      <h2>手动配置节点</h2>
+      <p class="hint">与订阅合并进节点池（订阅节点优先按指纹去重）。</p>
+      <div id="manualEditors"></div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addNodeEditor()">添加节点</button></div>
+    </div>
+    <div class="card">
+      <h2>免费额度切换</h2>
+      <p class="hint">免费层请求遇到配额耗尽信号时自动标记当前节点并切换下一个节点重试。</p>
+      <div class="form-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+        <div class="field"><label>error.type 命中（逗号分隔）</label><input id="q_error_types" placeholder="FreeUsageLimitError, insufficient_quota"></div>
+        <div class="field"><label>error.message 关键词（逗号分隔）</label><input id="q_message_kw" placeholder="free usage limit, quota, limit exceeded"></div>
+        <div class="field"><label>单请求最大切换次数</label><input id="q_max_switches" type="number" min="0" max="20" value="5"></div>
+        <div class="field"><label>耗尽冷却（小时）</label><input id="q_cooldown_h" type="number" min="0" max="168" value="24"></div>
+        <div class="field"><label>故障冷却（分钟）</label><input id="q_cooldown_m" type="number" min="0" max="1440" value="1"></div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px">
+        <div class="field"><label>健康检查间隔（分钟，0=默认15）</label><input id="q_health_interval" type="number" min="1" max="1440" value="15"></div>
+        <div class="field"><label>健康检查探针 URL</label><input id="q_health_url" placeholder="https://www.gstatic.com/generate_204"></div>
+      </div>
+      <div class="muted" style="font-size:11.5px;margin-top:8px">403 且无上述签名视为耗尽；429 无签名不视为耗尽。</div>
+    </div>
+    <div class="actions" style="margin-top:4px">
+      <button class="btn btn-primary" onclick="saveSubsConfig()">保存订阅与节点</button>
+      <button class="btn btn-secondary" onclick="saveQuotaConfig()">保存配额设置</button>
+      <span id="subSaveStatus" class="muted" style="font-size:11px"></span>
+    </div>
+  </section>
 
-<!-- ============ 代理与模型 ============ -->
-<section id="page-misc" class="page">
-<div class="card">
-<h2><span class="dot orange"></span>推理力度映射</h2>
-<div style="overflow-x:auto;margin-bottom:4px"><table class="tbl" id="effortTable"><thead><tr><th style="width:38%">请求值</th><th style="width:44%">映射值</th><th style="width:18%"></th></tr></thead><tbody></tbody></table></div>
-<div class="check"><input type="checkbox" id="force_disable_thinking"><label for="force_disable_thinking">强制禁用思考模式</label><span class="hint" style="font-size:11px;color:var(--text-ter)">移除所有推理内容</span></div>
-<div class="actions"><button class="btn btn-primary" onclick="addEffortRow()">添加映射</button><button class="btn btn-success" onclick="saveConfig()">保存全部</button></div>
-</div>
-<div class="card">
-<h2><span class="dot blue"></span>模型映射</h2>
-<div style="overflow-x:auto"><table class="tbl" id="aliasTable"><thead><tr><th style="width:38%">别名（请求名）</th><th style="width:44%">实际模型（上游名）</th><th style="width:18%"></th></tr></thead><tbody></tbody></table></div>
-<div class="actions"><button class="btn btn-primary" onclick="addAliasRow()">添加别名</button><button class="btn btn-success" onclick="saveConfig()">保存全部</button></div>
-</div>
-<div class="card">
-<h2><span class="dot green"></span>SOCKS5 代理</h2>
-<div style="overflow-x:auto;margin-bottom:12px"><table class="tbl" id="socks5Table"><thead><tr><th style="width:22%">名称</th><th style="width:26%">地址</th><th style="width:16%">用户名</th><th style="width:16%">密码</th><th style="width:12%"></th></tr></thead><tbody></tbody></table></div>
-<div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">
-<div class="field"><label>启用代理</label><select id="activeSocks5"><option value="">直连（不使用代理）</option></select></div>
-<div class="field"><label>带 key / 付费请求直连</label><select id="socks5_paid_direct"><option value="0">走代理（默认）</option><option value="1">直连</option></select></div>
-</div>
-<div class="actions"><button class="btn btn-primary" onclick="addSocks5Row()">添加代理</button><button class="btn btn-success" onclick="saveConfig()">保存全部</button></div>
-</div>
-<div class="card">
-<h2><span class="dot purple"></span>统一网关</h2>
-<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px">
-<div class="gw-box" style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--bg)">
-<div class="gw-label" style="font-size:11.5px;color:var(--text-ter);margin-bottom:5px">统一 API 地址</div>
-<button class="gw-copy" onclick="copyText(location.protocol+'//'+location.host+'/v1','统一 API 地址')" style="display:flex;align-items:center;gap:6px;background:none;border:none;padding:0;cursor:pointer;color:var(--accent,#3b82f6);font-family:var(--mono);font-size:12.5px" title="点击复制">
-<code id="gwAddress"></code><span style="font-size:11px;opacity:.75">⧉ 复制</span>
-</button>
-<div style="font-size:11px;color:var(--text-ter);margin-top:4px">客户端 base_url 填此地址（自动取当前访问域名/端口）</div>
-</div>
-<div class="gw-box" style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--bg)">
-<div class="gw-label" style="font-size:11.5px;color:var(--text-ter);margin-bottom:5px">统一密钥</div>
-<button class="gw-copy" onclick="copyText(document.getElementById('apiKeyShow').dataset.v||'', '统一密钥')" style="display:flex;align-items:center;gap:6px;background:none;border:none;padding:0;cursor:pointer;color:var(--text);font-family:var(--mono);font-size:12.5px" title="点击复制">
-<code id="apiKeyShow"></code><span style="font-size:11px;opacity:.75">⧉ 复制</span>
-</button>
-<div style="font-size:11px;color:var(--text-ter);margin-top:4px">API key 填此值；留空 = 不启用（无 key 访问仍可用）</div>
-</div>
-</div>
-<div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-top:12px">
-<div class="field"><label>修改 api_key（统一密钥）</label><div style="display:flex;gap:8px"><input id="apiKeyInput" type="password" placeholder="留空 = 不启用" autocomplete="off"><button class="btn" onclick="genApiKey()" title="随机生成一把 sk- 开头的密钥">生成</button></div><span class="hint" style="font-size:11px;color:var(--text-ter)">客户端/工具统一填这把 key 即可通过密钥校验；上游仍走 public 免费档</span></div>
-</div>
-<div class="actions"><button class="btn btn-success" onclick="saveConfig()">保存全部</button></div>
-</div>
-</section>
-<section id="page-logs" class="page">
-<div class="card">
-<h2><span class="dot purple"></span>运行日志</h2>
-<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0 10px">
-<div class="filter-chips" id="logLevelChips" style="margin:0">
-<button class="chip active" data-l="all" onclick="setLogLevelFilter('all')">全部</button>
-<button class="chip" data-l="DEBUG" onclick="setLogLevelFilter('DEBUG')">Debug</button>
-<button class="chip" data-l="INFO" onclick="setLogLevelFilter('INFO')">Info</button>
-<button class="chip" data-l="WARN" onclick="setLogLevelFilter('WARN')">Warn</button>
-<button class="chip" data-l="ERROR" onclick="setLogLevelFilter('ERROR')">Error</button>
-</div>
-<input id="logKeyword" type="text" placeholder="关键词过滤（消息 / 字段值）" style="flex:1;min-width:180px" oninput="setLogKeyword(this.value)">
-</div>
-<div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">
-<label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="logAutoRefresh" checked onchange="toggleLogStream(this.checked)">自动刷新</label>
-<label style="display:flex;align-items:center;gap:6px;font-size:13px">运行级别
-<select id="logRunLevel" onchange="setLogRunLevel(this.value)" style="padding:5px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text)">
-<option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option>
-</select></label>
-<button class="btn btn-ghost" onclick="exportLogs()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg> 导出日志</button>
-<span id="logCount" style="font-size:12.5px;color:var(--muted);margin-left:auto">缓冲 0 条 / 显示 0 条</span>
-</div>
-<div id="logList" style="max-height:520px;overflow-y:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;border:1px solid var(--border);border-radius:8px;padding:6px 0;background:var(--bg)"></div>
-<div style="display:flex;align-items:center;margin-top:8px">
-<span id="logStatus" style="font-size:12px;color:var(--muted)">等待日志流…</span>
-<button id="logScrollBtn" class="btn btn-ghost" style="display:none;margin-left:auto" onclick="logScrollToBottom()">回到底部 ↓</button>
-</div>
-</div>
-</section>
+  <!-- ============ 代理与模型 ============ -->
+  <section id="page-misc" class="page" data-od-id="misc">
+    <div class="card">
+      <h2>推理力度映射</h2>
+      <div style="overflow-x:auto;margin-bottom:4px"><table class="tbl" id="effortTable"><thead><tr><th style="width:38%">请求值</th><th style="width:44%">映射值</th><th style="width:18%"></th></tr></thead><tbody></tbody></table></div>
+      <div class="check"><input type="checkbox" id="force_disable_thinking"><label for="force_disable_thinking">强制禁用思考模式</label><span class="muted" style="font-size:11px">移除所有推理内容</span></div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addEffortRow()">添加映射</button><button class="btn btn-primary" onclick="saveConfig()">保存全部</button></div>
+    </div>
+    <div class="card">
+      <h2>模型映射</h2>
+      <div style="overflow-x:auto"><table class="tbl" id="aliasTable"><thead><tr><th style="width:38%">别名（请求名）</th><th style="width:44%">实际模型（上游名）</th><th style="width:18%"></th></tr></thead><tbody></tbody></table></div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addAliasRow()">添加别名</button><button class="btn btn-primary" onclick="saveConfig()">保存全部</button></div>
+    </div>
+    <div class="card">
+      <h2>SOCKS5 代理</h2>
+      <div style="overflow-x:auto;margin-bottom:12px"><table class="tbl" id="socks5Table"><thead><tr><th style="width:22%">名称</th><th style="width:26%">地址</th><th style="width:16%">用户名</th><th style="width:16%">密码</th><th style="width:12%"></th></tr></thead><tbody></tbody></table></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+        <div class="field"><label>启用代理</label><select id="activeSocks5"><option value="">直连（不使用代理）</option></select></div>
+        <div class="field"><label>带 key / 付费请求直连</label><select id="socks5_paid_direct"><option value="0">走代理（默认）</option><option value="1">直连</option></select></div>
+      </div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addSocks5Row()">添加代理</button><button class="btn btn-primary" onclick="saveConfig()">保存全部</button></div>
+    </div>
+    <div class="card">
+      <h2>统一网关</h2>
+      <div class="gw-grid">
+        <div class="gw-box">
+          <div class="gw-label">统一 API 地址</div>
+          <button class="gw-copy" onclick="copyText(gwBase(),'统一 API 地址')" title="点击复制"><code id="gwAddress2"></code><span class="glyph"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>复制</span></button>
+          <div class="muted" style="font-size:11px;margin-top:4px">客户端 base_url 填此地址（自动取当前访问域名/端口）</div>
+        </div>
+        <div class="gw-box">
+          <div class="gw-label">统一密钥</div>
+          <button class="gw-copy" onclick="copyText(document.getElementById('apiKeyShow2').dataset.v||'','统一密钥')" title="点击复制"><code id="apiKeyShow2"></code><span class="glyph"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>复制</span></button>
+          <div class="muted" style="font-size:11px;margin-top:4px">API key 填此值；留空 = 不启用（无 key 访问仍可用）</div>
+        </div>
+      </div>
+      <div class="field" style="margin-top:12px;max-width:520px"><label>修改 api_key（统一密钥）</label><div style="display:flex;gap:8px"><input id="apiKeyInput" type="password" placeholder="留空 = 不启用" autocomplete="off"><button class="btn btn-ghost" onclick="genApiKey()" title="随机生成一把 sk- 开头的密钥">生成</button></div><span class="hint">客户端/工具统一填这把 key 即可通过密钥校验；上游仍走 public 免费档</span></div>
+      <div class="actions"><button class="btn btn-primary" onclick="saveConfig()">保存全部</button></div>
+    </div>
+  </section>
+
+  <!-- ============ 运行日志 ============ -->
+  <section id="page-logs" class="page" data-od-id="logs">
+    <div class="card">
+      <h2>运行日志</h2>
+      <div class="filter-chips" id="logLevelChips" style="margin:0">
+        <button class="chip active" data-l="all" onclick="setLogLevelFilter('all')">全部</button>
+        <button class="chip" data-l="DEBUG" onclick="setLogLevelFilter('DEBUG')">Debug</button>
+        <button class="chip" data-l="INFO" onclick="setLogLevelFilter('INFO')">Info</button>
+        <button class="chip" data-l="WARN" onclick="setLogLevelFilter('WARN')">Warn</button>
+        <button class="chip" data-l="ERROR" onclick="setLogLevelFilter('ERROR')">Error</button>
+      </div>
+      <div class="log-toolbar" style="margin-top:0">
+        <input id="logKeyword" type="text" placeholder="关键词过滤（消息 / 字段值）" style="flex:1;min-width:180px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)" oninput="setLogKeyword(this.value)">
+        <button class="btn btn-ghost" onclick="exportLogs()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg><span class="lbl">导出日志</span></button>
+        <span id="logCount" class="muted" style="font-size:12.5px;margin-left:auto">缓冲 0 条 / 显示 0 条</span>
+      </div>
+      <div class="log-toolbar" style="margin-top:0">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="logAutoRefresh" checked onchange="toggleLogStream(this.checked)">自动刷新</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">运行级别
+          <select id="logRunLevel" onchange="setLogRunLevel(this.value)" style="padding:5px 8px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text)">
+            <option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option>
+          </select>
+        </label>
+      </div>
+      <div class="log-wrap" id="logList"></div>
+      <div style="display:flex;align-items:center;margin-top:8px">
+        <span id="logStatus" class="muted" style="font-size:12px">等待日志流…</span>
+        <button id="logScrollBtn" class="btn btn-ghost btn-sm" style="display:none;margin-left:auto" onclick="logScrollToBottom()">回到底部 ↓</button>
+      </div>
+    </div>
+  </section>
 </main>
 </div>
+
 <div id="toast"></div>
+
 <script>
-let cfg={},nodeData=[],subData=[],nodeEditors=[],modelList=[],filterState='all';
+/* ============================================================
+   核心状态与工具
+   ============================================================ */
+const q=s=>document.querySelector(s);
+const qa=s=>document.querySelectorAll(s);
+let cfg={},nodeData=[],subData=[],nodeEditors=[],modelList=[],filter='all';
+let DEMO_MODE=false,demoLogTimer=null;
+const TREND_MAX=30;
+let trends={req:[],ok:[],lat:[]},lastReqTotal=0,lastHealthy=null,lastMedianLat=0;
+
 /* ---------- 主题：默认深色 ---------- */
-function applyTheme(){const t=localStorage.getItem('theme')||'dark';document.documentElement.setAttribute('data-theme',t);document.getElementById('themeIcon').textContent=t==='dark'?'🌙':'☀'}
-function toggleTheme(){const cur=document.documentElement.getAttribute('data-theme');const next=cur==='dark'?'light':'dark';localStorage.setItem('theme',next);applyTheme()}
+function applyTheme(){
+  document.documentElement.setAttribute('data-theme',localStorage.getItem('theme')||'dark');
+}
+function toggleTheme(){
+  const cur=document.documentElement.getAttribute('data-theme');
+  localStorage.setItem('theme',cur==='dark'?'light':'dark');
+  applyTheme();
+}
+
 /* ---------- 导航 ---------- */
-const pageTitles={overview:'概览',nodes:'节点池',subs:'订阅与配额',misc:'代理与模型',logs:'运行日志'};
-function showPage(id){document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));document.getElementById('page-'+id).classList.add('active');document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===id));document.getElementById('pageTitle').textContent=pageTitles[id]}
+const pageTitles={overview:['概览','OPENCODE TO API'],nodes:['节点池','节点健康与切换'],subs:['订阅与配额','订阅源 / 手动节点 / 免费额度'],misc:['代理与模型','推理 / 别名 / SOCKS5 / 网关'],logs:['运行日志','实时流式日志']};
+function showPage(id){
+  qa('.page').forEach(p=>p.classList.remove('active'));
+  q('#page-'+id).classList.add('active');
+  qa('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===id));
+  q('#pageTitle').firstChild.textContent=pageTitles[id][0]+' ';
+  q('#pageCrumb').textContent=pageTitles[id][1];
+  if(id==='logs'&&!DEMO_MODE)initLogs();
+}
+
 /* ---------- 工具 ---------- */
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
 function fmt(n){return Number(n||0).toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')}
 let toastT;
-function showToast(msg,t){const e=document.getElementById('toast');e.textContent=msg;e.className=t==='error'?'error show':'show';clearTimeout(toastT);toastT=setTimeout(()=>e.classList.remove('show'),2600)}
+function showToast(msg,t){const e=q('#toast');e.textContent=msg;e.className=t==='error'?'error show':'show';clearTimeout(toastT);toastT=setTimeout(()=>e.classList.remove('show'),2600)}
 function copyText(text,label){if(!text){showToast('暂无可复制内容','error');return}const done=()=>showToast('已复制'+label,'success');if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(done).catch(()=>fallbackCopy(text,done))}else{fallbackCopy(text,done)}}
 function fallbackCopy(text,done){const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch{showToast('复制失败，请手动复制','error')}document.body.removeChild(ta)}
-/* ---------- 数据加载 ---------- */
-async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),loadCaps(),fetchModelList()]);renderAliasTable()}
-async function loadConfig(){try{const r=await fetch('/api/config');if(!r.ok)throw new Error(await r.text());cfg=await r.json();renderConfigEditors()}catch(e){showToast('配置加载失败: '+e.message,'error')}}
-async function loadNodes(){try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=d.subscriptions||[];renderOverview(d);renderNodeTable()}catch(e){document.querySelector('#nodeTable tbody').innerHTML='<tr><td colspan="6" class="empty-hint">加载失败: '+esc(e.message)+'</td></tr>'}}
-async function loadStats(){try{const r=await fetch('/api/stats');const d=await r.json();renderStats(d)}catch(e){document.getElementById('statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">加载失败</td></tr>'}}
-function renderOverview(d){document.getElementById('ovTotal').textContent=d.nodes?d.nodes.length:0;document.getElementById('ovHealthy').textContent=d.healthy??0;document.getElementById('ovExhausted').textContent=d.exhausted_count??0;document.getElementById('ovDead').textContent=d.dead_count??0;document.getElementById('ovActive').textContent=d.active_name?('当前: '+d.active_name):(d.active_fp?'当前: '+shortFp(d.active_fp):'直连');document.getElementById('ovManual').textContent=d.manual_name?('手动: '+d.manual_name):(d.manual_fp?shortFp(d.manual_fp):'自动轮询')}
-function shortFp(fp){return fp?fp.slice(0,8):''}
+function fmtBytes(b){b=Number(b)||0;if(b<=0)return '0B';const u=['B','KB','MB','GB','TB'];let i=0;while(b>=1024&&i<u.length-1){b/=1024;i++}return (b>=100?b.toFixed(0):b.toFixed(1))+u[i]}
 function fmtTokens(n){if(n==null||isNaN(n))return '-';if(n>=1000000)return (n/1000000).toFixed(n%1000000===0?0:1)+'M';if(n>=1000)return (n/1000).toFixed(n%1000===0?0:1)+'K';return ''+n}
-function fmtModalities(list){if(!list||!list.length)return '-';const names={text:'文本',image:'图像',audio:'音频',video:'视频',pdf:'PDF'};return list.map(m=>names[m]||m).join(' / ')}
-async function loadCaps(){try{const r=await fetch('/v1/models');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();const rows=(d.data||[]).map(x=>({id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities})).filter(x=>x.id);rows.sort((a,b)=>a.id.localeCompare(b.id));let h='';if(!rows.length){h='<tr><td colspan="4" class="empty-hint">暂无模型数据</td></tr>'}else{for(const m of rows){h+='<tr><td class="mono">'+esc(m.id)+'</td><td>'+fmtTokens(m.cw)+'</td><td>'+fmtTokens(m.mo)+'</td><td>'+fmtModalities(m.mod)+'</td></tr>'}}document.getElementById('capTable').innerHTML='<thead><tr><th>模型</th><th>上下文窗口</th><th>最大输出</th><th>输入类型</th></tr></thead><tbody>'+h+'</tbody>'}catch(e){document.getElementById('capTable').innerHTML='<thead><tr><th>模型</th><th>上下文窗口</th><th>最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载失败: '+esc(e.message)+'</td></tr></tbody>'}}
-function renderStats(d){const ms=d.models||{};const ks=Object.keys(ms);let h='';if(!ks.length){h='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>'}else{let tr=0,pt=0,ct=0,tt=0;for(const k of ks){const m=ms[k];h+='<tr><td class="mono">'+esc(k)+'</td><td>'+fmt(m.request_count)+'</td><td>'+fmt(m.prompt_tokens)+'</td><td>'+fmt(m.completion_tokens)+'</td><td>'+fmt(m.total_tokens)+'</td></tr>';tr+=m.request_count;pt+=m.prompt_tokens;ct+=m.completion_tokens;tt+=m.total_tokens}h+='<tr><td style="font-weight:700">总计</td><td style="font-weight:700">'+fmt(tr)+'</td><td style="font-weight:700">'+fmt(pt)+'</td><td style="font-weight:700">'+fmt(ct)+'</td><td style="font-weight:700">'+fmt(tt)+'</td></tr>'}document.getElementById('statsTable').innerHTML='<thead><tr><th>模型</th><th>请求数</th><th>输入 Token</th><th>输出 Token</th><th>总计</th></tr></thead><tbody>'+h+'</tbody>'}
-/* ---------- 节点表 ---------- */
-let filter='all';
-function setFilter(f){filter=f;document.querySelectorAll('#stateChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.f===f));renderNodeTable()}
-const badgeMap={available:'<span class="badge available">可用</span>',exhausted:'<span class="badge exhausted">已耗尽</span>',dead:'<span class="badge dead">故障</span>',idle:'<span class="badge idle">未知</span>'};
-function badgeHtml(s){return badgeMap[s]||badgeMap.idle}
 function fmtTime(t){return t?String(t).replace('T',' ').slice(0,16):'-'}
-function renderNodeTable(){const tb=document.querySelector('#nodeTable tbody');const rows=nodeData.filter(n=>filter==='all'||n.state===filter);if(!rows.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}tb.innerHTML=rows.map(n=>'<tr class="'+(n.active?'hl':'')+'"><td>'+esc(n.name)+(n.active?' <span style="font-size:11px;color:var(--text-ter)">(当前)</span>':'')+(n.manual?' <span style="font-size:11px;color:var(--accent)">(手动)</span>':'')+'</td><td><span class="mono">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="mono" style="font-size:12px;color:var(--text-sec)">'+(n.latency_ms!=null&&n.latency_ms>=0?n.latency_ms+' ms':'-')+'</td><td class="mono" style="font-size:12px;color:var(--text-sec)">'+esc(fmtTime(n.cooldown_until))+'</td><td class="mono" style="font-size:11.5px;color:var(--text-ter);max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(n.last_error||'-')+'</td><td style="white-space:nowrap"><button class="btn btn-success btn-sm" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-ghost btn-sm" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button></td></tr>').join('')}
-async function nodeAction(action,fp){const st=document.getElementById('nodeStatus');st.textContent='操作中...';try{const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action,fingerprint:fp||''})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent=action==='switch'?'已切换':action==='reload'?('订阅已加载，节点 '+d.nodes+' 个'):action==='probe'?('测速完成 '+d.checked+' 个节点'):'已解除';showToast(st.textContent,'success')}catch(e){st.textContent='失败: '+e.message;showToast('操作失败: '+e.message,'error')}finally{loadNodes()}}
+function fmtModalities(list){if(!list||!list.length)return '-';const names={text:'文本',image:'图像',audio:'音频',video:'视频',pdf:'PDF'};return list.map(m=>names[m]||m).join(' / ')}
+function shortFp(fp){return fp?fp.slice(0,8):''}
+function latClass(ms){return ms<150?'':ms<400?'lat-warn':'lat-high'}
+function setConn(online){const el=q('#connState');el.classList.toggle('offline',!online);const full=online?'已连接':'演示数据 · 未连接后端';const short=online?'已连接':'演示';const a=el.querySelector('.ctxt');if(a)a.textContent=full;const b=el.querySelector('.cshort');if(b)b.textContent=short;el.title=full}
+
+/* ============================================================
+   数据加载（真实后端 / 离线演示兜底）
+   ============================================================ */
+async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),loadCaps(),fetchModelList()]);renderConfigEditors()}
+async function loadConfig(){
+  if(DEMO_MODE){cfg=JSON.parse(JSON.stringify(DEMO.cfg));return}
+  try{const r=await fetch('/api/config');if(!r.ok)throw new Error(await r.text());cfg=await r.json()}catch(e){showToast('配置加载失败: '+e.message,'error')}
+}
+async function loadNodes(){
+  if(DEMO_MODE){nodeData=DEMO.nodes.map(n=>({...n}));subData=DEMO.subscriptions.map(s=>({...s}));renderOverview({nodes:nodeData,healthy:nodeData.filter(n=>n.state==='available').length,exhausted_count:nodeData.filter(n=>n.state==='exhausted').length,dead_count:nodeData.filter(n=>n.state==='dead').length,active_name:nodeData.find(n=>n.active)?.name||'',manual_name:''});renderNodeTable();renderLatencyDist(nodeData);lastMedianLat=medianLat();return}
+  try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=d.subscriptions||[];renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);lastMedianLat=medianLat()}catch(e){q('#nodeTable tbody').innerHTML='<tr><td colspan="7" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>'}
+}
+async function loadStats(){
+  if(DEMO_MODE){renderStats(DEMO.stats);return}
+  try{const r=await fetch('/api/stats');const d=await r.json();renderStats(d)}catch(e){const tb=q('#statsTable tbody');if(tb)tb.innerHTML='<tr><td colspan="5" class="empty-hint">加载失败 <button class="btn btn-sm btn-ghost" onclick="loadStats()">重试</button></td></tr>'}
+}
+async function loadCaps(){
+  if(DEMO_MODE){renderCaps(DEMO.caps);return}
+  try{const r=await fetch('/v1/models');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();renderCaps((d.data||[]).map(x=>({id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities})))}
+  catch(e){q('#capTable').innerHTML='<thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadCaps()">重试</button></td></tr></tbody>'}
+}
+async function fetchModelList(){if(DEMO_MODE){modelList=DEMO.models.slice().sort();return}try{let m=await fetch('/api/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort()}else if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}}catch(e){}}
+function renderOverview(d){
+  lastHealthy=d.healthy??0;
+  q('#ovTotal').textContent=d.nodes?d.nodes.length:0;
+  q('#ovHealthy').textContent=d.healthy??0;
+  q('#ovExhausted').textContent=d.exhausted_count??0;
+  q('#ovDead').textContent=d.dead_count??0;
+  q('#ovActive').textContent=d.active_name?('当前: '+d.active_name):(d.active_fp?'当前: '+shortFp(d.active_fp):'直连');
+  q('#ovManual').textContent=d.manual_name?('手动: '+d.manual_name):(d.manual_fp?shortFp(d.manual_fp):'自动轮询');
+}
+function renderStats(d){
+  const ms=d.models||{};const ks=Object.keys(ms);let h='';
+  lastReqTotal=0;for(const k of ks)lastReqTotal+=(ms[k].request_count||0);
+  if(!ks.length){h='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>'}
+  else{let tr=0,pt=0,ct=0,tt=0;for(const k of ks){const m=ms[k];h+='<tr><td class="mono">'+esc(k)+'</td><td class="num">'+fmt(m.request_count)+'</td><td class="num">'+fmt(m.prompt_tokens)+'</td><td class="num">'+fmt(m.completion_tokens)+'</td><td class="num">'+fmt(m.total_tokens)+'</td></tr>';tr+=m.request_count;pt+=m.prompt_tokens;ct+=m.completion_tokens;tt+=m.total_tokens}h+='<tr><td style="font-weight:700">总计</td><td class="num" style="font-weight:700">'+fmt(tr)+'</td><td class="num" style="font-weight:700">'+fmt(pt)+'</td><td class="num" style="font-weight:700">'+fmt(ct)+'</td><td class="num" style="font-weight:700">'+fmt(tt)+'</td></tr>'}
+  q('#statsTable').innerHTML='<thead><tr><th>模型</th><th class="num">请求数</th><th class="num">输入 Token</th><th class="num">输出 Token</th><th class="num">总计</th></tr></thead><tbody>'+h+'</tbody>';
+  renderModelBars(ms);
+}
+function renderCaps(rows){
+  rows=(rows||[]).filter(x=>x&&x.id).sort((a,b)=>a.id.localeCompare(b.id));
+  let h='';
+  if(!rows.length){h='<tr><td colspan="4" class="empty-hint">暂无模型数据</td></tr>'}
+  else{for(const m of rows){h+='<tr><td class="mono">'+esc(m.id)+'</td><td class="num">'+fmtTokens(m.cw)+'</td><td class="num">'+fmtTokens(m.mo)+'</td><td>'+fmtModalities(m.mod)+'</td></tr>'}}
+  q('#capTable').innerHTML='<thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody>'+h+'</tbody>';
+}
+
+/* ---------- 请求分布：按模型占比（真实来自 /api/stats） ---------- */
+function renderModelBars(ms){
+  const box=q('#modelBars');if(!box)return;
+  const rows=Object.keys(ms||{}).map(k=>({k,req:Number(ms[k].request_count)||0})).sort((a,b)=>b.req-a.req);
+  const total=rows.reduce((s,r)=>s+r.req,0);
+  if(!total||!rows.length){box.innerHTML='';return}
+  const top=rows.slice(0,5);
+  const restReq=rows.slice(5).reduce((s,r)=>s+r.req,0);
+  if(restReq>0)top.push({k:'其他 '+(rows.length-5)+' 个模型',req:restReq});
+  box.innerHTML='<div class="mb-head">请求分布</div>'+top.map(r=>{
+    const pct=Math.max(1,Math.round(r.req/total*100));
+    return '<div class="mbar"><span class="lbl" title="'+esc(r.k)+'">'+esc(r.k)+'</span><span class="track"><i style="width:'+pct+'%"></i></span><span class="val">'+fmt(r.req)+'</span></div>';
+  }).join('');
+}
+/* ---------- 延迟分布：按节点延迟分档（真实来自 /api/nodes） ---------- */
+function renderLatencyDist(nodes){
+  const el=q('#latdist');if(!el)return;
+  const lat=(nodes||[]).filter(n=>n.latency_ms!=null&&n.latency_ms>=0).map(n=>n.latency_ms);
+  if(!lat.length){el.innerHTML='';return}
+  const buckets=[
+    {k:'<100ms',cls:'g',f:l=>l<100},
+    {k:'<200ms',cls:'b',f:l=>l<200},
+    {k:'<400ms',cls:'o',f:l=>l<400},
+    {k:'>=400ms',cls:'r',f:l=>l>=400}
+  ];
+  const total=lat.length;
+  let track='',legend='';
+  for(const b of buckets){
+    const c=lat.filter(b.f).length;
+    const pct=Math.round(c/total*100);
+    track+='<i class="ld-seg '+b.cls+'" style="width:'+pct+'%"></i>';
+    legend+='<span class="ld-key"><i class="'+b.cls+'"></i>'+b.k+' '+c+'</span>';
+  }
+  el.innerHTML='<div class="row"><span class="ld-title">延迟分布</span><div class="ld-track">'+track+'</div></div><div class="ld-legend">'+legend+'</div>';
+}
+
+/* ---------- 实时趋势：请求量 / 健康节点 / 中位延迟 ---------- */
+function csVar(n){const v=getComputedStyle(document.documentElement).getPropertyValue(n).trim();return v||'#6f96ff'}
+function medianLat(){
+  const ls=(nodeData||[]).filter(n=>n.latency_ms!=null&&n.latency_ms>=0).map(n=>n.latency_ms).sort((a,b)=>a-b);
+  if(!ls.length)return 0;
+  const mid=ls.length>>1;
+  return ls.length%2?ls[mid]:Math.round((ls[mid-1]+ls[mid])/2);
+}
+function sparkSVG(series,color){
+  const n=series.length;if(n<2)return '';
+  const W=220,H=60,P=2;
+  let mn=Infinity,mx=-Infinity;for(const v of series){if(v<mn)mn=v;if(v>mx)mx=v}
+  if(mx-mn<1)mx=mn+1;
+  const step=(W-2*P)/(n-1);
+  let pts=[],area='';
+  for(let i=0;i<n;i++){
+    const x=P+i*step;
+    const y=H-P-((series[i]-mn)/(mx-mn))*(H-2*P);
+    pts.push(x.toFixed(1)+','+y.toFixed(1));
+    if(i===0)area='M'+x.toFixed(1)+','+(H-P);
+    area+=' L'+x.toFixed(1)+','+y.toFixed(1);
+  }
+  area+=' L'+(W-P).toFixed(1)+','+(H-P)+' Z';
+  return '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" class="spark" role="img" aria-label="趋势图"><path d="'+area+'" fill="'+color+'" opacity="0.14"></path><polyline points="'+pts.join(' ')+'" fill="none" stroke="'+color+'" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"></polyline></svg>';
+}
+function trendPane(label,cur,colorVar,series){
+  return '<div class="trend"><div class="trend-head"><span class="trend-label">'+label+'</span><span class="trend-cur">'+cur+'</span></div>'+sparkSVG(series,csVar(colorVar))+'</div>';
+}
+function renderTrends(){
+  const box=q('#trendsGrid');if(!box)return;
+  if(trends.req.length<2){box.innerHTML='<div class="trends-empty">正在累积样本…</div>';return}
+  const curReq=lastReqTotal||trends.req[trends.req.length-1]||0;
+  const curOk=(lastHealthy!=null?lastHealthy:trends.ok[trends.ok.length-1]||0)+' / '+(nodeData?nodeData.length:0);
+  const curLat=(trends.lat[trends.lat.length-1]||0)+' ms';
+  box.innerHTML=trendPane('请求量',fmt(curReq),'--accent',trends.req)+trendPane('健康节点',curOk,'--ok',trends.ok)+trendPane('中位延迟',curLat,'--orange',trends.lat);
+}
+function seedDemoTrends(){
+  let r=900,o=4,l=60;
+  for(let i=0;i<29;i++){
+    r+=18+Math.round(Math.random()*120+Math.max(0,Math.sin(i/3)*24));
+    o=Math.max(2,Math.min(7,o+(Math.random()>.75?1:Math.random()>.75?-1:0)));
+    l=Math.max(30,Math.min(240,l+Math.round((Math.random()-.5)*36)));
+    trends.req.push(r);trends.ok.push(o);trends.lat.push(l);
+  }
+}
+function sampleTrends(){
+  if(DEMO_MODE&&!trends.req.length)seedDemoTrends();
+  if(DEMO_MODE){
+    const r0=trends.req.length?trends.req[trends.req.length-1]:900;
+    const o0=trends.ok.length?trends.ok[trends.ok.length-1]:4;
+    const l0=trends.lat.length?trends.lat[trends.lat.length-1]:60;
+    trends.req.push(r0+Math.round(18+Math.random()*130));
+    trends.ok.push(Math.max(2,Math.min(7,o0+(Math.random()>.78?1:Math.random()>.78?-1:0))));
+    trends.lat.push(Math.max(30,Math.min(260,l0+Math.round((Math.random()-.5)*36))));
+  }else{
+    trends.req.push(lastReqTotal||0);
+    trends.ok.push(lastHealthy??0);
+    trends.lat.push(lastMedianLat||0);
+  }
+  if(trends.req.length>TREND_MAX){trends.req.shift();trends.ok.shift();trends.lat.shift()}
+}
+
+/* ============================================================
+   节点池
+   ============================================================ */
+function setFilter(f){filter=f;qa('#stateChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.f===f));renderNodeTable()}
+const badgeMap={available:'<span class="badge available"><span class="bdot"></span>可用</span>',exhausted:'<span class="badge exhausted"><span class="bdot"></span>已耗尽</span>',dead:'<span class="badge dead"><span class="bdot"></span>故障</span>',idle:'<span class="badge idle"><span class="bdot"></span>未知</span>'};
+function badgeHtml(s){return badgeMap[s]||badgeMap.idle}
+function renderNodeTable(){
+  const tb=q('#nodeTable tbody');const rows=nodeData.filter(n=>filter==='all'||n.state===filter);
+  q('#cntAll').textContent=nodeData.length;
+  q('#cntAvail').textContent=nodeData.filter(n=>n.state==='available').length;
+  q('#cntExh').textContent=nodeData.filter(n=>n.state==='exhausted').length;
+  q('#cntDead').textContent=nodeData.filter(n=>n.state==='dead').length;
+  if(!rows.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}
+  tb.innerHTML=rows.map(n=>{
+    const lat=(n.latency_ms!=null&&n.latency_ms>=0)?'<span class="num '+latClass(n.latency_ms)+'">'+n.latency_ms+' ms</span>':'<span class="muted">-</span>';
+    return '<tr class="'+(n.active?'hl':'')+'"><td><span class="node-name">'+esc(n.name)+(n.active?'<span class="tag cur">当前</span>':'')+(n.manual?'<span class="tag man">手动</span>':'')+'</span></td><td><span class="proto">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="num">'+lat+'</td><td class="num muted">'+esc(fmtTime(n.cooldown_until))+'</td><td class="err">'+esc(n.last_error||'-')+'</td><td class="acts"><button class="btn btn-sm btn-primary" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-sm btn-ghost" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button></td></tr>';
+  }).join('');
+}
+async function nodeAction(action,fp){
+  const st=q('#nodeStatus');st.textContent='操作中…';
+  if(DEMO_MODE){await new Promise(r=>setTimeout(r,350));st.textContent=action==='switch'?'已切换':action==='reload'?'订阅已加载':action==='probe'?'测速完成':'已解除';showToast(st.textContent,'success');loadNodes();return}
+  try{const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action,fingerprint:fp||''})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent=action==='switch'?'已切换':action==='reload'?('订阅已加载，节点 '+d.nodes+' 个'):action==='probe'?('测速完成 '+d.checked+' 个节点'):'已解除';showToast(st.textContent,'success')}catch(e){st.textContent='失败: '+e.message;showToast('操作失败: '+e.message,'error')}finally{loadNodes()}
+}
 function reloadSubs(){nodeAction('reload','')}
 function probeAll(){nodeAction('probe','')}
 async function resetAllMarks(){if(!confirm('解除所有节点的耗尽/故障标记？'))return;nodeAction('reset_all','')}
-/* ---------- 订阅编辑 ---------- */
-function renderSubTable(){const tb=document.querySelector('#subTable tbody');if(!subData.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">暂无订阅源 — 添加 Clash/URI/base64 订阅，或直接用手动配置节点</td></tr>';return}tb.innerHTML=subData.map((s,i)=>'<tr><td><input value="'+esc(s.name||'')+'" data-f="name" placeholder="订阅名"></td><td><input value="'+esc(s.url||'')+'" data-f="url" placeholder="https://..."></td><td><input type="number" min="0" value="'+(s.update_interval_hours||'')+'" data-f="interval" placeholder="24"></td><td class="mono" style="color:var(--text-sec)">'+(s.nodes||0)+'</td><td class="mono" style="font-size:11.5px;color:var(--text-sec)">'+subUsageHtml(s)+'</td><td class="mono" style="font-size:11.5px;color:var(--text-ter)">'+esc(fmtTime(s.last_updated_at))+'</td><td><button class="btn btn-danger btn-sm" onclick="delSub('+i+')">删除</button></td></tr>'+(s.last_error?'<tr><td colspan="7" style="color:var(--red);font-size:12px">'+esc(s.last_error)+'</td></tr>':'')).join('')}
-function subUsageHtml(s){if(!s.usage_total&&!s.usage_used&&!s.usage_expire)return '-';let parts=[];if(s.usage_total||s.usage_used)parts.push(fmtBytes(s.usage_used)+' / '+fmtBytes(s.usage_total));if(s.usage_expire)parts.push('到期 '+new Date(s.usage_expire*1000).toLocaleDateString());return parts.join(' ')}
-function fmtBytes(b){b=Number(b)||0;if(b<=0)return '0B';const u=['B','KB','MB','GB','TB'];let i=0;while(b>=1024&&i<u.length-1){b/=1024;i++}return (b>=100?b.toFixed(0):b.toFixed(1))+u[i]}
+
+/* ============================================================
+   订阅编辑
+   ============================================================ */
+function subUsageHtml(s){
+  if(!s.usage_total&&!s.usage_used&&!s.usage_expire)return '<span class="muted">-</span>';
+  let parts=[];
+  if(s.usage_total||s.usage_used){const pct=Math.min(100,Math.round((s.usage_used||0)/Math.max(1,s.usage_total)*100));parts.push('<div class="usage"><div class="usage-bar"><i style="width:'+pct+'%"></i></div><span>'+fmtBytes(s.usage_used)+' / '+fmtBytes(s.usage_total)+'</span></div>')}
+  if(s.usage_expire)parts.push('<span class="muted" style="font-size:11px">到期 '+new Date(s.usage_expire*1000).toLocaleDateString()+'</span>');
+  return parts.join('<span style="width:6px;display:inline-block"></span>');
+}
+function renderSubTable(){
+  const tb=q('#subTable tbody');
+  if(!subData.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">暂无订阅源，添加 Clash/URI/base64 订阅，或直接用手动配置节点</td></tr>';return}
+  tb.innerHTML=subData.map((s,i)=>'<tr><td><input value="'+esc(s.name||'')+'" data-f="name" placeholder="订阅名"></td><td><input value="'+esc(s.url||'')+'" data-f="url" placeholder="https://…"></td><td><input type="number" min="0" value="'+(s.update_interval_hours||'')+'" data-f="interval" placeholder="24"></td><td class="num muted">'+(s.nodes||0)+'</td><td>'+subUsageHtml(s)+'</td><td class="num muted" style="font-size:12px">'+esc(fmtTime(s.last_updated_at))+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delSub('+i+')">删除</button></td></tr>'+(s.last_error?'<tr><td colspan="7" class="muted" style="color:var(--red);font-size:12px">'+esc(s.last_error)+'</td></tr>':'')).join('');
+}
 function addSub(){subData.push({name:'',url:'',update_interval_hours:24});renderSubTable()}
 function delSub(i){subData.splice(i,1);renderSubTable()}
-function collectSubs(){const rows=document.querySelectorAll('#subTable tbody tr');const seen=new Set();const out=[];rows.forEach(tr=>{const nf=tr.querySelector('[data-f="name"]');if(!nf)return;const name=nf.value||'';const u=(tr.querySelector('[data-f="url"]').value||'').trim();const iv=parseInt(tr.querySelector('[data-f="interval"]').value||'0',10)||0;if(!u||seen.has(u))return;seen.add(u);out.push({name:name,url:u,update_interval_hours:iv})});subData=out;return subData}
-/* ---------- 手动节点编辑 ---------- */
-function nodeExtras(p){const ck='<label class="check" style="padding:0"><input type="checkbox" data-f="insecure"> 跳过证书校验</label>';if(p==='vless')return '<div class="field"><label>user_id（UUID）</label><input data-f="user_id" placeholder="uuid"></div><div class="field"><label>flow（留空）</label><input data-f="flow"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="example.com"></div><div class="field"><label>reality public_key</label><input data-f="rp" placeholder=""></div><div class="field"><label>reality short_id</label><input data-f="rs" placeholder=""></div><div class="field"><label>reality spider_x</label><input data-f="rx" placeholder="/"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='vmess')return '<div class="field"><label>user_id（UUID）</label><input data-f="user_id" placeholder="uuid"></div><div class="field"><label>security（auto/none/aes-128-gcm）</label><input data-f="security" placeholder="auto"></div><div class="field"><label>network（tcp/ws）</label><input data-f="network" placeholder="tcp"></div><div class="field"><label>path（ws 时）</label><input data-f="path"></div><div class="field"><label>host（ws 时）</label><input data-f="host"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label class="check" style="padding:0"><input type="checkbox" data-f="tls"> TLS 加密</label></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='trojan')return '<div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label>network（tcp/ws）</label><input data-f="network" placeholder="tcp"></div><div class="field"><label>path（ws 时）</label><input data-f="path"></div><div class="field"><label>host（ws 时）</label><input data-f="host"></div><div class="field"><label class="check" style="padding:0"><input type="checkbox" data-f="tls"> TLS 加密</label></div><div class="field"><label>reality public_key</label><input data-f="rp" placeholder=""></div><div class="field"><label>reality short_id</label><input data-f="rs" placeholder=""></div><div class="field"><label>reality spider_x</label><input data-f="rx" placeholder="/"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='ss')return '<div class="field"><label>method（加密）</label><input data-f="method" placeholder="chacha20-ietf-poly1305"></div><div class="field"><label>password</label><input data-f="password" type="password"></div>';if(p==='socks5')return '<div class="field"><label>用户名</label><input data-f="user_id"></div><div class="field"><label>密码</label><input data-f="password" type="password"></div>';if(p==='hysteria2')return '<div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';if(p==='anytls')return '<div class="field"><label>user_id</label><input data-f="user_id"></div><div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni"></div><div class="field"><label class="check" style="padding-top:22px">'+ck+'</label></div>';return ''}
-function renderNodeEditors(){const box=document.getElementById('manualEditors');if(!nodeEditors.length){box.innerHTML='<div class="empty-hint">暂无手动配置节点 — 点下方「添加节点」</div>';return}box.innerHTML=nodeEditors.map((n,i)=>nodeEditorHtml(n,i)).join('')}
-function nodeEditorHtml(n,i){const p=n.protocol||'vless';const protoOpts=['vless','vmess','trojan','ss','socks5','hysteria2','anytls'].map(x=>'<option value="'+x+'"'+(p===x?' selected':'')+'>'+x+'</option>').join('');return '<div class="nedit" data-i="'+i+'"><select data-f="protocol" onchange="fillExtra('+i+')">'+protoOpts+'</select><input data-f="name" value="'+esc(n.name||'')+'" placeholder="节点名"><input data-f="address" value="'+esc(n.address||'')+'" placeholder="服务器地址"><input data-f="port" type="number" value="'+(n.port||'')+'" placeholder="端口"><button class="btn btn-danger btn-sm" onclick="delNodeEditor('+i+')">删除</button><details><summary>凭据与高级设置</summary><div class="extra" id="extra-'+i+'"></div></details></div>'}
-function fillExtra(i){const row=document.querySelector('#manualEditors .nedit[data-i="'+i+'"]');if(!row)return;const n=nodeEditors[i]||{};const p=row.querySelector('[data-f="protocol"]').value;const box=row.querySelector('#extra-'+i);box.innerHTML=nodeExtras(p);const set=(f,v)=>{const el=box.querySelector('[data-f="'+f+'"]');if(el)el.value=v!=null?v:''};set('user_id',n.user_id);set('password',n.password);set('method',n.method);set('sni',n.sni);set('flow',n.flow);set('network',n.network);set('security',n.security);set('path',n.path);set('host',n.host);set('rp',(n.reality&&n.reality.public_key)||'');set('rs',(n.reality&&n.reality.short_id)||'');set('rx',(n.reality&&n.reality.spider_x)||'');const ic=box.querySelector('[data-f="insecure"]');if(ic)ic.checked=!!n.insecure;const tls=box.querySelector('[data-f="tls"]');if(tls)tls.checked=!!n.tls}
-function addNodeEditor(){nodeEditors.push({protocol:'vless'});renderNodeEditors();const last=nodeEditors.length-1;fillExtra(last)}
-function delNodeEditor(i){nodeEditors.splice(i,1);renderNodeEditors()}
-function collectNodes(){const out=[];document.querySelectorAll('#manualEditors .nedit').forEach(row=>{const i=+row.dataset.i;const g=f=>row.querySelector('[data-f="'+f+'"]');const address=((g('address')||{}).value||'').trim();if(!address)return;const n={name:(g('name')||{}).value||'',protocol:g('protocol').value,address:address,port:parseInt((g('port')||{}).value||'0',10)||0};for(const f of ['user_id','password','method','sni','flow','network','security','path','host']){const el=g(f);if(el&&el.value)n[f]=el.value}if(g('insecure')&&g('insecure').checked)n.insecure=true;if(g('tls')&&g('tls').checked)n.tls=true;const rp=((g('rp')||{}).value||'').trim(),rs=((g('rs')||{}).value||'').trim(),rx=((g('rx')||{}).value||'').trim();if((n.protocol==='vless'||n.protocol==='trojan')&&(rp||rs)){n.reality={public_key:rp,short_id:rs,spider_x:rx||'/'}}nodeEditors[i]=n;out.push(n)});return out}
-/* ---------- 配额 ---------- */
-function renderQuota(c){document.getElementById('q_error_types').value=(c.quota_error_signals&&c.quota_error_signals.error_types||[]).join(', ');document.getElementById('q_message_kw').value=(c.quota_error_signals&&c.quota_error_signals.message_keywords||[]).join(', ');document.getElementById('q_max_switches').value=c.max_quota_node_switches||5;document.getElementById('q_cooldown_h').value=c.node_cooldown_exhausted_hours||24;document.getElementById('q_cooldown_m').value=c.node_cooldown_dead_minutes||1;document.getElementById('q_health_interval').value=c.node_health_interval_minutes||15;document.getElementById('q_health_url').value=c.node_health_probe_url||''}
-function collectQuota(){return{quota_error_signals:{error_types:document.getElementById('q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:document.getElementById('q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(document.getElementById('q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(document.getElementById('q_cooldown_h').value||'24',10),node_cooldown_dead_minutes:parseInt(document.getElementById('q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(document.getElementById('q_health_interval').value||'15',10),node_health_probe_url:document.getElementById('q_health_url').value.trim()}}
-async function saveSubsConfig(){const st=document.getElementById('subSaveStatus');st.textContent='保存中...';try{collectSubs();const nodes=collectNodes();const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'save',subscriptions:subData,manual_nodes:nodes})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent='已保存，节点 '+d.nodes+' 个';showToast('订阅与节点已保存，节点池已刷新','success')}catch(e){st.textContent='失败: '+e.message;showToast('保存失败: '+e.message,'error')}finally{loadNodes()}}
-async function saveQuotaConfig(){const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(collectQuota())});if(!r.ok){showToast('保存配额失败: '+await r.text(),'error');return}showToast('配额设置已保存','success')}
-/* ---------- 配置编辑（代理与模型） ---------- */
-function modelSelectHtml(selected){let h='<select data-field="val" class="m-select"><option value="">-- 选择模型 --</option>';for(const m of modelList){h+='<option value="'+esc(m)+'"'+(selected===m?' selected':'')+'>'+esc(m)+'</option>'}h+='</select>';return h}
-async function fetchModelList(){try{let m=await fetch('/api/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort()}else if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}}catch(e){}}
-function renderAliasTable(){const tb=document.querySelector('#aliasTable tbody');const ks=Object.keys(cfg.model_alias||{});if(!ks.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置</td></tr>';return}tb.innerHTML=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key"></td><td>'+modelSelectHtml(cfg.model_alias[k])+'</td><td><button class="btn btn-danger btn-sm" onclick="delAlias(this)">删除</button></td></tr>').join('')}
-function addAliasRow(){const tb=document.querySelector('#aliasTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: gpt-5.5" data-field="key"></td><td>'+modelSelectHtml('')+'</td><td><button class="btn btn-danger btn-sm" onclick="delAlias(this)">删除</button></td></tr>';tb.appendChild(tr)}
-function delAlias(b){b.closest('tr').remove()}
-function collectAliases(){const r={};document.querySelectorAll('#aliasTable tbody tr').forEach(tr=>{const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});cfg.model_alias=r;return r}
-function renderEffortTable(){const tb=document.querySelector('#effortTable tbody');const es=Object.keys(cfg.reasoning_effort_map||{});if(!es.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无映射配置</td></tr>';return}tb.innerHTML=es.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key"></td><td><input value="'+esc(cfg.reasoning_effort_map[k])+'" data-field="val"></td><td><button class="btn btn-danger btn-sm" onclick="delEffort(this)">删除</button></td></tr>').join('')}
-function addEffortRow(){const tb=document.querySelector('#effortTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: low" data-field="key"></td><td><input placeholder="例如: high" data-field="val"></td><td><button class="btn btn-danger btn-sm" onclick="delEffort(this)">删除</button></td></tr>';tb.appendChild(tr)}
-function delEffort(b){b.closest('tr').remove()}
-function collectEfforts(){const r={};document.querySelectorAll('#effortTable tbody tr').forEach(tr=>{const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});cfg.reasoning_effort_map=r;return r}
-function renderSocks5Table(){const tb=document.querySelector('#socks5Table tbody');const ps=cfg.socks5_proxies||[];if(!ps.length){tb.innerHTML='<tr><td colspan="5" class="empty-hint">暂无代理配置</td></tr>';return}tb.innerHTML=ps.map((p,i)=>'<tr><td><input value="'+esc(p.name||'')+'" data-field="name"></td><td><input value="'+esc(p.addr)+'" data-field="addr" placeholder="例如: 127.0.0.1:1080"></td><td><input value="'+esc(p.username||'')+'" data-field="username"></td><td><input value="'+esc(p.password||'')+'" data-field="password" type="password"></td><td><button class="btn btn-danger btn-sm" onclick="delSocks5(this)">删除</button></td></tr>').join('')}
-function addSocks5Row(){const tb=document.querySelector('#socks5Table tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input data-field="name"></td><td><input data-field="addr" placeholder="例如: 127.0.0.1:1080"></td><td><input data-field="username"></td><td><input data-field="password" type="password"></td><td><button class="btn btn-danger btn-sm" onclick="delSocks5(this)">删除</button></td></tr>';tb.appendChild(tr)}
-function delSocks5(b){b.closest('tr').remove()}
-function collectSocks5(){const r=[];document.querySelectorAll('#socks5Table tbody tr').forEach(tr=>{const a=tr.querySelector('[data-field="addr"]');if(a&&a.value.trim())r.push({addr:a.value.trim(),name:(tr.querySelector('[data-field="name"]')||{}).value||'',username:(tr.querySelector('[data-field="username"]')||{}).value||'',password:(tr.querySelector('[data-field="password"]')||{}).value||''})});cfg.socks5_proxies=r;return r}
-function renderSocks5Select(){const sel=document.getElementById('activeSocks5');sel.innerHTML='<option value="">直连（不使用代理）</option>';(cfg.socks5_proxies||[]).forEach(p=>{if(p.addr){const opt=document.createElement('option');opt.value=p.addr;opt.textContent=p.name?p.name+' ('+p.addr+')':p.addr;sel.appendChild(opt)}});if((cfg.socks5_proxies||[]).length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cfg.active_socks5||'';document.getElementById('socks5_paid_direct').value=cfg.socks5_paid_direct?'1':'0'}
-async function saveConfig(){collectEfforts();collectAliases();collectSocks5();const body={model_alias:cfg.model_alias,reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:document.getElementById('force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:document.getElementById('activeSocks5').value,socks5_paid_direct:document.getElementById('socks5_paid_direct').value==='1',api_key:document.getElementById('apiKeyInput').value};try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}}
-async function reloadConfig(){const r=await fetch('/api/reload',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');showToast('会话已刷新，模型 '+((d.models??d.free)||0)+' 个','success');fetchModelList().then(()=>renderAliasTable())}
-async function resetStats(){if(!confirm('确认清空所有 Token 统计？此操作不可撤销。'))return;const s=document.getElementById('resetStatus');s.textContent='清空中...';try{const r=await fetch('/api/stats',{method:'DELETE'});if(!r.ok)throw new Error(await r.text());document.getElementById('statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000)}catch(e){s.textContent='失败: '+e.message}}
-/* ---------- 渲染入口 ---------- */
-function renderConfigEditors(){subData=(cfg.subscriptions||[]).map(s=>({...s}));nodeEditors=(cfg.manual_nodes||[]).map(n=>({...n}));renderAliasTable();renderEffortTable();renderSocks5Table();renderSocks5Select();renderQuota(cfg);renderSubTable();renderNodeEditors();document.getElementById('force_disable_thinking').checked=!!cfg.force_disable_thinking;document.getElementById('apiKeyInput').value=cfg.api_key||'';syncGatewayBox()}
-function syncGatewayBox(){const a=document.getElementById('gwAddress');if(a)a.textContent=location.protocol+'//'+location.host+'/v1';const s=document.getElementById('apiKeyShow');if(s){const v=(cfg.api_key||document.getElementById('apiKeyInput').value||'');s.dataset.v=v;s.textContent=v||'未启用（留空）';s.style.opacity=v?'1':'.5'}}
-function genApiKey(){const b=new Uint8Array(24);if(window.crypto&&crypto.getRandomValues){crypto.getRandomValues(b)}else{for(let i=0;i<b.length;i++)b[i]=Math.floor(Math.random()*256)}let k='';const chars='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';for(let i=0;i<b.length;i++)k+=chars[b[i]%chars.length];const el=document.getElementById('apiKeyInput');el.value='sk-'+k;syncGatewayBox();showToast('已生成，点保存生效','info')}
-applyTheme();window.onload=async function(){await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats(),loadCaps()]);renderConfigEditors()};
-setInterval(()=>{if(document.getElementById('page-overview').classList.contains('active'))loadStats()},5000);
+function collectSubs(){const rows=qa('#subTable tbody tr');const seen=new Set();const out=[];rows.forEach(tr=>{const nf=tr.querySelector('[data-f="name"]');if(!nf)return;const name=nf.value||'';const u=(tr.querySelector('[data-f="url"]').value||'').trim();const iv=parseInt(tr.querySelector('[data-f="interval"]').value||'0',10)||0;if(!u||seen.has(u))return;seen.add(u);out.push({name:name,url:u,update_interval_hours:iv})});subData=out;return subData}
 
-/* ---------- 运行日志 ---------- */
+/* ============================================================
+   手动节点编辑
+   ============================================================ */
+function nodeExtras(p){
+  const ck='<label class="check" style="padding:0"><input type="checkbox" data-f="insecure"> 跳过证书校验</label>';
+  if(p==='vless')return '<div class="field"><label>user_id（UUID）</label><input data-f="user_id" placeholder="uuid"></div><div class="field"><label>flow（留空）</label><input data-f="flow"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="example.com"></div><div class="field"><label>reality public_key</label><input data-f="rp" placeholder=""></div><div class="field"><label>reality short_id</label><input data-f="rs" placeholder=""></div><div class="field"><label>reality spider_x</label><input data-f="rx" placeholder="/"></div><div class="field" style="align-self:end">'+ck+'</div>';
+  if(p==='vmess')return '<div class="field"><label>user_id（UUID）</label><input data-f="user_id" placeholder="uuid"></div><div class="field"><label>security（auto/none/aes-128-gcm）</label><input data-f="security" placeholder="auto"></div><div class="field"><label>network（tcp/ws）</label><input data-f="network" placeholder="tcp"></div><div class="field"><label>path（ws 时）</label><input data-f="path"></div><div class="field"><label>host（ws 时）</label><input data-f="host"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label class="check" style="padding:0"><input type="checkbox" data-f="tls"> TLS 加密</label></div><div class="field" style="align-self:end">'+ck+'</div>';
+  if(p==='trojan')return '<div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label>network（tcp/ws）</label><input data-f="network" placeholder="tcp"></div><div class="field"><label>path（ws 时）</label><input data-f="path"></div><div class="field"><label>host（ws 时）</label><input data-f="host"></div><div class="field"><label class="check" style="padding:0"><input type="checkbox" data-f="tls"> TLS 加密</label></div><div class="field"><label>reality public_key</label><input data-f="rp" placeholder=""></div><div class="field"><label>reality short_id</label><input data-f="rs" placeholder=""></div><div class="field"><label>reality spider_x</label><input data-f="rx" placeholder="/"></div><div class="field" style="align-self:end">'+ck+'</div>';
+  if(p==='ss')return '<div class="field"><label>method（加密）</label><input data-f="method" placeholder="chacha20-ietf-poly1305"></div><div class="field"><label>password</label><input data-f="password" type="password"></div>';
+  if(p==='socks5')return '<div class="field"><label>用户名</label><input data-f="user_id"></div><div class="field"><label>密码</label><input data-f="password" type="password"></div>';
+  if(p==='hysteria2')return '<div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni" placeholder="留空用地址"></div><div class="field" style="align-self:end">'+ck+'</div>';
+  if(p==='anytls')return '<div class="field"><label>user_id</label><input data-f="user_id"></div><div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni"></div><div class="field" style="align-self:end">'+ck+'</div>';
+  return '';
+}
+function renderNodeEditors(){const box=q('#manualEditors');if(!nodeEditors.length){box.innerHTML='<div class="empty-hint">暂无手动配置节点，点下方「添加节点」</div>';return}box.innerHTML=nodeEditors.map((n,i)=>nodeEditorHtml(n,i)).join('')}
+function nodeEditorHtml(n,i){
+  const p=n.protocol||'vless';
+  const protoOpts=['vless','vmess','trojan','ss','socks5','hysteria2','anytls'].map(x=>'<option value="'+x+'"'+(p===x?' selected':'')+'>'+x+'</option>').join('');
+  return '<div class="nedit" data-i="'+i+'"><select data-f="protocol" onchange="fillExtra('+i+')">'+protoOpts+'</select><input data-f="name" value="'+esc(n.name||'')+'" placeholder="节点名"><input data-f="address" value="'+esc(n.address||'')+'" placeholder="服务器地址"><input data-f="port" type="number" value="'+(n.port||'')+'" placeholder="端口"><button class="btn btn-sm btn-danger" onclick="delNodeEditor('+i+')">删除</button><details><summary>凭据与高级设置</summary><div class="extra" id="extra-'+i+'"></div></details></div>';
+}
+function fillExtra(i){
+  const row=q('#manualEditors .nedit[data-i="'+i+'"]');if(!row)return;
+  const n=nodeEditors[i]||{};const p=row.querySelector('[data-f="protocol"]').value;const box=row.querySelector('#extra-'+i);
+  box.innerHTML=nodeExtras(p);
+  const set=(f,v)=>{const el=box.querySelector('[data-f="'+f+'"]');if(el)el.value=v!=null?v:''};
+  set('user_id',n.user_id);set('password',n.password);set('method',n.method);set('sni',n.sni);set('flow',n.flow);set('network',n.network);set('security',n.security);set('path',n.path);set('host',n.host);
+  set('rp',(n.reality&&n.reality.public_key)||'');set('rs',(n.reality&&n.reality.short_id)||'');set('rx',(n.reality&&n.reality.spider_x)||'');
+  const ic=box.querySelector('[data-f="insecure"]');if(ic)ic.checked=!!n.insecure;
+  const tls=box.querySelector('[data-f="tls"]');if(tls)tls.checked=!!n.tls;
+}
+function addNodeEditor(){nodeEditors.push({protocol:'vless'});renderNodeEditors();fillExtra(nodeEditors.length-1)}
+function delNodeEditor(i){nodeEditors.splice(i,1);renderNodeEditors()}
+function collectNodes(){
+  const out=[];
+  qa('#manualEditors .nedit').forEach(row=>{
+    const i=+row.dataset.i;const g=f=>row.querySelector('[data-f="'+f+'"]');const address=((g('address')||{}).value||'').trim();if(!address)return;
+    const n={name:(g('name')||{}).value||'',protocol:g('protocol').value,address:address,port:parseInt((g('port')||{}).value||'0',10)||0};
+    for(const f of ['user_id','password','method','sni','flow','network','security','path','host']){const el=g(f);if(el&&el.value)n[f]=el.value}
+    if(g('insecure')&&g('insecure').checked)n.insecure=true;if(g('tls')&&g('tls').checked)n.tls=true;
+    const rp=((g('rp')||{}).value||'').trim(),rs=((g('rs')||{}).value||'').trim(),rx=((g('rx')||{}).value||'').trim();
+    if((n.protocol==='vless'||n.protocol==='trojan')&&(rp||rs)){n.reality={public_key:rp,short_id:rs,spider_x:rx||'/'}}
+    nodeEditors[i]=n;out.push(n);
+  });
+  return out;
+}
+
+/* ============================================================
+   配额
+   ============================================================ */
+function renderQuota(c){
+  q('#q_error_types').value=(c.quota_error_signals&&c.quota_error_signals.error_types||[]).join(', ');
+  q('#q_message_kw').value=(c.quota_error_signals&&c.quota_error_signals.message_keywords||[]).join(', ');
+  q('#q_max_switches').value=c.max_quota_node_switches||5;
+  q('#q_cooldown_h').value=c.node_cooldown_exhausted_hours||24;
+  q('#q_cooldown_m').value=c.node_cooldown_dead_minutes||1;
+  q('#q_health_interval').value=c.node_health_interval_minutes||15;
+  q('#q_health_url').value=c.node_health_probe_url||'';
+}
+function collectQuota(){return{quota_error_signals:{error_types:q('#q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:q('#q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(q('#q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(q('#q_cooldown_h').value||'24',10),node_cooldown_dead_minutes:parseInt(q('#q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(q('#q_health_interval').value||'15',10),node_health_probe_url:q('#q_health_url').value.trim()}}
+async function saveSubsConfig(){
+  const st=q('#subSaveStatus');st.textContent='保存中…';
+  if(DEMO_MODE){await new Promise(r=>setTimeout(r,350));collectSubs();collectNodes();st.textContent='已保存（演示）';showToast('订阅与节点已保存','success');return}
+  try{collectSubs();const nodes=collectNodes();const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'save',subscriptions:subData,manual_nodes:nodes})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent='已保存，节点 '+d.nodes+' 个';showToast('订阅与节点已保存，节点池已刷新','success')}catch(e){st.textContent='失败: '+e.message;showToast('保存失败: '+e.message,'error')}finally{loadNodes()}
+}
+async function saveQuotaConfig(){
+  if(DEMO_MODE){showToast('配额设置已保存（演示）','success');return}
+  const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(collectQuota())});if(!r.ok){showToast('保存配额失败: '+await r.text(),'error');return}showToast('配额设置已保存','success');
+}
+
+/* ============================================================
+   配置编辑（代理与模型）
+   ============================================================ */
+function modelSelectHtml(selected){let h='<select data-field="val" class="m-select"><option value="">-- 选择模型 --</option>';for(const m of modelList){h+='<option value="'+esc(m)+'"'+(selected===m?' selected':'')+'>'+esc(m)+'</option>'}h+='</select>';return h}
+function renderAliasTable(){const tb=q('#aliasTable tbody');const ks=Object.keys(cfg.model_alias||{});if(!ks.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置</td></tr>';return}tb.innerHTML=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key" placeholder="例如: gpt-5.5"></td><td>'+modelSelectHtml(cfg.model_alias[k])+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>').join('')}
+function addAliasRow(){const tb=q('#aliasTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: gpt-5.5" data-field="key"></td><td>'+modelSelectHtml('')+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>';tb.appendChild(tr)}
+function delAlias(b){b.closest('tr').remove()}
+function collectAliases(){const r={};qa('#aliasTable tbody tr').forEach(tr=>{const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});cfg.model_alias=r;return r}
+function renderEffortTable(){const tb=q('#effortTable tbody');const es=Object.keys(cfg.reasoning_effort_map||{});if(!es.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无映射配置</td></tr>';return}tb.innerHTML=es.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key" placeholder="例如: low"></td><td><input value="'+esc(cfg.reasoning_effort_map[k])+'" data-field="val" placeholder="例如: high"></td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delEffort(this)">删除</button></td></tr>').join('')}
+function addEffortRow(){const tb=q('#effortTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: low" data-field="key"></td><td><input placeholder="例如: high" data-field="val"></td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delEffort(this)">删除</button></td></tr>';tb.appendChild(tr)}
+function delEffort(b){b.closest('tr').remove()}
+function collectEfforts(){const r={};qa('#effortTable tbody tr').forEach(tr=>{const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});cfg.reasoning_effort_map=r;return r}
+function renderSocks5Table(){const tb=q('#socks5Table tbody');const ps=cfg.socks5_proxies||[];if(!ps.length){tb.innerHTML='<tr><td colspan="5" class="empty-hint">暂无代理配置</td></tr>';return}tb.innerHTML=ps.map((p,i)=>'<tr><td><input value="'+esc(p.name||'')+'" data-field="name"></td><td><input value="'+esc(p.addr)+'" data-field="addr" placeholder="例如: 127.0.0.1:1080"></td><td><input value="'+esc(p.username||'')+'" data-field="username"></td><td><input value="'+esc(p.password||'')+'" data-field="password" type="password"></td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delSocks5(this)">删除</button></td></tr>').join('')}
+function addSocks5Row(){const tb=q('#socks5Table tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input data-field="name"></td><td><input data-field="addr" placeholder="例如: 127.0.0.1:1080"></td><td><input data-field="username"></td><td><input data-field="password" type="password"></td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delSocks5(this)">删除</button></td></tr>';tb.appendChild(tr)}
+function delSocks5(b){b.closest('tr').remove()}
+function collectSocks5(){const r=[];qa('#socks5Table tbody tr').forEach(tr=>{const a=tr.querySelector('[data-field="addr"]');if(a&&a.value.trim())r.push({addr:a.value.trim(),name:(tr.querySelector('[data-field="name"]')||{}).value||'',username:(tr.querySelector('[data-field="username"]')||{}).value||'',password:(tr.querySelector('[data-field="password"]')||{}).value||''})});cfg.socks5_proxies=r;return r}
+function renderSocks5Select(){const sel=q('#activeSocks5');sel.innerHTML='<option value="">直连（不使用代理）</option>';(cfg.socks5_proxies||[]).forEach(p=>{if(p.addr){const opt=document.createElement('option');opt.value=p.addr;opt.textContent=p.name?p.name+' ('+p.addr+')':p.addr;sel.appendChild(opt)}});if((cfg.socks5_proxies||[]).length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cfg.active_socks5||'';q('#socks5_paid_direct').value=cfg.socks5_paid_direct?'1':'0'}
+async function saveConfig(){
+  collectEfforts();collectAliases();collectSocks5();
+  const body={model_alias:cfg.model_alias,reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:q('#force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:q('#activeSocks5').value,socks5_paid_direct:q('#socks5_paid_direct').value==='1',api_key:q('#apiKeyInput').value};
+  if(DEMO_MODE){cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存（演示）','success');return}
+  try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}
+}
+async function reloadConfig(){
+  if(DEMO_MODE){showToast('会话已刷新（演示）','success');return}
+  try{const r=await fetch('/api/reload',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');showToast('会话已刷新，模型 '+((d.models??d.free)||0)+' 个','success');fetchModelList().then(()=>renderAliasTable())}catch(e){showToast('刷新失败: '+e.message,'error')}
+}
+async function resetStats(){
+  if(!confirm('确认清空所有 Token 统计？此操作不可撤销。'))return;
+  const s=q('#resetStatus');s.textContent='清空中…';
+  if(DEMO_MODE){q('#statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000);return}
+  try{const r=await fetch('/api/stats',{method:'DELETE'});if(!r.ok)throw new Error(await r.text());q('#statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000)}catch(e){s.textContent='失败: '+e.message}
+}
+function renderConfigEditors(){
+  subData=(cfg.subscriptions||[]).map(s=>({...s}));
+  nodeEditors=(cfg.manual_nodes||[]).map(n=>({...n}));
+  renderAliasTable();renderEffortTable();renderSocks5Table();renderSocks5Select();renderQuota(cfg);renderSubTable();renderNodeEditors();
+  q('#force_disable_thinking').checked=!!cfg.force_disable_thinking;
+  q('#apiKeyInput').value=cfg.api_key||'';syncGatewayBox();
+}
+function gwBase(){
+  const h=(location.host||location.hostname||'').trim();
+  if(h)return location.protocol+'//'+h+'/v1';
+  return DEMO_MODE?'http://localhost:8000/v1':'/v1';
+}
+function syncGatewayBox(){
+  const base=gwBase();
+  const v=(cfg.api_key||q('#apiKeyInput').value||'');
+  const fill=(id)=>{const el=q(id);if(el){el.textContent=base;el.dataset.v=v;el.dataset.base=base}};
+  fill('#gwAddress');fill('#gwAddress2');
+  const fillK=(id)=>{const el=q(id);if(el){el.dataset.v=v;el.textContent=v||'未启用（留空）';el.style.opacity=v?'1':'.5'}};
+  fillK('#apiKeyShow');fillK('#apiKeyShow2');
+}
+function genApiKey(){
+  const b=new Uint8Array(24);if(window.crypto&&crypto.getRandomValues){crypto.getRandomValues(b)}else{for(let i=0;i<b.length;i++)b[i]=Math.floor(Math.random()*256)}
+  let k='';const chars='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  for(let i=0;i<b.length;i++)k+=chars[b[i]%chars.length];
+  q('#apiKeyInput').value='sk-'+k;syncGatewayBox();showToast('已生成，点保存生效','info');
+}
+
+/* ============================================================
+   运行日志
+   ============================================================ */
 let logBuf=[],logES=null,logLastSeq=0,logFilterLevel='all',logKeyword='',logStick=true;
-const logListEl=document.getElementById('logList');
-const LOG_MAX_BUF=2000;
-function setLogLevelFilter(l){logFilterLevel=l;document.querySelectorAll('#logLevelChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.l===l));renderLogs()}
+const logListEl=q('#logList');const LOG_MAX_BUF=2000;
+function setLogLevelFilter(l){logFilterLevel=l;qa('#logLevelChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.l===l));renderLogs()}
 function setLogKeyword(v){logKeyword=(v||'').toLowerCase();renderLogs()}
 function logMatches(e){if(logFilterLevel!=='all'&&e.level!==logFilterLevel)return false;if(!logKeyword)return true;if((e.msg||'').toLowerCase().includes(logKeyword))return true;return (e.attrs||[]).some(a=>String(a.v).toLowerCase().includes(logKeyword))}
-function renderLogs(){const rows=[];for(const e of logBuf){if(!logMatches(e))continue;rows.push(e)}logListEl.innerHTML=rows.map(logRowHtml).join('');const total=logBuf.length;const shown=rows.length;document.getElementById('logCount').textContent='缓冲 '+total+' 条 / 显示 '+shown+' 条';updateLogStick();logListEl.scrollTop=logListEl.scrollHeight}
-function logRowHtml(e){const dbg=e.level==='DEBUG'?'color:var(--muted)':'';return '<div class="log-line" data-seq="'+e.seq+'" style="padding:1px 10px;display:flex;gap:8px;align-items:baseline;'+(e.level==='ERROR'?'background:rgba(220,38,38,.08)':e.level==='WARN'?'background:rgba(234,179,8,.07)':'')+'">'+
-'<span style="color:var(--muted);white-space:nowrap;flex:none">'+fmtLogTime(e.time)+'</span>'+
-'<span class="log-lv" data-lv="'+e.level+'" style="flex:none;width:48px;font-weight:600;'+logLvColor(e.level)+'">'+e.level+'</span>'+
-'<span class="log-msg" style="white-space:pre-wrap;word-break:break-all">'+esc(e.msg||'')+'</span>'+
-(e.attrs&&e.attrs.length?'<button class="btn btn-ghost" style="padding:0 4px;flex:none" onclick="toggleLogAttrs('+e.seq+',this)">'+e.attrs.length+' 字段</button>':'')+
-'</div>'+(e.attrs&&e.attrs.length?'<div class="log-attrs" id="la-'+e.seq+'" style="display:none;padding:0 10px 2px 66px;color:var(--muted);font-size:12px">'+e.attrs.map(a=>'<span style="margin-right:10px"><b style="color:var(--accent)">'+esc(a.k)+'</b>='+esc(a.v)+'</span>').join('')+'</div>':'')}
-function logLvColor(l){switch(l){case 'ERROR':return 'color:var(--red)';case 'WARN':return 'color:var(--warning)';case 'DEBUG':return 'color:var(--muted)';default:return 'color:var(--green)'}}
-function toggleLogAttrs(seq,btn){const el=document.getElementById('la-'+seq);if(!el)return;const open=el.style.display!=='none';el.style.display=open?'none':'block';btn.textContent=(open?'':'隐藏 ')+el.querySelectorAll('span').length+' 字段'}
+function logRowHtml(e){
+  const cls=e.level==='ERROR'?'lv-error':e.level==='WARN'?'lv-warn':e.level==='DEBUG'?'lv-debug':'';
+  return '<div class="log-line '+cls+'" data-seq="'+e.seq+'">'+
+    '<span class="log-time">'+fmtLogTime(e.time)+'</span>'+
+    '<span class="log-lv lv-'+e.level.toLowerCase()+'">'+e.level+'</span>'+
+    '<span class="log-msg">'+esc(e.msg||'')+'</span>'+
+    (e.attrs&&e.attrs.length?'<button class="btn btn-ghost" style="padding:0 6px;flex:none" onclick="toggleLogAttrs('+e.seq+',this)">'+e.attrs.length+' 字段</button>':'')+
+    '</div>'+(e.attrs&&e.attrs.length?'<div class="log-attrs" id="la-'+e.seq+'" style="display:none">'+e.attrs.map(a=>'<span style="margin-right:10px"><b>'+esc(a.k)+'</b>='+esc(a.v)+'</span>').join('')+'</div>':'');
+}
+function renderLogs(){const rows=[];for(const e of logBuf){if(logMatches(e))rows.push(e)}logListEl.innerHTML=rows.map(logRowHtml).join('');const total=logBuf.length;const shown=rows.length;q('#logCount').textContent='缓冲 '+total+' 条 / 显示 '+shown+' 条';updateLogStick();logListEl.scrollTop=logListEl.scrollHeight}
+function toggleLogAttrs(seq,btn){const el=q('#la-'+seq);if(!el)return;const open=el.style.display!=='none';el.style.display=open?'none':'block';btn.textContent=(open?'展开 ':'收起 ')+el.querySelectorAll('span').length+' 字段'}
 function fmtLogTime(iso){const d=new Date(iso);const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
-function onLogEntry(e){if(e.seq<=logLastSeq)return;logLastSeq=e.seq;if(logBuf.length>=LOG_MAX_BUF)logBuf.shift();logBuf.push(e);if(logMatches(e)){logListEl.insertAdjacentHTML('beforeend',logRowHtml(e));}
-updateLogCount();updateLogStick();document.getElementById('logStatus').textContent='实时 · seq '+logLastSeq}
-function updateLogCount(){document.getElementById('logCount').textContent='缓冲 '+logBuf.length+' 条 / 显示 '+logListEl.querySelectorAll('.log-line').length+' 条'}
-function updateLogStick(){if(logStick)logListEl.scrollTop=logListEl.scrollHeight;document.getElementById('logScrollBtn').style.display=logStick?'none':'inline-block'}
-logListEl.addEventListener('scroll',()=>{const el=logListEl;logStick=(el.scrollTop+el.clientHeight>=el.scrollHeight-40);document.getElementById('logScrollBtn').style.display=logStick?'none':'inline-block'});
-function logScrollToBottom(){logStick=true;logListEl.scrollTop=logListEl.scrollHeight;document.getElementById('logScrollBtn').style.display='none'}
-function initLogs(){fetch('/api/config').then(r=>r.json()).then(c=>{const lv=c.log_level||'info';const sel=document.getElementById('logRunLevel');if(sel.value!==lv)sel.value=lv}).catch(()=>{});toggleLogStream(document.getElementById('logAutoRefresh').checked)}
-function toggleLogStream(on){const sel=document.getElementById('logAutoRefresh');if(sel&&sel.checked!==on)sel.checked=on;if(on){if(logES)return;logES=new EventSource('/api/logs/stream');logES.onmessage=ev=>{try{onLogEntry(JSON.parse(ev.data))}catch(_){}};logES.onerror=()=>{document.getElementById('logStatus').textContent='连接中断，重连中…';logES=null;setTimeout(()=>{if(sel&&sel.checked)toggleLogStream(true)},2000)};document.getElementById('logStatus').textContent='已连接'}else if(logES){logES.close();logES=null;document.getElementById('logStatus').textContent='已暂停'}}
-function setLogRunLevel(v){fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({log_level:v})}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status)}).then(()=>showToast('日志级别已切换为 '+v,'success')).catch(e=>showToast('切换级别失败: '+e.message,'error'))}
-function exportLogs(){const a=document.createElement('a');a.href='/api/logs/export';a.download='opencode2api-logs.txt';document.body.appendChild(a);a.click();a.remove()}
-initLogs();
+function onLogEntry(e){if(e.seq<=logLastSeq)return;logLastSeq=e.seq;if(logBuf.length>=LOG_MAX_BUF)logBuf.shift();logBuf.push(e);if(logMatches(e))logListEl.insertAdjacentHTML('beforeend',logRowHtml(e));updateLogCount();updateLogStick();q('#logStatus').textContent='实时 · seq '+logLastSeq}
+function updateLogCount(){q('#logCount').textContent='缓冲 '+logBuf.length+' 条 / 显示 '+logListEl.querySelectorAll('.log-line').length+' 条'}
+function updateLogStick(){if(logStick)logListEl.scrollTop=logListEl.scrollHeight;q('#logScrollBtn').style.display=logStick?'none':'inline-block'}
+logListEl.addEventListener('scroll',()=>{const el=logListEl;logStick=(el.scrollTop+el.clientHeight>=el.scrollHeight-40);q('#logScrollBtn').style.display=logStick?'none':'inline-block'});
+function logScrollToBottom(){logStick=true;logListEl.scrollTop=logListEl.scrollHeight;q('#logScrollBtn').style.display='none'}
+function initLogs(){
+  if(DEMO_MODE){if(!logBuf.length)applyDemoLogs();toggleLogStream(q('#logAutoRefresh').checked);return}
+  fetch('/api/config').then(r=>r.json()).then(c=>{const lv=c.log_level||'info';const sel=q('#logRunLevel');if(sel.value!==lv)sel.value=lv}).catch(()=>{});
+  toggleLogStream(q('#logAutoRefresh').checked);
+}
+function toggleLogStream(on){
+  const sel=q('#logAutoRefresh');if(sel&&sel.checked!==on)sel.checked=on;
+  if(on){
+    if(DEMO_MODE){if(demoLogTimer)return;demoLogTimer=setInterval(()=>{const seq=++logLastSeq;const levels=['INFO','INFO','DEBUG','WARN','INFO','ERROR'];const msgs=['request_started','upstream_attempt node=hk-01','stream_result tokens='+Math.floor(300+Math.random()*1800),'node health probe ok','switching node after quota signal','upstream_error retry=2'];const i=Math.floor(Math.random()*levels.length);onLogEntry({seq,time:new Date().toISOString(),level:levels[i],msg:msgs[i],attrs:i%2?[{k:'request_id',v:'req_'+Math.floor(9000+Math.random()*900)},{k:'model',v:Math.random()>.5?'gpt-5.5':'glm-5.2'}]:[]})},2600);q('#logStatus').textContent='实时（演示）· seq '+logLastSeq;return}
+    if(logES)return;
+    logES=new EventSource('/api/logs/stream');
+    logES.onmessage=ev=>{try{onLogEntry(JSON.parse(ev.data))}catch(_){}};
+    logES.onerror=()=>{q('#logStatus').textContent='连接中断，重连中…';logES=null;setTimeout(()=>{if(sel&&sel.checked)toggleLogStream(true)},2000)};
+    q('#logStatus').textContent='已连接';
+  }else{
+    if(DEMO_MODE){if(demoLogTimer){clearInterval(demoLogTimer);demoLogTimer=null}q('#logStatus').textContent='已暂停';return}
+    if(logES){logES.close();logES=null;q('#logStatus').textContent='已暂停'}
+  }
+}
+function setLogRunLevel(v){
+  if(DEMO_MODE){showToast('日志级别已切换为 '+v+'（演示）','success');return}
+  fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({log_level:v})}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status)}).then(()=>showToast('日志级别已切换为 '+v,'success')).catch(e=>showToast('切换级别失败: '+e.message,'error'));
+}
+function exportLogs(){
+  const text=logBuf.map(e=>fmtLogTime(e.time)+' ['+e.level+'] '+(e.msg||'')).join('\n')||'(无日志)';
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/plain'}));a.download='opencode2api-logs.txt';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);
+}
+function applyDemoLogs(){
+  logBuf=[];const levels=['INFO','INFO','DEBUG','INFO','WARN','INFO','ERROR','INFO','DEBUG','INFO'];
+  const msgs=['request_started','upstream_attempt node=hk-01 latency=48ms','stream_result tokens=1284','request_done ok','node marked exhausted (FreeUsageLimitError)','switching node → jp-02','upstream_error retry=2 backoff=500ms','subscription refreshed nodes=14','health probe ok latency=62ms','token stats saved'];
+  const now=Date.now();
+  for(let i=0;i<42;i++){
+    logBuf.push({seq:i+1,time:new Date(now-(42-i)*1400).toISOString(),level:levels[i%levels.length],msg:msgs[i%msgs.length],attrs:i%3===0?[{k:'request_id',v:'req_'+String(9100+i)},{k:'model',v:i%2?'gpt-5.5':'glm-5.2'}]:[]});
+  }
+  logLastSeq=logBuf.length;
+}
+
+/* ============================================================
+   离线演示数据
+   ============================================================ */
+const DEMO={
+  cfg:{
+    subscriptions:[
+      {name:'主订阅',url:'https://sub.example.com/clash',update_interval_hours:24,nodes:14,usage_total:107374182400,usage_used:39728447488,usage_expire:1754000000,last_updated_at:'2026-08-10T21:03:00Z'},
+      {name:'备线路',url:'https://backup.example.com/uri',update_interval_hours:48,nodes:6,usage_total:536870912000,usage_used:12884901888,last_updated_at:'2026-08-09T08:12:00Z'}
+    ],
+    manual_nodes:[{protocol:'vless',name:'自建东京',address:'jp.example.com',port:443,user_id:'a3f2c9d1-…',sni:'example.com',reality:{public_key:'MIIBIjANBg…',short_id:'ab12',spider_x:'/'}}],
+    model_alias:{'gpt-5.5':'gpt-5.5','glm-5.2':'glm-5.2','deepseek-r1':'deepseek-r1'},
+    reasoning_effort_map:{low:'minimal',high:'high'},
+    force_disable_thinking:false,
+    socks5_proxies:[{name:'本地代理',addr:'127.0.0.1:7890'}],
+    active_socks5:'',socks5_paid_direct:false,
+    api_key:'sk-demo-xxxxxxxxxxxxxxxx',
+    quota_error_signals:{error_types:['FreeUsageLimitError','insufficient_quota'],message_keywords:['free usage limit','quota','limit exceeded']},
+    max_quota_node_switches:5,node_cooldown_exhausted_hours:24,node_cooldown_dead_minutes:1,
+    node_health_interval_minutes:15,node_health_probe_url:'https://www.gstatic.com/generate_204',
+    log_level:'info'
+  },
+  nodes:[
+    {name:'香港 01',protocol:'vless',state:'available',latency_ms:48,cooldown_until:'',last_error:'',fingerprint:'a1b2c3d4',active:true,manual:false},
+    {name:'日本 02',protocol:'vless',state:'available',latency_ms:86,cooldown_until:'',last_error:'',fingerprint:'e5f6a7b8',active:false,manual:false},
+    {name:'新加坡 03',protocol:'trojan',state:'available',latency_ms:112,cooldown_until:'',last_error:'',fingerprint:'c9d0e1f2',active:false,manual:false},
+    {name:'美国 04',protocol:'hysteria2',state:'exhausted',latency_ms:184,cooldown_until:'2026-08-12T06:00:00Z',last_error:'FreeUsageLimitError: free usage limit reached',fingerprint:'33445566',active:false,manual:false},
+    {name:'德国 05',protocol:'ss',state:'dead',latency_ms:0,cooldown_until:'2026-08-11T03:00:00Z',last_error:'dial tcp: i/o timeout',fingerprint:'778899aa',active:false,manual:false},
+    {name:'自建东京',protocol:'vless',state:'idle',latency_ms:null,cooldown_until:'',last_error:'未探测',fingerprint:'bbccddee',active:false,manual:true},
+    {name:'韩国 06',protocol:'anytls',state:'available',latency_ms:132,cooldown_until:'',last_error:'',fingerprint:'11223344',active:false,manual:false}
+  ],
+  subscriptions:[
+    {name:'主订阅',url:'https://sub.example.com/clash',update_interval_hours:24,nodes:14,usage_total:107374182400,usage_used:39728447488,usage_expire:1754000000,last_updated_at:'2026-08-10T21:03:00Z'},
+    {name:'备线路',url:'https://backup.example.com/uri',update_interval_hours:48,nodes:6,usage_total:536870912000,usage_used:12884901888,last_updated_at:'2026-08-09T08:12:00Z'}
+  ],
+  stats:{models:{'gpt-4o-mini':{request_count:1280,prompt_tokens:12345678,completion_tokens:2345678,total_tokens:14691356},'gpt-5.5':{request_count:342,prompt_tokens:8912345,completion_tokens:1234567,total_tokens:10146912},'glm-5.2':{request_count:876,prompt_tokens:4567890,completion_tokens:987654,total_tokens:5555544},'deepseek-r1':{request_count:2034,prompt_tokens:22334455,completion_tokens:3344556,total_tokens:25679011}}},
+  caps:[
+    {id:'gpt-4o-mini',cw:128000,mo:16384,mod:['text','image']},
+    {id:'gpt-5.5',cw:400000,mo:32768,mod:['text','image','pdf']},
+    {id:'glm-5.2',cw:200000,mo:16384,mod:['text']},
+    {id:'deepseek-r1',cw:128000,mo:8192,mod:['text']}
+  ],
+  models:['gpt-4o-mini','gpt-5.5','glm-5.2','deepseek-r1']
+};
+
+/* ============================================================
+   启动
+   ============================================================ */
+async function detectBackend(){
+  try{const r=await fetch('/api/config',{headers:{'Accept':'application/json'}});if(!r.ok)throw 0;const c=await r.json();if(!c||typeof c!=='object'||Array.isArray(c))throw 0;return true}catch(e){return false}
+}
+applyTheme();
+window.addEventListener('DOMContentLoaded',async()=>{
+  const online=await detectBackend();
+  DEMO_MODE=!online;
+  setConn(online);
+  const sa=q('#sideAddr');if(sa)sa.textContent=(location.host||location.hostname)||(DEMO_MODE?'localhost:8000':'-');
+  await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats(),loadCaps()]);
+  renderConfigEditors();
+  initLogs();
+  sampleTrends();
+  renderTrends();
+});
+setInterval(()=>{if(q('#page-overview').classList.contains('active')){loadStats().then(()=>{sampleTrends();renderTrends()})}},5000);
 </script>
 </body>
 </html>
