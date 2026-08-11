@@ -859,9 +859,9 @@ type AppConfig struct {
 	ForceDisableThinking bool              `json:"force_disable_thinking"`
 	// ApiKey 统一网关密钥：客户端用它通过鉴权并按付费档获取全量模型；
 	// 留空时退回现状（任意有效 sk- key 或免密钥免费档）。
-	ApiKey string `json:"api_key,omitempty"`
-	Socks5Proxies        []Socks5Proxy     `json:"socks5_proxies,omitempty"`
-	ActiveSocks5         string            `json:"active_socks5,omitempty"`
+	ApiKey        string        `json:"api_key,omitempty"`
+	Socks5Proxies []Socks5Proxy `json:"socks5_proxies,omitempty"`
+	ActiveSocks5  string        `json:"active_socks5,omitempty"`
 	// Socks5PaidDirect controls whether keyed/paid upstream calls bypass SOCKS5.
 	// Omitted or false (default): all traffic uses the active proxy.
 	// true: paid/keyed traffic goes direct; only public/free uses SOCKS5.
@@ -5375,7 +5375,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"node_cooldown_dead_minutes":    merged.NodeCooldownDeadMinutes,
 			"node_health_interval_minutes":  merged.NodeHealthIntervalMinutes,
 			"node_health_probe_url":         merged.NodeHealthProbeURL,
-			"api_key":                      merged.ApiKey,
+			"api_key":                       merged.ApiKey,
 			"log_level":                     getLogLevelString(),
 			"log_bodies":                    getLogBodies(),
 		})
