@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Panel fixes: 「刷新会话 & 模型」 now also reloads the 模型能力 table (`loadCaps`); failed node probes clear the stale latency (dead nodes show 超时 instead of the previous probe result); node-pool action buttons (重新加载订阅/解除全部标记/测速/刷新节点) moved above the table so they stay reachable with large node lists.
 - Model capabilities in WebUI + `/v1/models`: fetch the models.dev catalog (async at startup, re-fetched on panel 「刷新会话 & 模型」) and attach per-model `context_window`, `max_output_tokens` and `input_modalities` (text/image/audio/video/pdf) to model listings, resolved by the real upstream model ID with alias-name fallback. Overview page gains a 「模型能力」 table showing context / max output / input types for the client-visible models (K/M token formatting, Chinese modality labels).
 - Unified gateway key panel: the api_key input now has a 「生成」button that randomly generates an `sk-` prefixed key (24 bytes via `crypto.getRandomValues`, Math.random fallback) and fills the input; it takes effect after saving.
 - Fix panic `invalid WriteHeader code 0` when `callOpenCodeAPI` fails at the transport level (status stays 0): non-stream responses now fall back to `502 Bad Gateway` before writing the status line; the stream path already returned 500 for transport errors.

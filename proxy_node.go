@@ -520,6 +520,7 @@ func (p *nodePool) markProbeDead(fp, reason string) {
 	n.State = NodeDead
 	n.MarkedAt = now
 	n.LastError = reason
+	n.LatencyMs = -1 // 探测失败：无效延迟（前端显示「超时」）
 	n.CooldownUntil = now.Add(p.healthIntervalLocked())
 	if p.activeID == fp {
 		p.activeID = ""
