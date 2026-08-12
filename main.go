@@ -2038,6 +2038,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		resp, err := client.Do(up)
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
+			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
 			lastErr = err
 			lastStatus = 0
 			retryReason := "transport_error"
@@ -2062,6 +2063,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			break
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			callLogEvent(ctx, "connect_ok", nodeFp, "")
 			b, readErr := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if readErr != nil {
@@ -2090,7 +2092,9 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
 		// 免费额度耗尽：标记当前节点 → 强制切下一个节点重试（预算内）
 		if quota, quotaReason := classifyQuota(resp.StatusCode, errBody); quota {
+			callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d quota_signal", resp.StatusCode))
 			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
+				callLogEvent(ctx, "switch", nodeFp, "quota:"+quotaReason)
 				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
 				quotaSwitches++
 				client.CloseIdleConnections()
@@ -2117,6 +2121,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		if nonRetryable {
 			retryReason = "non_retryable_upstream"
 		}
+		callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d", resp.StatusCode))
 		log.Info("upstream_attempt",
 			"try_model", modelID,
 			"surface", surface,
@@ -2186,6 +2191,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		resp, err := client.Do(up)
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
+			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
 			retryReason := "transport_error"
 			canRetry := attempt+1 < maxUpstreamRetries
 			if !canRetry {
@@ -2208,6 +2214,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			break
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			callLogEvent(ctx, "connect_ok", nodeFp, "")
 			log.Info("upstream_attempt",
 				"try_model", modelID,
 				"surface", surface,
@@ -2228,7 +2235,9 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
 		// 免费额度耗尽：标记当前节点 → 强制切下一个节点重试（头部阶段可安全重试）
 		if quota, quotaReason := classifyQuota(resp.StatusCode, errBody); quota {
+			callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d quota_signal", resp.StatusCode))
 			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
+				callLogEvent(ctx, "switch", nodeFp, "quota:"+quotaReason)
 				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
 				quotaSwitches++
 				client.CloseIdleConnections()
@@ -2254,6 +2263,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		if nonRetryable {
 			retryReason = "non_retryable_upstream"
 		}
+		callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d", resp.StatusCode))
 		log.Info("upstream_attempt",
 			"try_model", modelID,
 			"surface", surface,
@@ -2375,8 +2385,10 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	upstreamBody := buildUpstreamBody(&req)
 
 	if req.Stream {
-		upResp, status, _, err := callOpenCodeAPIStream(r.Context(), upstreamBody, req.Model, auth)
+		clCtx := beginCallLog(r.Context(), r.URL.Path, req.Model, true, authModeString(auth.Mode))
+		upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, req.Model, auth)
 		if err != nil || status < 200 || status >= 300 {
+			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
 			if upResp != nil {
@@ -2404,6 +2416,8 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 				reqLogger(r.Context()).Error("stream read error", "error", err)
+				callLogEvent(clCtx, "stream_interrupt", "", err.Error())
+				callLogFinish(clCtx, 500, err.Error(), 0, 0)
 				// 发送错误事件通知客户端
 				w.Write([]byte("data: {\"error\":\"stream read error\"}\n\n"))
 				if f, ok := w.(http.Flusher); ok {
@@ -2473,12 +2487,18 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 				f.Flush()
 			}
 		}
+		if !doneSeen {
+			callLogEvent(clCtx, "stream_interrupt", "", "EOF without [DONE]")
+		}
+		callLogFinish(clCtx, http.StatusOK, "", 0, 0)
 		stats.log(r.Context(), "chat")
 		return
 	}
 
-	respBody, status, _, err := callOpenCodeAPI(r.Context(), upstreamBody, req.Model, auth)
+	clCtx := beginCallLog(r.Context(), r.URL.Path, req.Model, false, authModeString(auth.Mode))
+	respBody, status, _, err := callOpenCodeAPI(clCtx, upstreamBody, req.Model, auth)
 	if err != nil || status < 200 || status >= 300 {
+		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
@@ -2523,6 +2543,8 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	clPt, clCt := usageFromOpenAIBody(respBody)
+	callLogFinish(clCtx, status, "", clPt, clCt)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	w.Write(outBody)
@@ -3388,8 +3410,10 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	upstreamBody := buildUpstreamBody(&chatReq)
 
 	if claudeReq.Stream {
-		upResp, status, _, err := callOpenCodeAPIStream(r.Context(), upstreamBody, chatReq.Model, auth)
+		clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, true, authModeString(auth.Mode))
+		upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
 		if err != nil || status < 200 || status >= 300 {
+			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
 			errResp := map[string]any{
 				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": "upstream error"},
@@ -3400,12 +3424,15 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer upResp.Close()
-		claudeStreamHandler(r.Context(), w, upResp, claudeReq.Model, keepReasoning)
+		claudeStreamHandler(clCtx, w, upResp, claudeReq.Model, keepReasoning)
+		callLogFinish(clCtx, http.StatusOK, "", 0, 0)
 		return
 	}
 
-	respBody, status, _, err := callOpenCodeAPI(r.Context(), upstreamBody, chatReq.Model, auth)
+	clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, false, authModeString(auth.Mode))
+	respBody, status, _, err := callOpenCodeAPI(clCtx, upstreamBody, chatReq.Model, auth)
 	if err != nil || status < 200 || status >= 300 {
+		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
@@ -3452,6 +3479,8 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	maybeLogBodySummary(r.Context(), "claude response body", claudeRespBody)
+	clPt, clCt := usageFromOpenAIBody(respBody)
+	callLogFinish(clCtx, http.StatusOK, "", clPt, clCt)
 	w.Write(claudeRespBody)
 }
 
@@ -4588,8 +4617,10 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	upstreamBody := buildUpstreamBody(&chatReq)
 
 	if respReq.Stream {
-		upResp, status, _, err := callOpenCodeAPIStream(r.Context(), upstreamBody, chatReq.Model, auth)
+		clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, true, authModeString(auth.Mode))
+		upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
 		if err != nil || status < 200 || status >= 300 {
+			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
 			if upResp != nil {
@@ -4610,11 +4641,14 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 			Header:     make(http.Header),
 		}
 		responsesStreamHandler(w, r, resp, chatReq.Model, chatReq.Model, wantReasoning, respReq.Tools, respReq.ToolChoice, respReq)
+		callLogFinish(clCtx, http.StatusOK, "", 0, 0)
 		return
 	}
 
-	respBody, status, _, err := callOpenCodeAPI(r.Context(), upstreamBody, chatReq.Model, auth)
+	clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, false, authModeString(auth.Mode))
+	respBody, status, _, err := callOpenCodeAPI(clCtx, upstreamBody, chatReq.Model, auth)
 	if err != nil || status < 200 || status >= 300 {
+		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
@@ -4652,6 +4686,8 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	maybeLogBodySummary(r.Context(), "responses response body", responsesBody)
+	clPt, clCt := usageFromOpenAIBody(respBody)
+	callLogFinish(clCtx, http.StatusOK, "", clPt, clCt)
 	w.Write(responsesBody)
 }
 
@@ -6281,6 +6317,57 @@ input,select,textarea{font-family:inherit;color:inherit}
 .log-attrs{padding:0 12px 2px 72px;color:var(--text-ter);font-size:12px}
 .log-attrs b{color:var(--accent);font-weight:600}
 .log-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0 10px}
+/* ---------- 调用日志 ---------- */
+.log-tabs{display:flex;gap:4px;background:var(--surface-2);border-radius:10px;padding:4px;margin:0 0 12px;width:fit-content}
+.log-tabs button{background:none;border:none;color:var(--text-sec);font-size:13px;font-weight:600;padding:6px 16px;border-radius:8px;cursor:pointer}
+.log-tabs button.active{background:var(--surface);color:var(--text);box-shadow:0 1px 6px rgba(0,0,0,.25)}
+.cl-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+.cl-summary{display:flex;flex-wrap:wrap;gap:16px;font-size:13px;align-items:center}
+.cl-summary b{font-weight:700}
+.cl-summary .c-ok{color:var(--ok)}.cl-summary .c-fail{color:var(--red)}.cl-summary .c-issue{color:var(--orange)}
+.cl-filter{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+.cl-filter input[type=text],.cl-filter select{padding:5px 9px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px}
+.cl-list{display:flex;flex-direction:column;gap:8px;margin-top:12px;max-height:520px;overflow-y:auto;padding-right:2px}
+.cl-item{border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:hidden}
+.cl-item.issue{border-color:var(--orange)}
+.cl-head{display:flex;align-items:center;gap:10px;padding:8px 12px;width:100%;background:none;border:none;color:inherit;font-size:13px;text-align:left;cursor:default}
+.cl-item.issue .cl-head{cursor:pointer}
+.cl-head:hover{background:color-mix(in srgb,var(--surface-2) 55%,transparent)}
+.cl-badge{flex:none;font-size:11px;font-weight:700;border-radius:6px;padding:1px 8px;letter-spacing:.04em}
+.cl-badge.ok{background:var(--ok-dim);color:var(--ok)}
+.cl-badge.fail{background:var(--red-dim);color:var(--red)}
+.cl-issue-tag{flex:none;font-size:11px;font-weight:600;border-radius:6px;padding:1px 8px;background:var(--orange-dim);color:var(--orange)}
+.cl-time{flex:none;color:var(--text-ter);font-size:12px}
+.cl-model{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cl-nodes{flex:1;color:var(--text-ter);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+.cl-dur{flex:none;color:var(--text-ter);font-size:12px;font-variant-numeric:tabular-nums}
+.cl-body{border-top:1px solid var(--line);padding:10px 12px;background:color-mix(in srgb,var(--surface-2) 45%,transparent);font-size:12px}
+.cl-meta{color:var(--text-sec);font-family:var(--mono);word-break:break-all;margin-bottom:6px;line-height:1.6}
+.cl-meta .err{color:var(--red)}
+.cl-events{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.cl-ev{display:flex;gap:8px;align-items:flex-start}
+.cl-ev-time{flex:none;width:130px;color:var(--text-ter);font-variant-numeric:tabular-nums;white-space:nowrap}
+.cl-ev-tag{flex:none;width:110px;text-align:center;font-size:11px;font-weight:600;border-radius:6px;padding:1px 6px;background:var(--surface-2);color:var(--text-sec)}
+.cl-ev-tag.switch{background:var(--orange-dim);color:var(--orange)}
+.cl-ev-tag.connect_ok,.cl-ev-tag.complete{background:var(--ok-dim);color:var(--ok)}
+.cl-ev-tag.all_failed,.cl-ev-tag.connect_error,.cl-ev-tag.stream_error,.cl-ev-tag.upstream_error,.cl-ev-tag.stream_interrupt,.cl-ev-tag.ttft_timeout,.cl-ev-tag.silence_timeout{background:var(--red-dim);color:var(--red)}
+.cl-ev-node{font-weight:700;color:var(--text)}
+.cl-ev-detail{color:var(--text-sec);word-break:break-all}
+.cl-chart{display:flex;align-items:flex-end;gap:3px;height:120px;margin:14px 0 6px}
+.cl-chart .bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;position:relative}
+.cl-chart .bar .fill{width:100%;border-radius:3px 3px 0 0;background:var(--ok)}
+.cl-chart .bar .fill.issue{background:var(--orange)}
+.cl-chart .bar .tip{position:absolute;bottom:calc(100% + 4px);display:none;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:3px 7px;font-size:11px;white-space:nowrap;z-index:5}
+.cl-chart .bar:hover .tip{display:block}
+.cl-tbl{width:100%;border-collapse:collapse;font-size:13px}
+.cl-tbl th{text-align:left;font-size:12px;color:var(--text-ter);font-weight:600;padding:6px 10px;border-bottom:1px solid var(--border)}
+.cl-tbl td{padding:6px 10px;border-bottom:1px solid var(--line);color:var(--text-sec)}
+.cl-tbl td.num,.cl-tbl th.num{text-align:right;font-variant-numeric:tabular-nums}
+.cl-tbl .ratebar{display:inline-block;height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden;vertical-align:middle;margin-left:8px;width:70px}
+.cl-tbl .ratebar i{display:block;height:100%;background:var(--ok)}
+.cl-tbl .ratebar i.warn{background:var(--orange)}
+.cl-tbl .ratebar i.bad{background:var(--red)}
+.cl-empty{text-align:center;color:var(--text-ter);padding:34px 0;font-size:13px}
 
 /* ---------- 响应式 ---------- */
 @media(max-width:960px){
@@ -6491,6 +6578,11 @@ input,select,textarea{font-family:inherit;color:inherit}
   <section id="page-logs" class="page" data-od-id="logs">
     <div class="card">
       <h2>运行日志</h2>
+      <div class="log-tabs">
+        <button id="logTabRaw" class="active" onclick="showLogTab('raw')">原始日志</button>
+        <button id="logTabCall" onclick="showLogTab('call')">调用日志</button>
+      </div>
+      <div id="rawLogView">
       <div class="filter-chips" id="logLevelChips" style="margin:0">
         <button class="chip active" data-l="all" onclick="setLogLevelFilter('all')">全部</button>
         <button class="chip" data-l="DEBUG" onclick="setLogLevelFilter('DEBUG')">Debug</button>
@@ -6515,6 +6607,37 @@ input,select,textarea{font-family:inherit;color:inherit}
       <div style="display:flex;align-items:center;margin-top:8px">
         <span id="logStatus" class="muted" style="font-size:12px">等待日志流…</span>
         <button id="logScrollBtn" class="btn btn-ghost btn-sm" style="display:none;margin-left:auto" onclick="logScrollToBottom()">回到底部 ↓</button>
+      </div>
+      </div>
+      <div id="callLogView" style="display:none">
+        <div class="cl-card">
+          <div class="cl-summary">
+            <span>共 <b id="clTotal">0</b> 条</span>
+            <span class="c-ok">【成功】<b id="clOk">0</b></span>
+            <span class="c-fail">【失败】<b id="clFail">0</b></span>
+            <span class="c-issue">异常/切换 <b id="clIssue">0</b></span>
+            <span style="margin-left:auto;display:flex;gap:8px">
+              <button class="btn btn-ghost btn-sm" onclick="clearCallLog()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg> 清空</button>
+              <button class="btn btn-sm" onclick="loadCallLog(true)">刷新</button>
+            </span>
+          </div>
+          <div class="cl-filter">
+            <input id="clKeyword" type="text" placeholder="关键词（模型 / 路径 / 错误 / 请求ID）" oninput="clRefreshView()">
+            <select id="clDate" onchange="clRefreshView()"><option value="">全部日期</option></select>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" id="clOnlyIssues" onchange="clRefreshView()">只看失败/切换</label>
+            <span style="margin-left:auto;display:flex;gap:4px;background:var(--surface-2);border-radius:8px;padding:3px">
+              <button class="btn btn-sm" id="clViewList" onclick="clSetView('list')">列表</button>
+              <button class="btn btn-ghost btn-sm" id="clViewHour" onclick="clSetView('hour')">时段分析</button>
+              <button class="btn btn-ghost btn-sm" id="clViewNode" onclick="clSetView('node')">节点分析</button>
+            </span>
+          </div>
+          <div id="clList"></div>
+          <div id="clHour" style="display:none"></div>
+          <div id="clNode" style="display:none"></div>
+          <div style="display:flex;gap:6px;color:var(--text-ter);font-size:12px;margin-top:10px">
+            <span>每 5 秒自动刷新</span><span id="clStatus" style="margin-left:auto"></span>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -6942,6 +7065,131 @@ function exportLogs(){
   const text=logBuf.map(e=>fmtLogTime(e.time)+' ['+e.level+'] '+(e.msg||'')).join('\n')||'(无日志)';
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/plain'}));a.download='opencode2api-logs.txt';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);
 }
+
+/* ---------- 调用日志（Call Log） ---------- */
+let callLogData=[],callLogExpanded={},clLogView='list',callLogTimer=null;
+const CL_ISSUE_TYPES=['switch','ttft_timeout','silence_timeout','stream_interrupt','stream_error','connect_error','upstream_error','all_failed'];
+function clHasIssue(r){if(r.status!=='ok')return true;return (r.events||[]).some(e=>CL_ISSUE_TYPES.includes(e.type))}
+function clIssueLabel(r){for(const e of r.events||[]){switch(e.type){case 'all_failed':return '全部节点失败';case 'switch':return '已切换节点';case 'ttft_timeout':return '首字超时';case 'silence_timeout':return '静默超时';case 'stream_interrupt':return '流中断';case 'stream_error':return '流错误';case 'connect_error':return '连接失败';case 'upstream_error':return '上游错误'}}return '异常'}
+function clFmtTime(ts){try{const d=new Date(ts);const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}catch(_){return ts||''}}
+function clFmtDur(ms){if(!ms||ms<=0)return '-';if(ms<1000)return ms+'ms';return (ms/1000).toFixed(1)+'s'}
+function showLogTab(t){
+  const raw=t==='raw',call=t==='call';
+  q('#rawLogView').style.display=raw?'':'none';
+  q('#callLogView').style.display=call?'':'none';
+  q('#logTabRaw').className=raw?'active':'';
+  q('#logTabCall').className=call?'active':'';
+  if(call){loadCallLog(false);if(!callLogTimer)callLogTimer=setInterval(()=>loadCallLog(true),5000)}
+  else if(callLogTimer){clearInterval(callLogTimer);callLogTimer=null}
+}
+function loadCallLog(showStatus){
+  if(DEMO_MODE){if(!callLogData.length)applyDemoCallLog();clRefreshView();return}
+  fetch('/api/call-log?limit=500').then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(recs=>{
+    callLogData=recs||[];clRefreshView();
+    if(showStatus)q('#clStatus').textContent=clFmtTime(new Date().toISOString())+' 刷新 '+callLogData.length+' 条';
+  }).catch(e=>{if(showStatus)q('#clStatus').textContent='加载失败: '+e.message});
+}
+function clVisible(){
+  const kw=(q('#clKeyword').value||'').trim().toLowerCase();
+  const date=q('#clDate').value;
+  const only=q('#clOnlyIssues').checked;
+  return callLogData.filter(r=>{
+    if(only&&!clHasIssue(r))return false;
+    if(date&&(r.ts||'').slice(0,10)!==date)return false;
+    if(kw){const hay=[r.model||'',r.path||'',r.err_msg||'',r.req_id||''].join(' ').toLowerCase();if(!hay.includes(kw))return false}
+    return true;
+  });
+}
+function clRefreshView(){
+  const visible=clVisible();
+  const ok=callLogData.filter(r=>r.status==='ok').length;
+  const issue=callLogData.filter(clHasIssue).length;
+  q('#clTotal').textContent=callLogData.length;
+  q('#clOk').textContent=ok;
+  q('#clFail').textContent=callLogData.length-ok;
+  q('#clIssue').textContent=issue;
+  const dates=new Set(callLogData.map(r=>(r.ts||'').slice(0,10)).filter(Boolean));
+  const sel=q('#clDate'),cur=sel.value;
+  sel.innerHTML='<option value="">全部日期</option>'+[...dates].sort().reverse().map(d=>'<option'+(d===cur?' selected':'')+'>'+d+'</option>').join('');
+  q('#clList').style.display=clLogView==='list'?'':'none';
+  q('#clHour').style.display=clLogView==='hour'?'':'none';
+  q('#clNode').style.display=clLogView==='node'?'':'none';
+  if(clLogView==='list')clRenderList(visible);
+  else if(clLogView==='hour')clRenderHour(visible);
+  else clRenderNode(visible);
+}
+function clSetView(v){
+  clLogView=v;
+  for(const id of ['clViewList','clViewHour','clViewNode']){const el=q('#'+id);el.className='btn btn-sm'+(id==='clView'+v.charAt(0).toUpperCase()+v.slice(1)?'':' btn-ghost')}
+  clRefreshView();
+}
+function clRenderList(visible){
+  const el=q('#clList');
+  if(!visible.length){el.innerHTML='<div class="cl-empty">'+(callLogData.length?'没有匹配的日志':'暂无调用日志 · 发起一次 /v1 请求后在此查看结构化调用记录')+'</div>';return}
+  el.innerHTML=visible.map(r=>{
+    const issue=clHasIssue(r),exp=callLogExpanded[r.req_id];
+    const nodes=(r.nodes||[]).join(' → ');
+    const badge=r.status==='ok'?'<span class="cl-badge ok">【成功】</span>':'<span class="cl-badge fail">【失败】</span>';
+    const tag=issue?'<span class="cl-issue-tag">'+clIssueLabel(r)+'</span>':'';
+    const chev=issue?(exp?'▾':'▸'):'';
+    let body='';
+    if(issue&&exp){
+      const evs=(r.events||[]).map(ev=>'<div class="cl-ev"><span class="cl-ev-time">'+clFmtTime(ev.at)+'</span><span class="cl-ev-tag '+(ev.type||'').replace(/\./g,'_')+'">'+esc(ev.type)+'</span><span>'+(ev.node?'<span class="cl-ev-node">'+esc(ev.node)+'</span> ':'')+(ev.detail?'<span class="cl-ev-detail">'+esc(ev.detail)+'</span>':'')+'</span></div>').join('');
+      body='<div class="cl-body"><div class="cl-meta">req_id: '+esc(r.req_id||'-')+' · '+esc(r.path||'/v1/chat/completions')+' · stream: '+(r.stream?'是':'否')+' · 路由: '+esc(r.route_mode||'-')+(r.err_msg?'<span class="err"> · 错误: '+esc(r.err_msg)+'</span>':'')+'</div><div class="cl-meta">token: 输入 '+(r.prompt_tokens||0)+' / 输出 '+(r.completion_tokens||0)+' · 耗时 '+clFmtDur(r.duration_ms)+'</div><div class="cl-events">'+(evs||'<span style="color:var(--text-ter)">无事件明细</span>')+'</div></div>';
+    }
+    return '<div class="cl-item'+(issue?' issue':'')+'"><button class="cl-head" '+(issue?'onclick="clToggle(\''+r.req_id+'\')"':'')+'><span class="cl-badge '+(r.status==='ok'?'ok':'fail')+'">'+(r.status==='ok'?'【成功】':'【失败】')+'</span>'+tag+'<span class="cl-time">'+clFmtTime(r.ts)+'</span><span class="cl-model">'+esc(r.model||'-')+'</span>'+(nodes?'<span class="cl-nodes">'+esc(nodes)+'</span>':'')+'<span class="cl-dur">'+clFmtDur(r.duration_ms)+'</span><span style="flex:none;color:var(--text-ter)">'+chev+'</span></button>'+body+'</div>';
+  }).join('');
+}
+function clToggle(id){callLogExpanded[id]=!callLogExpanded[id];clRefreshView()}
+function clRenderHour(visible){
+  const el=q('#clHour');
+  const hours=Array.from({length:24},(_,h)=>({h,req:0,ok:0,totalMs:0,issue:0}));
+  for(const r of visible){
+    const d=new Date(r.ts);if(isNaN(d))continue;
+    const s=hours[d.getHours()];s.req++;if(r.status==='ok')s.ok++;s.totalMs+=r.duration_ms||0;s.issue+=(r.events||[]).filter(e=>CL_ISSUE_TYPES.includes(e.type)).length;
+  }
+  const withData=hours.filter(h=>h.req>0);
+  if(!withData.length){el.innerHTML='<div class="cl-empty">暂无日志数据</div>';return}
+  const maxReq=Math.max(1,...hours.map(h=>h.req));
+  el.innerHTML='<div style="font-size:13px;font-weight:600;margin-bottom:4px">时段分析</div><div style="font-size:12px;color:var(--text-ter);margin-bottom:8px">按小时统计请求分布与成功率（数据来自保留期内调用日志）</div>'+
+    '<div class="cl-chart">'+hours.map(h=>h.req>0?'<div class="bar" title=""><div class="tip">'+String(h.h).padStart(2,'0')+' 时 · '+h.req+' 请求 · 均耗 '+clFmtDur(Math.round(h.totalMs/h.req))+'</div><div class="fill'+(h.ok/h.req>=0.9?'':' issue')+'" style="height:'+Math.max(h.req/maxReq*100,4)+'%"></div></div>':'<div class="bar"></div>').join('')+'</div>'+
+    '<table class="cl-tbl"><thead><tr><th>时段</th><th class="num">请求数</th><th class="num">平均耗时</th><th class="num">失败率</th><th class="num">异常/切换</th></tr></thead><tbody>'+withData.map(h=>'<tr><td>'+String(h.h).padStart(2,'0')+':00 - '+String(h.h).padStart(2,'0')+':59</td><td class="num">'+h.req+'</td><td class="num">'+clFmtDur(Math.round(h.totalMs/h.req))+'</td><td class="num">'+Math.round((1-h.ok/h.req)*100)+'%</td><td class="num">'+h.issue+'</td></tr>').join('')+'</tbody></table>';
+}
+function clRenderNode(visible){
+  const el=q('#clNode');
+  const m=new Map();
+  for(const r of visible){
+    const node=(r.nodes&&r.nodes.length?r.nodes[r.nodes.length-1]:null)||'未知';
+    let s=m.get(node);if(!s){s={node,req:0,ok:0,totalMs:0,issue:0};m.set(node,s)}
+    s.req++;if(r.status==='ok')s.ok++;s.totalMs+=r.duration_ms||0;s.issue+=(r.events||[]).filter(e=>CL_ISSUE_TYPES.includes(e.type)).length;
+  }
+  const rows=[...m.values()].sort((a,b)=>b.req-a.req||b.issue-a.issue);
+  if(!rows.length){el.innerHTML='<div class="cl-empty">暂无日志数据</div>';return}
+  el.innerHTML='<div style="font-size:13px;font-weight:600;margin-bottom:4px">节点分析</div><div style="font-size:12px;color:var(--text-ter);margin-bottom:8px">按最终出口节点聚合请求量、成功率与稳定性</div>'+
+    '<table class="cl-tbl"><thead><tr><th>节点</th><th class="num">请求数</th><th class="num">成功率</th><th class="num">平均耗时</th><th class="num">异常/切换</th></tr></thead><tbody>'+rows.map(n=>{const rate=n.req?n.ok/n.req:0;const cls=rate>=0.9?'':rate>=0.5?'warn':'bad';return '<tr><td style="font-family:var(--mono);font-size:12px">'+esc(n.node)+'<span class="ratebar"><i class="'+cls+'" style="width:'+(rate*100)+'%"></i></span></td><td class="num">'+n.req+'</td><td class="num">'+Math.round(rate*100)+'%</td><td class="num">'+clFmtDur(Math.round(n.totalMs/n.req))+'</td><td class="num">'+n.issue+'</td></tr>'}).join('')+'</tbody></table>';
+}
+function clearCallLog(){
+  if(!confirm('确定清空全部调用日志？该操作不可恢复。'))return;
+  if(DEMO_MODE){callLogData=[];clRefreshView();showToast('日志已清空（演示）','success');return}
+  fetch('/api/call-log',{method:'DELETE'}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status)}).then(()=>{callLogData=[];clRefreshView();showToast('调用日志已清空','success')}).catch(e=>showToast('清空失败: '+e.message,'error'));
+}
+function applyDemoCallLog(){
+  const now=Date.now(),models=['deepseek-v4-flash','mimo-v2.5','gpt-5.5','glm-5.2'],nodes=[['hk-01'],['hk-01','jp-02'],['us-03']],paths=['/v1/chat/completions','/v1/messages','/v1/responses'];
+  callLogData=[];
+  for(let i=0;i<40;i++){
+    const ok=Math.random()>0.22;
+    const rec={req_id:'req_demo'+String(9100+i),ts:new Date(now-(40-i)*64000).toISOString(),path:paths[i%3],model:models[i%4],stream:i%2===0,route_mode:i%3?'public':'auto',nodes:nodes[i%3],status:ok?'ok':'fail',prompt_tokens:ok?Math.floor(300+Math.random()*1200):0,completion_tokens:ok?Math.floor(120+Math.random()*900):0,duration_ms:Math.floor(400+Math.random()*3000),events:[]};
+    if(ok)rec.events.push({type:'connect_ok',node:rec.nodes[0],at:rec.ts});
+    else{
+      rec.events.push({type:'connect_ok',node:rec.nodes[0],at:rec.ts});
+      rec.events.push({type:'upstream_error',node:rec.nodes[0],detail:'http 429',at:rec.ts});
+      if(rec.nodes.length>1){rec.events.push({type:'switch',node:rec.nodes[0],detail:'quota:FreeUsageLimitError',at:rec.ts});rec.events.push({type:'connect_ok',node:rec.nodes[1],at:rec.ts})}
+      else{rec.events.push({type:'all_failed',node:rec.nodes[0],detail:'quota budget exhausted',at:rec.ts})}
+      rec.err_msg=rec.nodes.length>1?'upstream http 429':'quota budget exhausted';
+    }
+    callLogData.push(rec);
+  }
+}
 function applyDemoLogs(){
   logBuf=[];const levels=['INFO','INFO','DEBUG','INFO','WARN','INFO','ERROR','INFO','DEBUG','INFO'];
   const msgs=['request_started','upstream_attempt node=hk-01 latency=48ms','stream_result tokens=1284','request_done ok','node marked exhausted (FreeUsageLimitError)','switching node → jp-02','upstream_error retry=2 backoff=500ms','subscription refreshed nodes=14','health probe ok latency=62ms','token stats saved'];
@@ -7052,6 +7300,7 @@ func main() {
 	if err := saveConfig(configPath, cfg); err != nil {
 		slog.Warn("failed to save config", "path", configPath, "error", err)
 	}
+	initCallLog(configPath)
 
 	// 订阅管理器：缓存 + 状态与配置文件同目录
 	cacheDir := filepath.Join(filepath.Dir(configPath), ".subscriptions")
@@ -7110,6 +7359,7 @@ func main() {
 	mux.HandleFunc("/api/logs", loggingMiddleware(requireAuth(adminLogsHandler)))
 	mux.HandleFunc("/api/logs/stream", loggingMiddleware(requireAuth(adminLogsHandler)))
 	mux.HandleFunc("/api/logs/export", loggingMiddleware(requireAuth(adminLogsHandler)))
+	mux.HandleFunc("/api/call-log", loggingMiddleware(requireAuth(adminCallLogHandler)))
 	mux.HandleFunc("/api/reload", loggingMiddleware(requireAuth(reloadHandler)))
 	mux.HandleFunc("/health", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
