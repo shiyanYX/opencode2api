@@ -558,9 +558,18 @@ func lookupModelLimit(modelID string) (ModelLimit, bool) {
 }
 
 func refreshModelsDevCatalog(logOK bool) {
-	cat, err := fetchModelsDevCatalog()
-	if err != nil {
-		slog.Error("models.dev catalog refresh failed", "error", err)
+	var cat map[string]ModelLimit
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		cat, lastErr = fetchModelsDevCatalog()
+		if lastErr == nil {
+			break
+		}
+		slog.Warn("models.dev catalog fetch failed", "error", lastErr, "attempt", attempt+1)
+		time.Sleep(2 * time.Second)
+	}
+	if lastErr != nil {
+		slog.Error("models.dev catalog refresh failed", "error", lastErr)
 		return
 	}
 	modelsDevMu.Lock()
@@ -6381,19 +6390,19 @@ input,select,textarea{font-family:inherit;color:inherit}
       <button class="chip" data-f="exhausted" onclick="setFilter('exhausted')">已耗尽 <span class="cnt" id="cntExh"></span></button>
       <button class="chip" data-f="dead" onclick="setFilter('dead')">故障 <span class="cnt" id="cntDead"></span></button>
     </div>
-    <div class="latdist" id="latdist"></div>
-    <div class="card" style="padding:14px 0 6px">
-      <div style="overflow-x:auto"><table class="tbl" id="nodeTable">
-        <thead><tr><th style="width:20%">名称</th><th style="width:9%">协议</th><th style="width:9%">状态</th><th class="num" style="width:9%">延迟</th><th style="width:16%">冷却至</th><th style="width:27%">最近错误</th><th style="width:10%"></th></tr></thead>
-        <tbody></tbody>
-      </table></div>
-    </div>
     <div class="actions">
       <button class="btn btn-primary" onclick="reloadSubs()">重新加载订阅</button>
       <button class="btn btn-ghost" onclick="resetAllMarks()">解除全部标记</button>
       <button class="btn btn-ghost" onclick="probeAll()">测速</button>
       <button class="btn btn-ghost" onclick="loadNodes()">刷新节点</button>
       <span id="nodeStatus" class="muted" style="font-size:11px"></span>
+    </div>
+    <div class="latdist" id="latdist"></div>
+    <div class="card" style="padding:14px 0 6px">
+      <div style="overflow-x:auto"><table class="tbl" id="nodeTable">
+        <thead><tr><th style="width:20%">名称</th><th style="width:9%">协议</th><th style="width:9%">状态</th><th class="num" style="width:9%">延迟</th><th style="width:16%">冷却至</th><th style="width:27%">最近错误</th><th style="width:10%"></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
     </div>
   </section>
 
@@ -6720,7 +6729,7 @@ function renderNodeTable(){
   q('#cntDead').textContent=nodeData.filter(n=>n.state==='dead').length;
   if(!rows.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}
   tb.innerHTML=rows.map(n=>{
-    const lat=(n.latency_ms!=null&&n.latency_ms>=0)?'<span class="num '+latClass(n.latency_ms)+'">'+n.latency_ms+' ms</span>':'<span class="muted">-</span>';
+    const lat=(n.latency_ms!=null&&n.latency_ms>=0)?'<span class="num '+latClass(n.latency_ms)+'">'+n.latency_ms+' ms</span>':(n.latency_ms!=null&&n.latency_ms<0?'<span class="muted">超时</span>':'<span class="muted">-</span>');
     return '<tr class="'+(n.active?'hl':'')+'"><td><span class="node-name">'+esc(n.name)+(n.active?'<span class="tag cur">当前</span>':'')+(n.manual?'<span class="tag man">手动</span>':'')+'</span></td><td><span class="proto">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="num">'+lat+'</td><td class="num muted">'+esc(fmtTime(n.cooldown_until))+'</td><td class="err">'+esc(n.last_error||'-')+'</td><td class="acts"><button class="btn btn-sm btn-primary" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-sm btn-ghost" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button></td></tr>';
   }).join('');
 }
@@ -6846,7 +6855,7 @@ async function saveConfig(){
 }
 async function reloadConfig(){
   if(DEMO_MODE){showToast('会话已刷新（演示）','success');return}
-  try{const r=await fetch('/api/reload',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');showToast('会话已刷新，模型 '+((d.models??d.free)||0)+' 个','success');fetchModelList().then(()=>renderAliasTable())}catch(e){showToast('刷新失败: '+e.message,'error')}
+  try{const r=await fetch('/api/reload',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');showToast('会话已刷新，模型 '+((d.models??d.free)||0)+' 个','success');fetchModelList().then(()=>renderAliasTable());loadCaps()}catch(e){showToast('刷新失败: '+e.message,'error')}
 }
 async function resetStats(){
   if(!confirm('确认清空所有 Token 统计？此操作不可撤销。'))return;
@@ -6969,7 +6978,7 @@ const DEMO={
     {name:'日本 02',protocol:'vless',state:'available',latency_ms:86,cooldown_until:'',last_error:'',fingerprint:'e5f6a7b8',active:false,manual:false},
     {name:'新加坡 03',protocol:'trojan',state:'available',latency_ms:112,cooldown_until:'',last_error:'',fingerprint:'c9d0e1f2',active:false,manual:false},
     {name:'美国 04',protocol:'hysteria2',state:'exhausted',latency_ms:184,cooldown_until:'2026-08-12T06:00:00Z',last_error:'FreeUsageLimitError: free usage limit reached',fingerprint:'33445566',active:false,manual:false},
-    {name:'德国 05',protocol:'ss',state:'dead',latency_ms:0,cooldown_until:'2026-08-11T03:00:00Z',last_error:'dial tcp: i/o timeout',fingerprint:'778899aa',active:false,manual:false},
+    {name:'德国 05',protocol:'ss',state:'dead',latency_ms:-1,cooldown_until:'2026-08-11T03:00:00Z',last_error:'dial tcp: i/o timeout',fingerprint:'778899aa',active:false,manual:false},
     {name:'自建东京',protocol:'vless',state:'idle',latency_ms:null,cooldown_until:'',last_error:'未探测',fingerprint:'bbccddee',active:false,manual:true},
     {name:'韩国 06',protocol:'anytls',state:'available',latency_ms:132,cooldown_until:'',last_error:'',fingerprint:'11223344',active:false,manual:false}
   ],
