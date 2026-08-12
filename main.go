@@ -365,7 +365,8 @@ var (
 	ocSessionID  string
 	ocProjectID  string
 	ocClientVer  string
-	ocOnce       sync.Once
+	ocInitMu     sync.Mutex
+	ocInitDone   bool
 	requestCount atomic.Int64
 )
 
@@ -411,29 +412,35 @@ func fetchOCVersionDirect() string {
 var noSessionRefresh bool
 
 func initOCSession() {
-	ocOnce.Do(func() {
-		ocClientVer = fetchOCVersion()
-		ocSessionID = "ses_" + randomString(24)
-		ocProjectID = randomHex(40)
-		slog.Info("opencode version", "version", ocClientVer)
-		slog.Info("session initialized", "session_id", ocSessionID)
-		slog.Info("project initialized", "project_id", ocProjectID)
-	})
+	ocInitMu.Lock()
+	defer ocInitMu.Unlock()
+	if ocInitDone {
+		return
+	}
+	ocClientVer = fetchOCVersion()
+	ocSessionID = "ses_" + randomString(24)
+	ocProjectID = randomHex(40)
+	slog.Info("opencode version", "version", ocClientVer)
+	slog.Info("session initialized", "session_id", ocSessionID)
+	slog.Info("project initialized", "project_id", ocProjectID)
+	ocInitDone = true
 }
 
 func refreshOCSession() {
+	ocInitMu.Lock()
+	defer ocInitMu.Unlock()
 	if noSessionRefresh { // 测试桩：只本地轮换，不访问网络
 		ocSessionID = "ses_" + randomString(24)
 		ocProjectID = randomHex(40)
-		ocOnce = sync.Once{}
+		ocInitDone = false
 		return
 	}
 	ocClientVer = fetchOCVersionDirect()
 	ocSessionID = "ses_" + randomString(24)
 	ocProjectID = randomHex(40)
 	slog.Info("session refreshed", "version", ocClientVer, "session_id", ocSessionID)
-	// 重置 Once 以便后续 initOCSession 调用直接通过
-	ocOnce = sync.Once{}
+	// 恢复未初始化状态，后续 initOCSession 重新初始化
+	ocInitDone = false
 }
 
 // ======================== 模型 ========================

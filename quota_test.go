@@ -58,8 +58,9 @@ func stubOCClient(t *testing.T) {
 	oldOCClientVer := ocClientVer
 	oldOCSessionID := ocSessionID
 	oldOCProjectID := ocProjectID
-	ocOnce = sync.Once{}
-	ocOnce.Do(func() {})
+	ocInitMu.Lock()
+	ocInitDone = true
+	ocInitMu.Unlock()
 	ocClientVer = "test-version"
 	ocSessionID = "ses_test"
 	ocProjectID = "project_test"
