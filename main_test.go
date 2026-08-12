@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -115,8 +114,9 @@ func installFakeOpenCodeClient(t *testing.T, responses []fakeUpstreamResponse) *
 	socks5Proxies = nil
 	socks5Mu.Unlock()
 
-	ocOnce = sync.Once{}
-	ocOnce.Do(func() {})
+	ocInitMu.Lock()
+	ocInitDone = true
+	ocInitMu.Unlock()
 	ocClientVer = "test-version"
 	ocSessionID = "ses_test"
 	ocProjectID = "project_test"
@@ -134,7 +134,9 @@ func installFakeOpenCodeClient(t *testing.T, responses []fakeUpstreamResponse) *
 		socks5PaidDirect = oldSocks5PaidDirect
 		socks5Proxies = oldSocks5Proxies
 		socks5Mu.Unlock()
-		ocOnce = sync.Once{}
+		ocInitMu.Lock()
+		ocInitDone = false
+		ocInitMu.Unlock()
 		ocClientVer = oldOCClientVer
 		ocSessionID = oldOCSessionID
 		ocProjectID = oldOCProjectID
