@@ -471,7 +471,9 @@ var (
 )
 
 func fetchModels() ([]ModelInfo, error) {
-	req, _ := http.NewRequest("GET", "https://opencode.ai/zen/v1/models", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://opencode.ai/zen/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer public")
 	req.Header.Set("x-opencode-session", ocSessionID)
 	resp, err := getHTTPClient().Do(req)
@@ -497,7 +499,9 @@ func fetchModels() ([]ModelInfo, error) {
 }
 
 func fetchGoModels() ([]ModelInfo, error) {
-	req, _ := http.NewRequest("GET", "https://opencode.ai/zen/go/v1/models", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", "https://opencode.ai/zen/go/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer public")
 	req.Header.Set("x-opencode-session", ocSessionID)
 	resp, err := getHTTPClient().Do(req)
@@ -885,11 +889,13 @@ type AppConfig struct {
 
 	// ---- 节点池（订阅）----
 	Subscriptions []SubscriptionConfig `json:"subscriptions,omitempty"`
-	ManualNodes   []ProxyNodeConfig    `json:"manual_nodes,omitempty"`
+	// Webshare 通过 webshare.io API v2 拉取的 SOCKS5 代理池（并入节点池）。
+	Webshare    []WebshareConfig  `json:"webshare,omitempty"`
+	ManualNodes []ProxyNodeConfig `json:"manual_nodes,omitempty"`
 	// QuotaErrorSignals 定义"免费额度耗尽"的判定签名（error.type 或 error.message 关键词）。
 	// 命中后自动切换节点重试（免费层 K=5 次）。
 	QuotaErrorSignals QuotaSignalsConfig `json:"quota_error_signals,omitempty"`
-	// 节点冷却时长（0 = 默认 24h / 60s）
+	// 节点冷却时长（0 = 默认 1h / 60s）
 	NodeCooldownExhaustedHours int `json:"node_cooldown_exhausted_hours,omitempty"`
 	NodeCooldownDeadMinutes    int `json:"node_cooldown_dead_minutes,omitempty"`
 	// MaxQuotaNodeSwitches 配额耗尽后最多尝试的节点数（默认 5）。
@@ -1074,7 +1080,7 @@ func applyConfig(cfg AppConfig) {
 	if cfg.NodeCooldownExhaustedHours > 0 {
 		proxyPool.exhaustedCooldown = time.Duration(cfg.NodeCooldownExhaustedHours) * time.Hour
 	} else {
-		proxyPool.exhaustedCooldown = 0 // 回默认 24h
+		proxyPool.exhaustedCooldown = 0 // 回默认 1h
 	}
 	if cfg.NodeCooldownDeadMinutes > 0 {
 		proxyPool.deadCooldown = time.Duration(cfg.NodeCooldownDeadMinutes) * time.Minute
@@ -1084,10 +1090,11 @@ func applyConfig(cfg AppConfig) {
 	quotaSignalsMu.Lock()
 	quotaErrorTypes = defaultQuotaErrorTypes()
 	quotaMessageKeywords = defaultQuotaMessageKeywords()
-	if cfg.QuotaErrorSignals.ErrorTypes != nil {
+	// 显式空数组（面板保存时文本框为空）同样回退默认，避免静默禁用配额识别。
+	if len(cfg.QuotaErrorSignals.ErrorTypes) > 0 {
 		quotaErrorTypes = cfg.QuotaErrorSignals.ErrorTypes
 	}
-	if cfg.QuotaErrorSignals.MessageKeywords != nil {
+	if len(cfg.QuotaErrorSignals.MessageKeywords) > 0 {
 		quotaMessageKeywords = cfg.QuotaErrorSignals.MessageKeywords
 	}
 	maxQuotaNodeSwitches = cfg.MaxQuotaNodeSwitches
@@ -2395,7 +2402,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		clCtx := beginCallLog(r.Context(), r.URL.Path, req.Model, true, authModeString(auth.Mode))
 		upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, req.Model, auth)
 		if err != nil || status < 200 || status >= 300 {
-			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
+			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
 			if upResp != nil {
@@ -2416,6 +2423,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		reader := bufio.NewReader(upResp)
 		stats := &streamResultStats{start: time.Now()}
 		doneSeen := false
+		var lastPt, lastCt, lastCc, lastCr int64
 		for {
 			line, err := reader.ReadString('\n')
 			if err != nil {
@@ -2424,7 +2432,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 				reqLogger(r.Context()).Error("stream read error", "error", err)
 				callLogEvent(clCtx, "stream_interrupt", "", err.Error())
-				callLogFinish(clCtx, 500, err.Error(), 0, 0)
+				callLogFinish(clCtx, 500, err.Error(), 0, 0, 0, 0)
 				// 发送错误事件通知客户端
 				w.Write([]byte("data: {\"error\":\"stream read error\"}\n\n"))
 				if f, ok := w.(http.Flusher); ok {
@@ -2468,11 +2476,13 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 			if out == "" {
 				// 空choices chunk，但可能有 usage
 				if usage != nil {
-					pt, _ := usage["prompt_tokens"].(float64)
-					ct, _ := usage["completion_tokens"].(float64)
+					pt, ct, cc, cr := usageFromMap(usage)
 					tt, _ := usage["total_tokens"].(float64)
 					if tt > 0 {
-						recordTokenUsage(req.Model, int64(pt), int64(ct), int64(tt))
+						recordTokenUsage(req.Model, pt, ct, int64(tt))
+						lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
+					} else if pt > 0 {
+						lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
 					}
 				}
 				continue
@@ -2480,11 +2490,13 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 			// 提取 usage（已在 convertStreamChunkWithUsage 中解析）
 			if usage != nil && !doneSeen {
-				pt, _ := usage["prompt_tokens"].(float64)
-				ct, _ := usage["completion_tokens"].(float64)
+				pt, ct, cc, cr := usageFromMap(usage)
 				tt, _ := usage["total_tokens"].(float64)
 				if tt > 0 {
-					recordTokenUsage(req.Model, int64(pt), int64(ct), int64(tt))
+					recordTokenUsage(req.Model, pt, ct, int64(tt))
+					lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
+				} else if pt > 0 {
+					lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
 				}
 			}
 
@@ -2497,7 +2509,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		if !doneSeen {
 			callLogEvent(clCtx, "stream_interrupt", "", "EOF without [DONE]")
 		}
-		callLogFinish(clCtx, http.StatusOK, "", 0, 0)
+		callLogFinish(clCtx, http.StatusOK, "", lastPt, lastCt, lastCc, lastCr)
 		stats.log(r.Context(), "chat")
 		return
 	}
@@ -2505,7 +2517,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	clCtx := beginCallLog(r.Context(), r.URL.Path, req.Model, false, authModeString(auth.Mode))
 	respBody, status, _, err := callOpenCodeAPI(clCtx, upstreamBody, req.Model, auth)
 	if err != nil || status < 200 || status >= 300 {
-		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
+		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
@@ -2550,8 +2562,8 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	clPt, clCt := usageFromOpenAIBody(respBody)
-	callLogFinish(clCtx, status, "", clPt, clCt)
+	clPt, clCt, clCc, clCr := usageFromOpenAIBody(respBody)
+	callLogFinish(clCtx, status, "", clPt, clCt, clCc, clCr)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	w.Write(outBody)
@@ -3420,7 +3432,7 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, true, authModeString(auth.Mode))
 		upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
 		if err != nil || status < 200 || status >= 300 {
-			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
+			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
 			errResp := map[string]any{
 				"type":  "error",
 				"error": map[string]string{"type": "api_error", "message": "upstream error"},
@@ -3431,15 +3443,15 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer upResp.Close()
-		claudeStreamHandler(clCtx, w, upResp, claudeReq.Model, keepReasoning)
-		callLogFinish(clCtx, http.StatusOK, "", 0, 0)
+		clPt, clCt, clCc, clCr := claudeStreamHandler(clCtx, w, upResp, claudeReq.Model, keepReasoning)
+		callLogFinish(clCtx, http.StatusOK, "", clPt, clCt, clCc, clCr)
 		return
 	}
 
 	clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, false, authModeString(auth.Mode))
 	respBody, status, _, err := callOpenCodeAPI(clCtx, upstreamBody, chatReq.Model, auth)
 	if err != nil || status < 200 || status >= 300 {
-		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
+		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
@@ -3486,12 +3498,13 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	maybeLogBodySummary(r.Context(), "claude response body", claudeRespBody)
-	clPt, clCt := usageFromOpenAIBody(respBody)
-	callLogFinish(clCtx, http.StatusOK, "", clPt, clCt)
+	clPt, clCt, clCc, clCr := usageFromOpenAIBody(respBody)
+	callLogFinish(clCtx, http.StatusOK, "", clPt, clCt, clCc, clCr)
 	w.Write(claudeRespBody)
 }
 
-func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io.ReadCloser, model string, keepReasoning bool) {
+// claudeStreamHandler 将上游 OpenAI 流转换为 Claude SSE 流，返回最终 输入/输出/缓存创建/缓存读取 token。
+func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io.ReadCloser, model string, keepReasoning bool) (pt, ct, cc, cr int64) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -3516,14 +3529,12 @@ func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io
 	// block if the stream never produces content/tool_use (#37635).
 	reasoningFallback := strings.Builder{}
 	defer func() {
-		if len(fullUsage) > 0 {
-			pt, _ := fullUsage["prompt_tokens"].(float64)
-			ct, _ := fullUsage["completion_tokens"].(float64)
-			tt, _ := fullUsage["total_tokens"].(float64)
-			if tt > 0 {
-				recordTokenUsage(model, int64(pt), int64(ct), int64(tt))
-			}
+		lpt, lct, lcc, lcr := usageFromMap(fullUsage)
+		tt, _ := fullUsage["total_tokens"].(float64)
+		if tt > 0 {
+			recordTokenUsage(model, lpt, lct, int64(tt))
 		}
+		pt, ct, cc, cr = lpt, lct, lcc, lcr
 		stats.toolCallCount = len(toolCallOrder)
 		stats.log(ctx, "claude")
 	}()
@@ -3817,6 +3828,7 @@ func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io
 		"usage": buildClaudeDeltaUsage(fullUsage),
 	})
 	emitClaudeEvent("message_stop", map[string]any{"type": "message_stop"})
+	return
 }
 
 func indexOfInt(slice []int, val int) int {
@@ -4627,7 +4639,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, true, authModeString(auth.Mode))
 		upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
 		if err != nil || status < 200 || status >= 300 {
-			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
+			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
 			if upResp != nil {
@@ -4647,15 +4659,15 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 			Body:       upResp,
 			Header:     make(http.Header),
 		}
-		responsesStreamHandler(w, r, resp, chatReq.Model, chatReq.Model, wantReasoning, respReq.Tools, respReq.ToolChoice, respReq)
-		callLogFinish(clCtx, http.StatusOK, "", 0, 0)
+		rpt, rct, rcc, rcr := responsesStreamHandler(w, r, resp, chatReq.Model, chatReq.Model, wantReasoning, respReq.Tools, respReq.ToolChoice, respReq)
+		callLogFinish(clCtx, http.StatusOK, "", rpt, rct, rcc, rcr)
 		return
 	}
 
 	clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, false, authModeString(auth.Mode))
 	respBody, status, _, err := callOpenCodeAPI(clCtx, upstreamBody, chatReq.Model, auth)
 	if err != nil || status < 200 || status >= 300 {
-		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0)
+		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
@@ -4693,14 +4705,15 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	maybeLogBodySummary(r.Context(), "responses response body", responsesBody)
-	clPt, clCt := usageFromOpenAIBody(respBody)
-	callLogFinish(clCtx, http.StatusOK, "", clPt, clCt)
+	clPt, clCt, clCc, clCr := usageFromOpenAIBody(respBody)
+	callLogFinish(clCtx, http.StatusOK, "", clPt, clCt, clCc, clCr)
 	w.Write(responsesBody)
 }
 
 // ======================== Responses Stream Handler ========================
 
-func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, _ string, wantReasoning bool, tools []ResponsesTool, toolChoice any, originalReq ResponsesAPIRequest) {
+// responsesStreamHandler 将上游 OpenAI 流转换为 Responses SSE 流，返回最终 输入/输出/缓存创建/缓存读取 token。
+func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, _ string, wantReasoning bool, tools []ResponsesTool, toolChoice any, originalReq ResponsesAPIRequest) (pt, ct, cc, cr int64) {
 	ctx := context.Background()
 	if r != nil {
 		ctx = r.Context()
@@ -5216,12 +5229,12 @@ func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.R
 	}
 
 	if totalUsage != nil {
-		pt, _ := totalUsage["prompt_tokens"].(float64)
-		ct, _ := totalUsage["completion_tokens"].(float64)
+		lpt, lct, lcc, lcr := usageFromMap(totalUsage)
 		tt, _ := totalUsage["total_tokens"].(float64)
 		if tt > 0 {
-			recordTokenUsage(model, int64(pt), int64(ct), int64(tt))
+			recordTokenUsage(model, lpt, lct, int64(tt))
 		}
+		pt, ct, cc, cr = lpt, lct, lcc, lcr
 	}
 
 	seq++
@@ -5235,6 +5248,7 @@ func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.R
 		flusher.Flush()
 	}
 	storeResponseState(completedResponse, originalReq)
+	return
 }
 
 func convertChatToResponses(chatBody []byte, model string, wantReasoning bool, tools []ResponsesTool, toolChoice any) []byte {
@@ -5411,6 +5425,26 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 		cfg.Socks5PaidDirect = socks5PaidDirect
 		socks5Mu.RUnlock()
 		merged := mergeAppConfig(loadConfig(configPath), cfg)
+		// 配额相关字段未配置时回显默认值，保证面板文本框直接可见生效值。
+		quotaResp := merged.QuotaErrorSignals
+		if len(quotaResp.ErrorTypes) == 0 {
+			quotaResp.ErrorTypes = defaultQuotaErrorTypes()
+		}
+		if len(quotaResp.MessageKeywords) == 0 {
+			quotaResp.MessageKeywords = defaultQuotaMessageKeywords()
+		}
+		maxSwitches := merged.MaxQuotaNodeSwitches
+		if maxSwitches <= 0 {
+			maxSwitches = defaultMaxQuotaNodeSwitches
+		}
+		cooldownExh := merged.NodeCooldownExhaustedHours
+		if cooldownExh <= 0 {
+			cooldownExh = 1 // 默认 1h（与 effectiveExhaustedCooldown 一致）
+		}
+		cooldownDead := merged.NodeCooldownDeadMinutes
+		if cooldownDead <= 0 {
+			cooldownDead = 1 // 默认 1min（与 effectiveDeadCooldown 一致）
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"model_alias":                   merged.ModelAlias,
@@ -5420,11 +5454,12 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"active_socks5":                 merged.ActiveSocks5,
 			"socks5_paid_direct":            merged.Socks5PaidDirect,
 			"subscriptions":                 merged.Subscriptions,
+			"webshare":                      merged.Webshare,
 			"manual_nodes":                  merged.ManualNodes,
-			"quota_error_signals":           merged.QuotaErrorSignals,
-			"max_quota_node_switches":       merged.MaxQuotaNodeSwitches,
-			"node_cooldown_exhausted_hours": merged.NodeCooldownExhaustedHours,
-			"node_cooldown_dead_minutes":    merged.NodeCooldownDeadMinutes,
+			"quota_error_signals":           quotaResp,
+			"max_quota_node_switches":       maxSwitches,
+			"node_cooldown_exhausted_hours": cooldownExh,
+			"node_cooldown_dead_minutes":    cooldownDead,
 			"node_health_interval_minutes":  merged.NodeHealthIntervalMinutes,
 			"node_health_probe_url":         merged.NodeHealthProbeURL,
 			"api_key":                       merged.ApiKey,
@@ -5459,6 +5494,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 				"aliases", len(next.ModelAlias),
 				"effort_map", len(next.ReasoningEffortMap),
 				"subscriptions", len(next.Subscriptions),
+				"webshare", len(next.Webshare),
 				"manual_nodes", len(next.ManualNodes),
 				"force_disable", next.ForceDisableThinking,
 				"log_level", getLogLevelString(),
@@ -5483,6 +5519,7 @@ type configPatch struct {
 	ActiveSocks5               *string              `json:"active_socks5"`
 	Socks5PaidDirect           *bool                `json:"socks5_paid_direct"`
 	Subscriptions              []SubscriptionConfig `json:"subscriptions"`
+	Webshare                   []WebshareConfig     `json:"webshare"`
 	ManualNodes                []ProxyNodeConfig    `json:"manual_nodes"`
 	QuotaErrorSignals          QuotaSignalsConfig   `json:"quota_error_signals"`
 	MaxQuotaNodeSwitches       *int                 `json:"max_quota_node_switches"`
@@ -5507,6 +5544,9 @@ func mergeAppConfig(base, patch AppConfig) AppConfig {
 	}
 	if patch.Subscriptions != nil {
 		out.Subscriptions = patch.Subscriptions
+	}
+	if patch.Webshare != nil {
+		out.Webshare = patch.Webshare
 	}
 	if patch.ManualNodes != nil {
 		out.ManualNodes = patch.ManualNodes
@@ -5558,6 +5598,9 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	}
 	if patch.Subscriptions != nil {
 		out.Subscriptions = patch.Subscriptions
+	}
+	if patch.Webshare != nil {
+		out.Webshare = patch.Webshare
 	}
 	if patch.ManualNodes != nil {
 		out.ManualNodes = patch.ManualNodes
@@ -5669,6 +5712,7 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 			Action      string               `json:"action"`
 			Fingerprint string               `json:"fingerprint"`
 			Subs        []SubscriptionConfig `json:"subscriptions"`
+			Webshare    []WebshareConfig     `json:"webshare"`
 			Nodes       []ProxyNodeConfig    `json:"manual_nodes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -5704,9 +5748,10 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 			cancel()
 			resp["checked"] = fmt.Sprintf("%d", checked)
 		case "save":
-			// 面板保存订阅源 + 手配节点：合并写盘 → 生效 → 立即刷新池
+			// 面板保存订阅源 + webshare 源 + 手配节点：合并写盘 → 生效 → 立即刷新池
 			next := mergeAppConfig(loadConfig(configPath), AppConfig{
 				Subscriptions: payload.Subs,
+				Webshare:      payload.Webshare,
 				ManualNodes:   payload.Nodes,
 			})
 			if err := saveConfig(configPath, next); err != nil {
@@ -5714,7 +5759,7 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			applyConfig(next)
-			subManager.configure(next.Subscriptions, next.ManualNodes, filepath.Join(filepath.Dir(configPath), ".subscriptions"))
+			subManager.configure(next.Subscriptions, next.Webshare, next.ManualNodes, filepath.Join(filepath.Dir(configPath), ".subscriptions"))
 			ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 			n, err := subManager.refreshAll(ctx, true)
 			cancel()
@@ -5758,6 +5803,24 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// adminTrendsHandler 用量趋势：按 range=today|7d|30d 返回聚簇时间序列（来自调用日志）。
+func adminTrendsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rng := r.URL.Query().Get("range")
+	if rng != "7d" && rng != "30d" {
+		rng = "today"
+	}
+	pts := trendsFromCallLog(rng)
+	if pts == nil {
+		pts = []TrendsPoint{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(pts)
+}
+
 func adminPageHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(adminHTML))
@@ -5795,6 +5858,7 @@ const adminLoginHTML = `
   --blue:#7ea2ff; --blue-dim:rgba(126,162,255,.12);
   --ok:#2fd489; --ok-dim:rgba(47,212,137,.13);
   --orange:#f0b04a; --orange-dim:rgba(240,176,74,.12);
+  --purple:#b197f7; --purple-dim:rgba(177,151,247,.13);
   --red:#ff6b6b; --red-dim:rgba(255,107,107,.12);
   --radius:12px; --radius-sm:8px;
   --font:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif;
@@ -5810,6 +5874,7 @@ const adminLoginHTML = `
   --blue:#3b63c9; --blue-dim:rgba(59,99,201,.1);
   --ok:#0a6f42; --ok-dim:rgba(10,111,66,.10);
   --orange:#a1530a; --orange-dim:rgba(161,83,10,.10);
+  --purple:#6d4fc4; --purple-dim:rgba(109,79,196,.10);
   --red:#b42318; --red-dim:rgba(180,35,24,.09);
   --shadow:0 10px 30px rgba(30,40,70,.1);
   --btn-text:#ffffff;
@@ -5985,15 +6050,23 @@ input,select,textarea{font-family:inherit;color:inherit}
 .latdist .ld-key i.o{background:var(--orange)}
 .latdist .ld-key i.r{background:var(--red)}
 
-/* ---------- 实时趋势（概览） ---------- */
-.trends-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-top:2px}
-.trend{border:1px solid var(--border);border-radius:9px;background:var(--bg);padding:12px 14px 8px}
-.trend-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
-.trend-label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-ter)}
-.trend-cur{font-family:var(--mono);font-size:12px;color:var(--text);font-variant-numeric:tabular-nums;white-space:nowrap}
-.spark{display:block;width:100%;height:64px}
-.trends-empty{text-align:center;color:var(--text-ter);font-size:12.5px;padding:18px 0}
-@media(max-width:560px){.trends-grid{grid-template-columns:1fr}}
+/* ---------- 用量趋势（概览，数据来自调用日志） ---------- */
+.ut-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:2px}
+.ut-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ut-refresh{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-sec)}
+.ut-refresh select{padding:4px 8px;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono)}
+.ut-refresh select:focus{outline:none;border-color:var(--accent)}
+.ut-chart{position:relative;margin-top:2px}
+.ut-chart svg{display:block;width:100%;height:auto}
+.ut-chart .ut-empty,.ut-empty{text-align:center;color:var(--text-ter);font-size:12.5px;padding:22px 0}
+.ut-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:11.5px;font-family:var(--mono);color:var(--text-sec);margin:7px 2px 2px}
+.ut-key{display:inline-flex;align-items:center;gap:5px}
+.ut-key i{width:8px;height:8px;border-radius:2px;flex:none}
+.ut-key b{color:var(--text);font-variant-numeric:tabular-nums}
+.ut-tip{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:9px 13px;border-radius:9px;font-size:12px;font-family:var(--mono);line-height:1.6;z-index:999;box-shadow:var(--shadow);white-space:nowrap;min-width:150px}
+.ut-tip .t{color:var(--text-ter);font-size:11px;margin-bottom:2px}
+.ut-tip b{font-variant-numeric:tabular-nums;font-weight:600}
+@media(max-width:560px){.ut-head{flex-direction:column;align-items:flex-start}}
 @media(max-width:560px){.mbar{grid-template-columns:1fr 1fr}}
 
 /* ---------- 页面切换 ---------- */
@@ -6100,6 +6173,7 @@ const adminHTML = `
   --blue:#7ea2ff; --blue-dim:rgba(126,162,255,.12);
   --ok:#2fd489; --ok-dim:rgba(47,212,137,.13);
   --orange:#f0b04a; --orange-dim:rgba(240,176,74,.12);
+  --purple:#b197f7; --purple-dim:rgba(177,151,247,.13);
   --red:#ff6b6b; --red-dim:rgba(255,107,107,.12);
   --radius:12px; --radius-sm:8px;
   --font:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif;
@@ -6115,6 +6189,7 @@ const adminHTML = `
   --blue:#3b63c9; --blue-dim:rgba(59,99,201,.1);
   --ok:#0a6f42; --ok-dim:rgba(10,111,66,.10);
   --orange:#a1530a; --orange-dim:rgba(161,83,10,.10);
+  --purple:#6d4fc4; --purple-dim:rgba(109,79,196,.10);
   --red:#b42318; --red-dim:rgba(180,35,24,.09);
   --shadow:0 10px 30px rgba(30,40,70,.1);
   --btn-text:#ffffff;
@@ -6290,15 +6365,23 @@ input,select,textarea{font-family:inherit;color:inherit}
 .latdist .ld-key i.o{background:var(--orange)}
 .latdist .ld-key i.r{background:var(--red)}
 
-/* ---------- 实时趋势（概览） ---------- */
-.trends-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-top:2px}
-.trend{border:1px solid var(--border);border-radius:9px;background:var(--bg);padding:12px 14px 8px}
-.trend-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
-.trend-label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-ter)}
-.trend-cur{font-family:var(--mono);font-size:12px;color:var(--text);font-variant-numeric:tabular-nums;white-space:nowrap}
-.spark{display:block;width:100%;height:64px}
-.trends-empty{text-align:center;color:var(--text-ter);font-size:12.5px;padding:18px 0}
-@media(max-width:560px){.trends-grid{grid-template-columns:1fr}}
+/* ---------- 用量趋势（概览，数据来自调用日志） ---------- */
+.ut-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:2px}
+.ut-tools{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ut-refresh{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text-sec)}
+.ut-refresh select{padding:4px 8px;font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono)}
+.ut-refresh select:focus{outline:none;border-color:var(--accent)}
+.ut-chart{position:relative;margin-top:2px}
+.ut-chart svg{display:block;width:100%;height:auto}
+.ut-chart .ut-empty,.ut-empty{text-align:center;color:var(--text-ter);font-size:12.5px;padding:22px 0}
+.ut-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:11.5px;font-family:var(--mono);color:var(--text-sec);margin:7px 2px 2px}
+.ut-key{display:inline-flex;align-items:center;gap:5px}
+.ut-key i{width:8px;height:8px;border-radius:2px;flex:none}
+.ut-key b{color:var(--text);font-variant-numeric:tabular-nums}
+.ut-tip{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:9px 13px;border-radius:9px;font-size:12px;font-family:var(--mono);line-height:1.6;z-index:999;box-shadow:var(--shadow);white-space:nowrap;min-width:150px}
+.ut-tip .t{color:var(--text-ter);font-size:11px;margin-bottom:2px}
+.ut-tip b{font-variant-numeric:tabular-nums;font-weight:600}
+@media(max-width:560px){.ut-head{flex-direction:column;align-items:flex-start}}
 @media(max-width:560px){.mbar{grid-template-columns:1fr 1fr}}
 
 /* ---------- 页面切换 ---------- */
@@ -6436,13 +6519,36 @@ input,select,textarea{font-family:inherit;color:inherit}
     <div class="stats-row">
       <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="15" cy="15" r="1.2" fill="currentColor"/></svg>节点总数</div><div class="v blue" id="ovTotal">-</div><div class="sub" id="ovActive">当前: -</div></div>
       <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12H4"/><path d="M4 12l5-5M4 12l5 5"/></svg>可用</div><div class="v green" id="ovHealthy">-</div><div class="sub" id="ovManual">当前节点指纹</div></div>
-      <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>配额冷却</div><div class="v orange" id="ovExhausted">-</div><div class="sub">24h 自动恢复</div></div>
+      <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>配额冷却</div><div class="v orange" id="ovExhausted">-</div><div class="sub">1h 自动恢复</div></div>
       <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>故障</div><div class="v red" id="ovDead">-</div><div class="sub">60s 后自动重试</div></div>
     </div>
     <div class="card" data-od-id="trends">
-      <h2>实时趋势</h2>
-      <p class="hint">每 5 秒采样一次 · 最近 30 个样本（请求量来自 /api/stats，节点健康与延迟来自 /api/nodes）。</p>
-      <div class="trends-grid" id="trendsGrid"></div>
+      <div class="ut-head">
+        <h2 style="margin-bottom:0">用量趋势</h2>
+        <div class="ut-tools">
+          <label class="ut-refresh">自动刷新
+            <select id="trendRefreshSel" onchange="setTrendRefresh()">
+              <option value="0">关闭</option>
+              <option value="5000">5s</option>
+              <option value="10000">10s</option>
+              <option value="30000" selected>30s</option>
+              <option value="60000">60s</option>
+            </select>
+          </label>
+          <button class="btn btn-ghost btn-sm" onclick="loadTrends(true)">刷新</button>
+          <span class="muted" id="trendStatus" style="font-size:11px"></span>
+        </div>
+      </div>
+      <div class="filter-chips" id="rangeChips" style="margin:12px 0 2px">
+        <button class="chip active" data-r="today" onclick="setTrendRange('today')">今日</button>
+        <button class="chip" data-r="7d" onclick="setTrendRange('7d')">7 天</button>
+        <button class="chip" data-r="30d" onclick="setTrendRange('30d')">30 天</button>
+      </div>
+      <p class="hint">数据来自调用日志 · 今日按小时、7/30 天按天聚簇 · 悬浮查看时段明细。</p>
+      <div class="ut-chart" id="reqChart"><div class="ut-empty">正在加载…</div></div>
+      <div class="ut-legend" id="reqLegend"></div>
+      <div class="ut-chart" id="tokenChart"><div class="ut-empty"></div></div>
+      <div class="ut-legend" id="tokenLegend"></div>
     </div>
     <div class="card" data-od-id="gateway">
       <h2>快速接入</h2>
@@ -6512,6 +6618,15 @@ input,select,textarea{font-family:inherit;color:inherit}
       <div class="actions"><button class="btn btn-secondary" onclick="addSub()">添加订阅源</button></div>
     </div>
     <div class="card">
+      <h2>Webshare 代理池</h2>
+      <p class="hint">填 webshare.io API key，自动从代理列表 API 拉取 SOCKS5 代理并入节点池（失效代理自动排除，健康检查由节点池统一负责）。</p>
+      <div style="overflow-x:auto"><table class="tbl" id="webshareTable">
+        <thead><tr><th style="width:13%">名称</th><th style="width:26%">API Key</th><th style="width:10%">间隔(小时)</th><th class="num" style="width:7%">节点数</th><th style="width:14%">上次拉取</th><th style="width:21%">最近错误</th><th style="width:9%"></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addWebshare()">添加 Webshare 源</button></div>
+    </div>
+    <div class="card">
       <h2>手动配置节点</h2>
       <p class="hint">与订阅合并进节点池（订阅节点优先按指纹去重）。</p>
       <div id="manualEditors"></div>
@@ -6524,7 +6639,7 @@ input,select,textarea{font-family:inherit;color:inherit}
         <div class="field"><label>error.type 命中（逗号分隔）</label><input id="q_error_types" placeholder="FreeUsageLimitError, insufficient_quota"></div>
         <div class="field"><label>error.message 关键词（逗号分隔）</label><input id="q_message_kw" placeholder="free usage limit, quota, limit exceeded"></div>
         <div class="field"><label>单请求最大切换次数</label><input id="q_max_switches" type="number" min="0" max="20" value="5"></div>
-        <div class="field"><label>耗尽冷却（小时）</label><input id="q_cooldown_h" type="number" min="0" max="168" value="24"></div>
+        <div class="field"><label>耗尽冷却（小时）</label><input id="q_cooldown_h" type="number" min="0" max="168" value="1"></div>
         <div class="field"><label>故障冷却（分钟）</label><input id="q_cooldown_m" type="number" min="0" max="1440" value="1"></div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px">
@@ -6659,10 +6774,9 @@ input,select,textarea{font-family:inherit;color:inherit}
    ============================================================ */
 const q=s=>document.querySelector(s);
 const qa=s=>document.querySelectorAll(s);
-let cfg={},nodeData=[],subData=[],nodeEditors=[],modelList=[],filter='all';
+let cfg={},nodeData=[],subData=[],wsData=[],wsInfo={},nodeEditors=[],modelList=[],filter='all';
 let DEMO_MODE=false,demoLogTimer=null;
-const TREND_MAX=30;
-let trends={req:[],ok:[],lat:[]},lastReqTotal=0,lastHealthy=null,lastMedianLat=0;
+let trendsData=[],trendRange='today',trendTimer=null;
 
 /* ---------- 主题：默认深色 ---------- */
 function applyTheme(){
@@ -6703,14 +6817,14 @@ function setConn(online){const el=q('#connState');el.classList.toggle('offline',
 /* ============================================================
    数据加载（真实后端 / 离线演示兜底）
    ============================================================ */
-async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),loadCaps(),fetchModelList()]);renderConfigEditors()}
+async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),loadCaps(),fetchModelList(),loadTrends()]);renderConfigEditors()}
 async function loadConfig(){
   if(DEMO_MODE){cfg=JSON.parse(JSON.stringify(DEMO.cfg));return}
   try{const r=await fetch('/api/config');if(!r.ok)throw new Error(await r.text());cfg=await r.json()}catch(e){showToast('配置加载失败: '+e.message,'error')}
 }
 async function loadNodes(){
-  if(DEMO_MODE){nodeData=DEMO.nodes.map(n=>({...n}));subData=DEMO.subscriptions.map(s=>({...s}));renderOverview({nodes:nodeData,healthy:nodeData.filter(n=>n.state==='available').length,exhausted_count:nodeData.filter(n=>n.state==='exhausted').length,dead_count:nodeData.filter(n=>n.state==='dead').length,active_name:nodeData.find(n=>n.active)?.name||'',manual_name:''});renderNodeTable();renderLatencyDist(nodeData);lastMedianLat=medianLat();return}
-  try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=d.subscriptions||[];renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);lastMedianLat=medianLat()}catch(e){q('#nodeTable tbody').innerHTML='<tr><td colspan="7" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>'}
+  if(DEMO_MODE){nodeData=DEMO.nodes.map(n=>({...n}));subData=DEMO.subscriptions.filter(s=>s.url!=='webshare API').map(s=>({...s}));wsData=DEMO.subscriptions.filter(s=>s.url==='webshare API').map(s=>({name:s.name,nodes:s.nodes,last_updated_at:s.last_updated_at}));renderOverview({nodes:nodeData,healthy:nodeData.filter(n=>n.state==='available').length,exhausted_count:nodeData.filter(n=>n.state==='exhausted').length,dead_count:nodeData.filter(n=>n.state==='dead').length,active_name:nodeData.find(n=>n.active)?.name||'',manual_name:''});renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable();return}
+  try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=(d.subscriptions||[]).filter(s=>s.url!=='webshare API');applyWsSnapshot(d.subscriptions||[]);renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable()}catch(e){q('#nodeTable tbody').innerHTML='<tr><td colspan="7" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>'}
 }
 async function loadStats(){
   if(DEMO_MODE){renderStats(DEMO.stats);return}
@@ -6723,7 +6837,6 @@ async function loadCaps(){
 }
 async function fetchModelList(){if(DEMO_MODE){modelList=DEMO.models.slice().sort();return}try{let m=await fetch('/api/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort()}else if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}}catch(e){}}
 function renderOverview(d){
-  lastHealthy=d.healthy??0;
   q('#ovTotal').textContent=d.nodes?d.nodes.length:0;
   q('#ovHealthy').textContent=d.healthy??0;
   q('#ovExhausted').textContent=d.exhausted_count??0;
@@ -6733,7 +6846,6 @@ function renderOverview(d){
 }
 function renderStats(d){
   const ms=d.models||{};const ks=Object.keys(ms);let h='';
-  lastReqTotal=0;for(const k of ks)lastReqTotal+=(ms[k].request_count||0);
   if(!ks.length){h='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>'}
   else{let tr=0,pt=0,ct=0,tt=0;for(const k of ks){const m=ms[k];h+='<tr><td class="mono">'+esc(k)+'</td><td class="num">'+fmt(m.request_count)+'</td><td class="num">'+fmt(m.prompt_tokens)+'</td><td class="num">'+fmt(m.completion_tokens)+'</td><td class="num">'+fmt(m.total_tokens)+'</td></tr>';tr+=m.request_count;pt+=m.prompt_tokens;ct+=m.completion_tokens;tt+=m.total_tokens}h+='<tr><td style="font-weight:700">总计</td><td class="num" style="font-weight:700">'+fmt(tr)+'</td><td class="num" style="font-weight:700">'+fmt(pt)+'</td><td class="num" style="font-weight:700">'+fmt(ct)+'</td><td class="num" style="font-weight:700">'+fmt(tt)+'</td></tr>'}
   q('#statsTable').innerHTML='<thead><tr><th>模型</th><th class="num">请求数</th><th class="num">输入 Token</th><th class="num">输出 Token</th><th class="num">总计</th></tr></thead><tbody>'+h+'</tbody>';
@@ -6783,66 +6895,172 @@ function renderLatencyDist(nodes){
   el.innerHTML='<div class="row"><span class="ld-title">延迟分布</span><div class="ld-track">'+track+'</div></div><div class="ld-legend">'+legend+'</div>';
 }
 
-/* ---------- 实时趋势：请求量 / 健康节点 / 中位延迟 ---------- */
-function csVar(n){const v=getComputedStyle(document.documentElement).getPropertyValue(n).trim();return v||'#6f96ff'}
-function medianLat(){
-  const ls=(nodeData||[]).filter(n=>n.latency_ms!=null&&n.latency_ms>=0).map(n=>n.latency_ms).sort((a,b)=>a-b);
-  if(!ls.length)return 0;
-  const mid=ls.length>>1;
-  return ls.length%2?ls[mid]:Math.round((ls[mid-1]+ls[mid])/2);
+/* ---------- 用量趋势：请求 / Token（数据来自 /api/stats/trends） ---------- */
+function utColor(ref){const v=getComputedStyle(document.documentElement).getPropertyValue(ref).trim();return v||'#6f96ff'}
+function utFmtYMD(d){const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())}
+function utNiceMax(v){if(v<=0)return 1;const p=Math.pow(10,Math.floor(Math.log10(v)));const d=v/p;return (d<=1?1:d<=2?2:d<=5?5:10)*p}
+function utLabel(ts,short){if(short){const p=ts.split('T');return p.length>1?p[1].slice(0,5):p[0].slice(5)}return ts.replace('T',' ').slice(0,16)}
+function trendTotals(){
+  const b=trendsData||[];const t={req:0,ok:0,fail:0,pt:0,ct:0,cc:0,cr:0};
+  for(const x of b){t.req+=x.requests||0;t.ok+=x.ok||0;t.fail+=x.fail||0;t.pt+=x.prompt_tokens||0;t.ct+=x.completion_tokens||0;t.cc+=x.cache_creation_tokens||0;t.cr+=x.cache_read_tokens||0}
+  return t;
 }
-function sparkSVG(series,color){
-  const n=series.length;if(n<2)return '';
-  const W=220,H=60,P=2;
-  let mn=Infinity,mx=-Infinity;for(const v of series){if(v<mn)mn=v;if(v>mx)mx=v}
-  if(mx-mn<1)mx=mn+1;
-  const step=(W-2*P)/(n-1);
-  let pts=[],area='';
-  for(let i=0;i<n;i++){
-    const x=P+i*step;
-    const y=H-P-((series[i]-mn)/(mx-mn))*(H-2*P);
-    pts.push(x.toFixed(1)+','+y.toFixed(1));
-    if(i===0)area='M'+x.toFixed(1)+','+(H-P);
-    area+=' L'+x.toFixed(1)+','+y.toFixed(1);
+function renderTrendLegend(){
+  const t=trendTotals();
+  const rl=q('#reqLegend');
+  if(rl)rl.innerHTML='<span class="ut-key"><i style="background:var(--accent)"></i>请求总数 <b>'+fmt(t.req)+'</b></span><span class="ut-key"><i style="background:var(--ok)"></i>成功 <b>'+fmt(t.ok)+'</b></span><span class="ut-key"><i style="background:var(--red)"></i>失败 <b>'+fmt(t.fail)+'</b></span>';
+  const tl=q('#tokenLegend');
+  const hr=trendHitRate(t);
+  let html='<span class="ut-key"><i style="background:var(--blue)"></i>输入 Token <b>'+fmt(t.pt)+'</b></span><span class="ut-key"><i style="background:var(--ok)"></i>输出 Token <b>'+fmt(t.ct)+'</b></span><span class="ut-key"><i style="background:var(--orange)"></i>缓存创建 <b>'+fmt(t.cc)+'</b></span><span class="ut-key"><i style="background:var(--purple)"></i>缓存命中 <b>'+fmt(t.cr)+'</b></span>';
+  if(hr!=null)html+='<span class="ut-key ut-rate">缓存命中率 <b>'+hr+'</b></span>';
+  if(tl)tl.innerHTML=html;
+}
+function trendHitRate(t){
+  const tot=t.cr+t.cc;
+  if(!tot)return null;
+  return Math.round(t.cr/tot*100)+'%';
+}
+function utDrawChart(elId,defs,shortLabels){
+  const el=q('#'+elId);if(!el)return;
+  const n=trendsData.length;
+  if(!n){el.innerHTML='<div class="ut-empty">暂无数据 · 发起一次请求后查看趋势</div>';return}
+  const W=Math.max(320,el.clientWidth||640),H=176,L=46,R=10,T=10,B=24;
+  const iw=W-L-R,ih=H-T-B;
+  let max=0;
+  for(const s of defs)for(const v of s.data)if(v>max)max=v;
+  const yMax=utNiceMax(max);
+  const X=i=>L+(n===1?iw/2:i*iw/(n-1));
+  const Y=v=>T+ih-(v/yMax)*ih;
+  const px=x=>x.toFixed(1);
+  let svg='<svg width="'+W+'" height="'+H+'" role="img" aria-label="用量趋势图">';
+  for(let i=0;i<=4;i++){
+    const v=yMax*i/4,y=Y(v);
+    svg+='<line x1="'+L+'" y1="'+y+'" x2="'+(L+iw)+'" y2="'+y+'" stroke="var(--line)" stroke-width="1"></line>';
+    svg+='<text x="'+(L-7)+'" y="'+(y+3.5)+'" text-anchor="end" font-size="10" fill="var(--text-ter)" font-family="var(--mono)">'+fmtTokens(Math.round(v))+'</text>';
   }
-  area+=' L'+(W-P).toFixed(1)+','+(H-P)+' Z';
-  return '<svg viewBox="0 0 '+W+' '+H+'" preserveAspectRatio="none" class="spark" role="img" aria-label="趋势图"><path d="'+area+'" fill="'+color+'" opacity="0.14"></path><polyline points="'+pts.join(' ')+'" fill="none" stroke="'+color+'" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"></polyline></svg>';
+  const step=n>10?Math.ceil(n/6):1;
+  for(let i=0;i<n;i+=step){
+    svg+='<text x="'+X(i)+'" y="'+(H-6)+'" text-anchor="middle" font-size="10" fill="var(--text-ter)" font-family="var(--mono)">'+utLabel(trendsData[i].ts,shortLabels)+'</text>';
+  }
+  for(const s of defs){
+    let area='',pts='';
+    for(let i=0;i<n;i++){
+      const x=X(i),y=Y(s.data[i]);
+      if(i===0)area='M'+px(x)+','+px(H-B);
+      area+=' L'+px(x)+','+px(y);
+      pts+=(i?' ':'')+px(x)+','+px(y);
+    }
+    if(n>1){area+=' L'+px(X(n-1))+','+px(H-B)+' Z';svg+='<path d="'+area+'" fill="'+s.color+'" opacity="0.13"></path>'}
+    svg+='<polyline points="'+pts+'" fill="none" stroke="'+s.color+'" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"></polyline>';
+  }
+  svg+='</svg>';
+  el.innerHTML=svg;
+  el._utDefs=defs;el._utShort=shortLabels;
+  el._utGeom={W,H,L,R,T,B,iw,ih,yMax};
+  if(el._utBound)return;
+  el._utBound=true;
+  el.addEventListener('mousemove',e=>{
+    const rect=el.getBoundingClientRect();
+    const g=el._utGeom;
+    const nb=trendsData.length;
+    if(!nb)return;
+    let i=Math.round((e.clientX-rect.left-g.L)/g.iw*(nb-1));
+    i=Math.max(0,Math.min(nb-1,i));
+    utHoverMark(el,i);
+    utShowTip(el,e.clientX,e.clientY,i,defs,shortLabels);
+  });
+  el.addEventListener('mouseleave',()=>{utHoverMark(el,-1);utHideTip()});
 }
-function trendPane(label,cur,colorVar,series){
-  return '<div class="trend"><div class="trend-head"><span class="trend-label">'+label+'</span><span class="trend-cur">'+cur+'</span></div>'+sparkSVG(series,csVar(colorVar))+'</div>';
+function utHoverMark(el,i){
+  if(el._utMarkers){
+    for(const m of el._utMarkers)m.remove();
+    el._utMarkers=null;
+  }
+  const svg=el.querySelector('svg');if(!svg||i<0)return;
+  const g=el._utGeom||{L:46,R:10,T:10,B:24,iw:0,ih:0,yMax:1};
+  const defs=el._utDefs||[],n=trendsData.length;
+  const X=x=>g.L+(n===1?g.iw/2:x*g.iw/(n-1));
+  const Y=y=>g.T+g.ih-(y/g.yMax)*g.ih;
+  const marks=[];
+  const line=document.createElementNS('http://www.w3.org/2000/svg','line');
+  line.setAttribute('x1',X(i));line.setAttribute('x2',X(i));line.setAttribute('y1',g.T);line.setAttribute('y2',g.T+g.ih);
+  line.setAttribute('stroke','var(--text-ter)');line.setAttribute('stroke-width','1');line.setAttribute('stroke-dasharray','3 3');
+  marks.push(line);
+  for(const d of defs){
+    const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
+    c.setAttribute('cx',X(i));c.setAttribute('cy',Y(d.data[i]));c.setAttribute('r','3.5');
+    c.setAttribute('fill',d.color);c.setAttribute('stroke','var(--bg)');c.setAttribute('stroke-width','1.5');
+    marks.push(c);
+  }
+  el._utMarkers=marks;
+  for(const m of marks)svg.appendChild(m);
 }
+function utTipEl(){const el=q('#utTip');if(el)return el;const d=document.createElement('div');d.id='utTip';d.className='ut-tip';d.style.display='none';document.body.appendChild(d);return d}
+function utShowTip(el,clientX,clientY,i,defs,shortLabels){
+  const b=trendsData[i];if(!b)return;
+  const tip=utTipEl();
+  const rows=defs.map(d=>'<div>'+d.name+' <b>'+fmt(b[d.key])+'</b></div>').join('');
+  const fail=b.fail?'<div style="color:var(--red)">失败 <b>'+fmt(b.fail)+'</b></div>':'';
+  tip.innerHTML='<div class="t">'+utLabel(b.ts,false)+'</div>'+rows+fail;
+  tip.style.display='block';
+  const tw=tip.offsetWidth,th=tip.offsetHeight;
+  let x=clientX+14,y=clientY-12;
+  if(x+tw>window.innerWidth-8)x=clientX-tw-14;
+  if(y+th>window.innerHeight-8)y=clientY-th-12;
+  tip.style.left=x+'px';tip.style.top=y+'px';
+}
+function utHideTip(){const el=q('#utTip');if(el)el.style.display='none'}
 function renderTrends(){
-  const box=q('#trendsGrid');if(!box)return;
-  if(trends.req.length<2){box.innerHTML='<div class="trends-empty">正在累积样本…</div>';return}
-  const curReq=lastReqTotal||trends.req[trends.req.length-1]||0;
-  const curOk=(lastHealthy!=null?lastHealthy:trends.ok[trends.ok.length-1]||0)+' / '+(nodeData?nodeData.length:0);
-  const curLat=(trends.lat[trends.lat.length-1]||0)+' ms';
-  box.innerHTML=trendPane('请求量',fmt(curReq),'--accent',trends.req)+trendPane('健康节点',curOk,'--ok',trends.ok)+trendPane('中位延迟',curLat,'--orange',trends.lat);
+  const b=trendsData||[];
+  utDrawChart('reqChart',[{key:'requests',name:'请求',color:utColor('--accent'),data:b.map(x=>x.requests||0)}],true);
+  utDrawChart('tokenChart',[
+    {key:'prompt_tokens',name:'输入 Token',color:utColor('--blue'),data:b.map(x=>x.prompt_tokens||0)},
+    {key:'completion_tokens',name:'输出 Token',color:utColor('--ok'),data:b.map(x=>x.completion_tokens||0)},
+    {key:'cache_creation_tokens',name:'缓存创建',color:utColor('--orange'),data:b.map(x=>x.cache_creation_tokens||0)},
+    {key:'cache_read_tokens',name:'缓存命中',color:utColor('--purple'),data:b.map(x=>x.cache_read_tokens||0)}
+  ],true);
+  renderTrendLegend();
 }
-function seedDemoTrends(){
-  let r=900,o=4,l=60;
-  for(let i=0;i<29;i++){
-    r+=18+Math.round(Math.random()*120+Math.max(0,Math.sin(i/3)*24));
-    o=Math.max(2,Math.min(7,o+(Math.random()>.75?1:Math.random()>.75?-1:0)));
-    l=Math.max(30,Math.min(240,l+Math.round((Math.random()-.5)*36)));
-    trends.req.push(r);trends.ok.push(o);trends.lat.push(l);
-  }
+function setTrendRange(r){
+  trendRange=r;
+  qa('#rangeChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.r===r));
+  loadTrends();
 }
-function sampleTrends(){
-  if(DEMO_MODE&&!trends.req.length)seedDemoTrends();
-  if(DEMO_MODE){
-    const r0=trends.req.length?trends.req[trends.req.length-1]:900;
-    const o0=trends.ok.length?trends.ok[trends.ok.length-1]:4;
-    const l0=trends.lat.length?trends.lat[trends.lat.length-1]:60;
-    trends.req.push(r0+Math.round(18+Math.random()*130));
-    trends.ok.push(Math.max(2,Math.min(7,o0+(Math.random()>.78?1:Math.random()>.78?-1:0))));
-    trends.lat.push(Math.max(30,Math.min(260,l0+Math.round((Math.random()-.5)*36))));
+function setTrendRefresh(){
+  const v=parseInt(q('#trendRefreshSel').value||'0',10);
+  if(trendTimer){clearInterval(trendTimer);trendTimer=null}
+  if(v>0)trendTimer=setInterval(()=>{if(q('#page-overview').classList.contains('active')){loadStats();loadTrends()}},v);
+}
+function trendDemo(rng){
+  const out=[],now=new Date();
+  if(rng==='today'){
+    for(let h=0;h<24;h++){
+      const wave=Math.round(Math.sin((h-9)/24*Math.PI*2)*28+44);
+      const req=Math.max(0,wave+Math.round(Math.random()*10));
+      out.push({ts:utFmtYMD(now)+'T'+String(h).padStart(2,'0')+':00',requests:req,ok:Math.max(0,req-Math.round(Math.random()*2)),fail:Math.round(Math.random()*2),prompt_tokens:req*(380+Math.round(Math.random()*260)),completion_tokens:req*(180+Math.round(Math.random()*220)),cache_creation_tokens:req*90,cache_read_tokens:req*(300+Math.round(Math.random()*180))});
+    }
   }else{
-    trends.req.push(lastReqTotal||0);
-    trends.ok.push(lastHealthy??0);
-    trends.lat.push(lastMedianLat||0);
+    const days=rng==='7d'?7:30;
+    for(let i=days-1;i>=0;i--){
+      const d=new Date(now);d.setDate(d.getDate()-i);
+      const req=Math.max(0,56+Math.round(Math.sin((days-i)/days*Math.PI*2)*30+Math.random()*24));
+      out.push({ts:utFmtYMD(d),requests:req,ok:Math.max(0,req-Math.round(Math.random()*3)),fail:Math.round(Math.random()*3),prompt_tokens:req*(360+Math.round(Math.random()*300)),completion_tokens:req*(170+Math.round(Math.random()*260)),cache_creation_tokens:req*80,cache_read_tokens:req*(280+Math.round(Math.random()*200))});
+    }
   }
-  if(trends.req.length>TREND_MAX){trends.req.shift();trends.ok.shift();trends.lat.shift()}
+  return out;
+}
+async function loadTrends(showStatus){
+  if(DEMO_MODE){trendsData=trendDemo(trendRange);renderTrends();if(showStatus)q('#trendStatus').textContent='演示数据';return}
+  try{
+    const r=await fetch('/api/stats/trends?range='+trendRange);
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    trendsData=await r.json();
+    if(!Array.isArray(trendsData))trendsData=[];
+    renderTrends();
+    if(showStatus)q('#trendStatus').textContent=clFmtTime(new Date().toISOString())+' 已更新';
+  }catch(e){
+    if(showStatus)q('#trendStatus').textContent='加载失败: '+e.message;
+  }
 }
 
 /* ============================================================
@@ -6890,6 +7108,32 @@ function renderSubTable(){
 function addSub(){subData.push({name:'',url:'',update_interval_hours:24});renderSubTable()}
 function delSub(i){subData.splice(i,1);renderSubTable()}
 function collectSubs(){const rows=qa('#subTable tbody tr');const seen=new Set();const out=[];rows.forEach(tr=>{const nf=tr.querySelector('[data-f="name"]');if(!nf)return;const name=nf.value||'';const u=(tr.querySelector('[data-f="url"]').value||'').trim();const iv=parseInt(tr.querySelector('[data-f="interval"]').value||'0',10)||0;if(!u||seen.has(u))return;seen.add(u);out.push({name:name,url:u,update_interval_hours:iv})});subData=out;return subData}
+
+/* ============================================================
+   Webshare 代理池编辑
+   ============================================================ */
+function applyWsSnapshot(subs){
+  wsInfo={};(subs||[]).forEach(s=>{if(s.url==='webshare API'&&s.name)wsInfo[s.name]=s});
+}
+function renderWebshareTable(){
+  const tb=q('#webshareTable tbody');
+  if(!wsData.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">暂无 Webshare 源，填入 API key 后自动拉取代理列表</td></tr>';return}
+  tb.innerHTML=wsData.map((w,i)=>{const m=wsInfo[w.name]||{};return '<tr><td><input value="'+esc(w.name||'')+'" data-f="ws-name" placeholder="例如: webshare-主池"></td><td><input value="'+esc(w.api_key||'')+'" data-f="ws-key" type="password" placeholder="Token APIKEY" style="font-family:monospace"></td><td><input type="number" min="0" value="'+(w.update_interval_hours||'')+'" data-f="ws-interval" placeholder="24"></td><td class="num muted">'+(m.nodes||0)+'</td><td class="num muted" style="font-size:12px">'+esc(fmtTime(m.last_updated_at||w.last_updated_at))+'</td><td class="muted" style="font-size:12px;color:var(--red)">'+esc(m.last_error||w.last_error||'')+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delWebshare('+i+')">删除</button></td></tr>'}).join('');
+}
+function addWebshare(){wsData.push({name:'',api_key:'',update_interval_hours:24});renderWebshareTable()}
+function delWebshare(i){wsData.splice(i,1);renderWebshareTable()}
+function collectWebshare(){
+  const out=[];const seen=new Set();
+  qa('#webshareTable tbody tr').forEach(tr=>{
+    const name=(tr.querySelector('[data-f="ws-name"]').value||'').trim();
+    const key=(tr.querySelector('[data-f="ws-key"]').value||'').trim();
+    if(!name||!key||seen.has(name))return;
+    seen.add(name);
+    const iv=parseInt(tr.querySelector('[data-f="ws-interval"]').value||'0',10)||0;
+    out.push({name:name,api_key:key,update_interval_hours:iv});
+  });
+  wsData=out;return wsData;
+}
 
 /* ============================================================
    手动节点编辑
@@ -6944,7 +7188,7 @@ function renderQuota(c){
   q('#q_error_types').value=(c.quota_error_signals&&c.quota_error_signals.error_types||[]).join(', ');
   q('#q_message_kw').value=(c.quota_error_signals&&c.quota_error_signals.message_keywords||[]).join(', ');
   q('#q_max_switches').value=c.max_quota_node_switches||5;
-  q('#q_cooldown_h').value=c.node_cooldown_exhausted_hours||24;
+  q('#q_cooldown_h').value=c.node_cooldown_exhausted_hours||1;
   q('#q_cooldown_m').value=c.node_cooldown_dead_minutes||1;
   q('#q_health_interval').value=c.node_health_interval_minutes||15;
   q('#q_health_url').value=c.node_health_probe_url||'';
@@ -6953,7 +7197,7 @@ function collectQuota(){return{quota_error_signals:{error_types:q('#q_error_type
 async function saveSubsConfig(){
   const st=q('#subSaveStatus');st.textContent='保存中…';
   if(DEMO_MODE){await new Promise(r=>setTimeout(r,350));collectSubs();collectNodes();st.textContent='已保存（演示）';showToast('订阅与节点已保存','success');return}
-  try{collectSubs();const nodes=collectNodes();const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'save',subscriptions:subData,manual_nodes:nodes})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent='已保存，节点 '+d.nodes+' 个';showToast('订阅与节点已保存，节点池已刷新','success')}catch(e){st.textContent='失败: '+e.message;showToast('保存失败: '+e.message,'error')}finally{loadNodes()}
+  try{collectSubs();collectWebshare();const nodes=collectNodes();const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'save',subscriptions:subData,webshare:wsData,manual_nodes:nodes})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent='已保存，节点 '+d.nodes+' 个';showToast('订阅与节点已保存，节点池已刷新','success')}catch(e){st.textContent='失败: '+e.message;showToast('保存失败: '+e.message,'error')}finally{loadNodes()}
 }
 async function saveQuotaConfig(){
   if(DEMO_MODE){showToast('配额设置已保存（演示）','success');return}
@@ -6995,8 +7239,9 @@ async function resetStats(){
 }
 function renderConfigEditors(){
   subData=(cfg.subscriptions||[]).map(s=>({...s}));
+  wsData=(cfg.webshare||[]).map(w=>({...w}));
   nodeEditors=(cfg.manual_nodes||[]).map(n=>({...n}));
-  renderAliasTable();renderEffortTable();renderSocks5Table();renderSocks5Select();renderQuota(cfg);renderSubTable();renderNodeEditors();
+  renderAliasTable();renderEffortTable();renderSocks5Table();renderSocks5Select();renderQuota(cfg);renderSubTable();renderWebshareTable();renderNodeEditors();
   q('#force_disable_thinking').checked=!!cfg.force_disable_thinking;
   q('#apiKeyInput').value=cfg.api_key||'';syncGatewayBox();
 }
@@ -7224,7 +7469,7 @@ const DEMO={
     active_socks5:'',socks5_paid_direct:false,
     api_key:'sk-demo-xxxxxxxxxxxxxxxx',
     quota_error_signals:{error_types:['FreeUsageLimitError','insufficient_quota'],message_keywords:['free usage limit','quota','limit exceeded']},
-    max_quota_node_switches:5,node_cooldown_exhausted_hours:24,node_cooldown_dead_minutes:1,
+    max_quota_node_switches:5,node_cooldown_exhausted_hours:1,node_cooldown_dead_minutes:1,
     node_health_interval_minutes:15,node_health_probe_url:'https://www.gstatic.com/generate_204',
     log_level:'info'
   },
@@ -7239,7 +7484,8 @@ const DEMO={
   ],
   subscriptions:[
     {name:'主订阅',url:'https://sub.example.com/clash',update_interval_hours:24,nodes:14,usage_total:107374182400,usage_used:39728447488,usage_expire:1754000000,last_updated_at:'2026-08-10T21:03:00Z'},
-    {name:'备线路',url:'https://backup.example.com/uri',update_interval_hours:48,nodes:6,usage_total:536870912000,usage_used:12884901888,last_updated_at:'2026-08-09T08:12:00Z'}
+    {name:'备线路',url:'https://backup.example.com/uri',update_interval_hours:48,nodes:6,usage_total:536870912000,usage_used:12884901888,last_updated_at:'2026-08-09T08:12:00Z'},
+    {name:'webshare-主池',url:'webshare API',update_interval_hours:12,nodes:5,last_updated_at:'2026-08-10T22:05:00Z'}
   ],
   stats:{models:{'gpt-4o-mini':{request_count:1280,prompt_tokens:12345678,completion_tokens:2345678,total_tokens:14691356},'gpt-5.5':{request_count:342,prompt_tokens:8912345,completion_tokens:1234567,total_tokens:10146912},'glm-5.2':{request_count:876,prompt_tokens:4567890,completion_tokens:987654,total_tokens:5555544},'deepseek-r1':{request_count:2034,prompt_tokens:22334455,completion_tokens:3344556,total_tokens:25679011}}},
   caps:[
@@ -7263,13 +7509,11 @@ window.addEventListener('DOMContentLoaded',async()=>{
   DEMO_MODE=!online;
   setConn(online);
   const sa=q('#sideAddr');if(sa)sa.textContent=(location.host||location.hostname)||(DEMO_MODE?'localhost:8000':'-');
-  await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats(),loadCaps()]);
+  await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats(),loadCaps(),loadTrends()]);
   renderConfigEditors();
   initLogs();
-  sampleTrends();
-  renderTrends();
+  setTrendRefresh();
 });
-setInterval(()=>{if(q('#page-overview').classList.contains('active')){loadStats().then(()=>{sampleTrends();renderTrends()})}},5000);
 </script>
 </body>
 </html>
@@ -7311,7 +7555,7 @@ func main() {
 
 	// 订阅管理器：缓存 + 状态与配置文件同目录
 	cacheDir := filepath.Join(filepath.Dir(configPath), ".subscriptions")
-	subManager.configure(cfg.Subscriptions, cfg.ManualNodes, cacheDir)
+	subManager.configure(cfg.Subscriptions, cfg.Webshare, cfg.ManualNodes, cacheDir)
 	startSubscriptionTicker()
 	startNodeHealthCheck()
 
@@ -7363,6 +7607,7 @@ func main() {
 	mux.HandleFunc("/api/config", loggingMiddleware(requireAuth(adminConfigHandler)))
 	mux.HandleFunc("/api/nodes", loggingMiddleware(requireAuth(adminNodesHandler)))
 	mux.HandleFunc("/api/stats", loggingMiddleware(requireAuth(adminStatsHandler)))
+	mux.HandleFunc("/api/stats/trends", loggingMiddleware(requireAuth(adminTrendsHandler)))
 	mux.HandleFunc("/api/logs", loggingMiddleware(requireAuth(adminLogsHandler)))
 	mux.HandleFunc("/api/logs/stream", loggingMiddleware(requireAuth(adminLogsHandler)))
 	mux.HandleFunc("/api/logs/export", loggingMiddleware(requireAuth(adminLogsHandler)))

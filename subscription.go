@@ -45,12 +45,13 @@ type SubscriptionMeta struct {
 	RemoteName string `json:"remote_name,omitempty"`
 }
 
-// subscriptionManager 负责拉取订阅、解析文本、与自定义/遗留节点合并且写入节点池。
+// subscriptionManager 负责拉取订阅/webshare 代理源、解析、与自定义/遗留节点合并且写入节点池。
 type subscriptionManager struct {
-	mu       sync.Mutex
-	subs     []SubscriptionConfig
-	customs  []ProxyNodeConfig // 面板手填节点
-	cacheDir string
+	mu        sync.Mutex
+	subs      []SubscriptionConfig
+	webshares []WebshareConfig
+	customs   []ProxyNodeConfig // 面板手填节点
+	cacheDir  string
 
 	lastUpdated map[string]time.Time
 	lastError   map[string]string
@@ -79,11 +80,11 @@ type SubInfo struct {
 	UsageExpire   int64  `json:"usage_expire,omitempty"`
 }
 
-// snapshot 返回订阅源当前状态（URL/间隔/节点数/上次拉取/错误/流量）。
+// snapshot 返回订阅/webshare 源当前状态（URL/间隔/节点数/上次拉取/错误/流量）。
 func (m *subscriptionManager) snapshot() []SubInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]SubInfo, 0, len(m.subs))
+	out := make([]SubInfo, 0, len(m.subs)+len(m.webshares))
 	for _, s := range m.subs {
 		info := SubInfo{
 			Name:          s.Name,
@@ -103,24 +104,45 @@ func (m *subscriptionManager) snapshot() []SubInfo {
 		}
 		out = append(out, info)
 	}
+	for _, ws := range m.webshares {
+		key := ws.Key()
+		out = append(out, SubInfo{
+			Name:          ws.Name,
+			URL:           "webshare API",
+			IntervalHours: ws.UpdateIntervalHours,
+			Nodes:         m.lastCount[key],
+			LastError:     m.lastError[key],
+			LastUpdatedAt: fmtLastUpdated(m.lastUpdated[key]),
+		})
+	}
 	return out
 }
 
-// configure 初始化订阅源与缓存目录（可在面板中重复调用以更新配置）。
-func (m *subscriptionManager) configure(subs []SubscriptionConfig, customs []ProxyNodeConfig, cacheDir string) {
+func fmtLastUpdated(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339)
+}
+
+// configure 初始化订阅/webshare 源与缓存目录（可在面板中重复调用以更新配置）。
+func (m *subscriptionManager) configure(subs []SubscriptionConfig, webshares []WebshareConfig, customs []ProxyNodeConfig, cacheDir string) {
 	m.mu.Lock()
 	m.subs = subs
+	m.webshares = webshares
 	m.customs = customs
 	m.cacheDir = cacheDir
 	m.mu.Unlock()
 }
 
-// refreshAll 拉取全部订阅并重新合并节点池。force=true 时忽略更新间隔。
+// refreshAll 拉取全部订阅/webshare 源并重新合并节点池。force=true 时忽略更新间隔。
 // 返回合并后的节点总数；订阅全部失败但仍有手填/遗留节点时不算错误。
 func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, error) {
 	m.mu.Lock()
 	subs := make([]SubscriptionConfig, len(m.subs))
 	copy(subs, m.subs)
+	webshares := make([]WebshareConfig, len(m.webshares))
+	copy(webshares, m.webshares)
 	customs := make([]ProxyNodeConfig, len(m.customs))
 	copy(customs, m.customs)
 	cacheDir := m.cacheDir
@@ -145,7 +167,7 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 	}
 	all = append(all, legacySocks5Nodes()...)
 
-	// 并发拉取订阅
+	// 并发拉取订阅源
 	type result struct {
 		sub   SubscriptionConfig
 		nodes []*ProxyNode
@@ -186,6 +208,44 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 		m.mu.Unlock()
 	}
 
+	// 并发拉取 webshare 代理源
+	type wsResult struct {
+		ws    WebshareConfig
+		nodes []*ProxyNode
+		err   error
+	}
+	wsResults := make(chan wsResult, len(webshares))
+	for _, ws := range webshares {
+		go func(ws WebshareConfig) {
+			if prev, ok := lastUpdated[ws.Key()]; !force && ok && now.Sub(prev) < ws.updateInterval() {
+				wsResults <- wsResult{ws: ws}
+				return
+			}
+			nodes, err := fetchWebshare(ctx, ws)
+			wsResults <- wsResult{ws: ws, nodes: nodes, err: err}
+		}(ws)
+	}
+	for range webshares {
+		r := <-wsResults
+		m.mu.Lock()
+		key := r.ws.Key()
+		if r.err != nil {
+			m.lastError[key] = r.err.Error()
+			errs = append(errs, fmt.Sprintf("webshare %s: %s", r.ws.Name, r.err))
+		} else {
+			m.lastUpdated[key] = time.Now()
+			m.lastCount[key] = len(r.nodes)
+			delete(m.lastError, key)
+			for _, n := range r.nodes {
+				if r.ws.Name != "" {
+					n.Name = r.ws.Name + "::" + n.Name
+				}
+				all = append(all, n)
+			}
+		}
+		m.mu.Unlock()
+	}
+
 	if len(all) == 0 {
 		return 0, fmt.Errorf("没有任何可用节点: %s", strings.Join(errs, "; "))
 	}
@@ -193,7 +253,7 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 	if err := mihomoMgr.apply(all); err != nil {
 		slog.Error("mihomo 配置重建失败", "error", err)
 	}
-	slog.Info("节点池已刷新", "total", len(all), "subscriptions", len(subs), "errors", len(errs))
+	slog.Info("节点池已刷新", "total", len(all), "subscriptions", len(subs), "webshare", len(webshares), "errors", len(errs))
 	return len(all), nil
 }
 

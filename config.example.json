@@ -22,5 +22,6 @@
     }
   ],
   "active_socks5": "",
-  "socks5_paid_direct": false
+  "socks5_paid_direct": false,
+  "webshare": []
 }

@@ -12,7 +12,8 @@
 - 流式 SSE 转换和 token 用量统计
 - 模型别名、reasoning effort 映射、强制禁用 thinking
 - 订阅/手配节点池（vless/reality、ss、hysteria2、anytls、socks5）：进程内直连，无需 mihomo 子进程
-- 免费额度耗尽自动切换节点（FreeUsageLimitError 等），标记机制 + 24h 冷却
+- Webshare 代理池：API key 自动拉取 webshare.io 代理列表并入节点池（SOCKS5，分页全量、失效自动排除）
+- 免费额度耗尽自动切换节点（FreeUsageLimitError 等），标记机制 + 1h 冷却
 - SOCKS5 直连、指定代理和轮换代理
 - Web 管理面板：配置、统计、刷新上游会话、节点池管理（切换/解除标记/重新加载订阅）
 - GitHub Actions 自动构建 Linux、macOS、Windows、FreeBSD 多平台 release

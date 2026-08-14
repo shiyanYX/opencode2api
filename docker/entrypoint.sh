@@ -9,8 +9,40 @@ config_dir="$(dirname "$OPENCODE2API_CONFIG")"
 mkdir -p "$config_dir"
 
 if [ ! -f "$OPENCODE2API_CONFIG" ]; then
+  socks5_block=""
   if [ -n "${OPENCODE2API_SOCKS5_ADDR:-}" ]; then
     proxy_name="${OPENCODE2API_SOCKS5_NAME:-proxy}"
+    socks5_block=$(cat <<EOF
+  "socks5_proxies": [
+    {
+      "name": "$proxy_name",
+      "addr": "$OPENCODE2API_SOCKS5_ADDR",
+      "username": "",
+      "password": ""
+    }
+  ],
+  "active_socks5": "$OPENCODE2API_SOCKS5_ADDR",
+EOF
+)
+  fi
+  webshare_block=""
+  if [ -n "${OPENCODE2API_WEBSHARE_API_KEY:-}" ]; then
+    ws_name="${OPENCODE2API_WEBSHARE_NAME:-webshare}"
+    ws_mode="${OPENCODE2API_WEBSHARE_MODE:-direct}"
+    ws_interval="${OPENCODE2API_WEBSHARE_INTERVAL:-24}"
+    webshare_block=$(cat <<EOF
+  "webshare": [
+    {
+      "name": "$ws_name",
+      "api_key": "$OPENCODE2API_WEBSHARE_API_KEY",
+      "mode": "$ws_mode",
+      "update_interval_hours": $ws_interval
+    }
+  ],
+EOF
+)
+  fi
+  if [ -n "$socks5_block" ] || [ -n "$webshare_block" ]; then
     cat > "$OPENCODE2API_CONFIG" <<EOF
 {
   "model_alias": {
@@ -27,15 +59,9 @@ if [ ! -f "$OPENCODE2API_CONFIG" ]; then
     "high": "high"
   },
   "force_disable_thinking": false,
-  "socks5_proxies": [
-    {
-      "name": "$proxy_name",
-      "addr": "$OPENCODE2API_SOCKS5_ADDR",
-      "username": "",
-      "password": ""
-    }
-  ],
-  "active_socks5": "$OPENCODE2API_SOCKS5_ADDR"
+  $socks5_block
+  $webshare_block
+  "socks5_paid_direct": false
 }
 EOF
   else

@@ -118,6 +118,24 @@ func TestProbeSuccessLiftsDeadButKeepsExhausted(t *testing.T) {
 	}
 }
 
+func TestProbeFailureKeepsExhaustedMarker(t *testing.T) {
+	p, n := probeTestPool(t, failRT())
+	p.mark(n.Fingerprint, NodeExhausted, "quota:test")
+	cooldown := n.CooldownUntil
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	p.checkNodes(ctx)
+	if n.State != NodeExhausted {
+		t.Fatalf("probe failure must not overwrite exhausted, got %s", n.State)
+	}
+	if !n.CooldownUntil.Equal(cooldown) {
+		t.Fatalf("exhausted cooldown overwritten: was %v, now %v", cooldown, n.CooldownUntil)
+	}
+	if !strings.Contains(n.LastError, "quota") {
+		t.Fatalf("last error overwritten by probe: %q", n.LastError)
+	}
+}
+
 func TestMergeConfigPatchHealthFields(t *testing.T) {
 	iv := 30
 	url := "https://example.com/generate_204"

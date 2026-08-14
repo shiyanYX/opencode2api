@@ -216,7 +216,7 @@ func newProxyPool(statePath string) *nodePool {
 	p := &nodePool{
 		byID:              make(map[string]*ProxyNode),
 		clients:           make(map[string]*http.Client),
-		exhaustedCooldown: 24 * time.Hour,
+		exhaustedCooldown: time.Hour,
 		deadCooldown:      time.Minute,
 		statePath:         statePath,
 	}
@@ -228,7 +228,7 @@ func (p *nodePool) effectiveExhaustedCooldown() time.Duration {
 	if p.exhaustedCooldown > 0 {
 		return p.exhaustedCooldown
 	}
-	return 24 * time.Hour
+	return time.Hour
 }
 
 func (p *nodePool) effectiveDeadCooldown() time.Duration {
@@ -509,6 +509,7 @@ func (p *nodePool) checkNodes(ctx context.Context) int {
 
 // markProbeDead 探测失败标记：冷却至下一次探测时刻（跟随探测周期），
 // 无独立自动重试计时——恢复仅由后续探测成功驱动。
+// 已耗尽（exhausted）的节点不会被覆盖：配额冷却优先，探测失败仅作日志。
 func (p *nodePool) markProbeDead(fp, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -517,6 +518,12 @@ func (p *nodePool) markProbeDead(fp, reason string) {
 		return
 	}
 	now := time.Now()
+	if n.State == NodeExhausted {
+		slog.Debug("node health probe failed while exhausted (marker kept)",
+			"node", n.Name, "fp", fp, "error", reason,
+			"until", n.CooldownUntil.Format(time.RFC3339))
+		return
+	}
 	n.State = NodeDead
 	n.MarkedAt = now
 	n.LastError = reason
