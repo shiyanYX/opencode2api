@@ -35,6 +35,8 @@ type CallRecord struct {
 	Status           string      `json:"status,omitempty"`
 	PromptTokens     int64       `json:"prompt_tokens,omitempty"`
 	CompletionTokens int64       `json:"completion_tokens,omitempty"`
+	CacheCreation    int64       `json:"cache_creation_tokens,omitempty"`
+	CacheRead        int64       `json:"cache_read_tokens,omitempty"`
 	DurationMS       int64       `json:"duration_ms,omitempty"`
 	ErrMsg           string      `json:"err_msg,omitempty"`
 }
@@ -183,6 +185,8 @@ type callRecorder struct {
 	seenNodes     map[string]bool
 	promptTok     int64
 	completionTok int64
+	cacheCreation int64
+	cacheRead     int64
 }
 
 // beginCallLog 创建本次请求的调用记录并挂到 ctx；返回新 ctx。
@@ -226,7 +230,7 @@ func (cr *callRecorder) event(typ, node, detail string) {
 	cr.mu.Unlock()
 }
 
-func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionTok int64) {
+func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionTok, cacheCreation, cacheRead int64) {
 	if cr == nil {
 		return
 	}
@@ -248,8 +252,16 @@ func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionT
 	if completionTok > 0 {
 		cr.completionTok = completionTok
 	}
+	if cacheCreation > 0 {
+		cr.cacheCreation = cacheCreation
+	}
+	if cacheRead > 0 {
+		cr.cacheRead = cacheRead
+	}
 	cr.rec.PromptTokens = cr.promptTok
 	cr.rec.CompletionTokens = cr.completionTok
+	cr.rec.CacheCreation = cr.cacheCreation
+	cr.rec.CacheRead = cr.cacheRead
 	if !cr.start.IsZero() {
 		cr.rec.DurationMS = time.Since(cr.start).Milliseconds()
 	}
@@ -264,22 +276,147 @@ func callLogEvent(ctx context.Context, typ, node, detail string) {
 	callRecorderFrom(ctx).event(typ, node, detail)
 }
 
-func callLogFinish(ctx context.Context, status int, errMsg string, promptTok, completionTok int64) {
-	callRecorderFrom(ctx).finish(status, errMsg, promptTok, completionTok)
+func callLogFinish(ctx context.Context, status int, errMsg string, promptTok, completionTok, cacheCreation, cacheRead int64) {
+	callRecorderFrom(ctx).finish(status, errMsg, promptTok, completionTok, cacheCreation, cacheRead)
+}
+
+// usageFromMap 从上游 usage（OpenAI 或 Claude 风格）提取 输入/输出/缓存创建/缓存读取 token。
+// 兼容字段：prompt_tokens|input_tokens / completion_tokens|output_tokens /
+// cache_creation_input_tokens / cache_read_input_tokens | prompt_tokens_details.cached_tokens | input_tokens_details.cached_tokens。
+func usageFromMap(u map[string]any) (pt, ct, cc, cr int64) {
+	if u == nil {
+		return 0, 0, 0, 0
+	}
+	if v, ok := usageIntField(u, "prompt_tokens"); ok {
+		pt = int64(v)
+	} else if v, ok := usageIntField(u, "input_tokens"); ok {
+		pt = int64(v)
+	}
+	if v, ok := usageIntField(u, "completion_tokens"); ok {
+		ct = int64(v)
+	} else if v, ok := usageIntField(u, "output_tokens"); ok {
+		ct = int64(v)
+	}
+	if v, ok := usageIntField(u, "cache_creation_input_tokens"); ok {
+		cc = int64(v)
+	}
+	if v, ok := usageIntField(u, "cache_read_input_tokens"); ok {
+		cr = int64(v)
+	} else if d, ok := usageMapField(u, "prompt_tokens_details"); ok {
+		if v, ok := usageIntField(d, "cached_tokens"); ok {
+			cr = int64(v)
+		}
+	} else if d, ok := usageMapField(u, "input_tokens_details"); ok {
+		if v, ok := usageIntField(d, "cached_tokens"); ok {
+			cr = int64(v)
+		}
+	}
+	return pt, ct, cc, cr
 }
 
 // usageFromOpenAIBody 从 OpenAI 兼容成功响应体提取 token 用量（严格模式，缺失返回 0）。
-func usageFromOpenAIBody(b []byte) (int64, int64) {
+func usageFromOpenAIBody(b []byte) (int64, int64, int64, int64) {
 	var m struct {
-		Usage struct {
-			PromptTokens     int64 `json:"prompt_tokens"`
-			CompletionTokens int64 `json:"completion_tokens"`
-		} `json:"usage"`
+		Usage map[string]any `json:"usage"`
 	}
-	if err := json.Unmarshal(b, &m); err != nil {
-		return 0, 0
+	if err := json.Unmarshal(b, &m); err != nil || m.Usage == nil {
+		return 0, 0, 0, 0
 	}
-	return m.Usage.PromptTokens, m.Usage.CompletionTokens
+	return usageFromMap(m.Usage)
+}
+
+// ---- 用量趋势：全量 JSONL 按本地时间聚簇 ----
+
+// TrendsPoint 用量趋势单个时段桶（today 按小时，7d/30d 按天）。
+type TrendsPoint struct {
+	TS               string `json:"ts"`
+	Requests         int64  `json:"requests"`
+	OK               int64  `json:"ok"`
+	Fail             int64  `json:"fail"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	CacheCreation    int64  `json:"cache_creation_tokens"`
+	CacheRead        int64  `json:"cache_read_tokens"`
+}
+
+// trendsFromCallLog 扫描 call_log.jsonl 全量历史，按 range 聚簇返回时间序列。
+// range: today（24 个整点小时桶）/ 7d / 30d（逐日桶，含零数据时段保证连线连续）。
+// 路径未初始化或文件缺失时返回空数组。
+func trendsFromCallLog(rng string) []TrendsPoint {
+	callLog.mu.Lock()
+	p := callLog.path
+	callLog.mu.Unlock()
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return nil
+	}
+	now := time.Now()
+	loc := now.Location()
+	var buckets []TrendsPoint
+	var bidx func(t time.Time) int
+	dayIdx := func(t time.Time, start time.Time) int {
+		lt := t.Local()
+		dayStart := time.Date(lt.Year(), lt.Month(), lt.Day(), 0, 0, 0, 0, lt.Location())
+		return int(dayStart.Sub(start) / (24 * time.Hour))
+	}
+	switch rng {
+	case "7d":
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -6)
+		buckets = make([]TrendsPoint, 7)
+		for i := 0; i < 7; i++ {
+			buckets[i] = TrendsPoint{TS: start.AddDate(0, 0, i).Format("2006-01-02")}
+		}
+		bidx = func(t time.Time) int { return dayIdx(t, start) }
+	case "30d":
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -29)
+		buckets = make([]TrendsPoint, 30)
+		for i := 0; i < 30; i++ {
+			buckets[i] = TrendsPoint{TS: start.AddDate(0, 0, i).Format("2006-01-02")}
+		}
+		bidx = func(t time.Time) int { return dayIdx(t, start) }
+	default: // today
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+		buckets = make([]TrendsPoint, 24)
+		for i := 0; i < 24; i++ {
+			buckets[i] = TrendsPoint{TS: start.Add(time.Duration(i) * time.Hour).Format("2006-01-02T15:04")}
+		}
+		bidx = func(t time.Time) int {
+			lt := t.In(loc)
+			if lt.Year() != now.Year() || lt.YearDay() != now.YearDay() {
+				return -1
+			}
+			return lt.Hour()
+		}
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec CallRecord
+		if json.Unmarshal([]byte(line), &rec) != nil || rec.TS == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, rec.TS)
+		if err != nil {
+			continue
+		}
+		i := bidx(t)
+		if i < 0 || i >= len(buckets) {
+			continue
+		}
+		buckets[i].Requests++
+		if rec.Status == "ok" {
+			buckets[i].OK++
+		} else {
+			buckets[i].Fail++
+		}
+		buckets[i].PromptTokens += rec.PromptTokens
+		buckets[i].CompletionTokens += rec.CompletionTokens
+		buckets[i].CacheCreation += rec.CacheCreation
+		buckets[i].CacheRead += rec.CacheRead
+	}
+	return buckets
 }
 
 // ---- API：GET /api/call-log?limit= / DELETE /api/call-log ----

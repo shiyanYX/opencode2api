@@ -21,6 +21,21 @@ export OPENCODE2API_HTTP_PORT=8000
 export OPENCODE2API_IMAGE="ghcr.io/OWNER/opencode2api:latest"
 ```
 
+## Webshare 代理池
+
+填写 webshare.io API key 后，入口脚本会在**首次生成配置**时写入 `webshare` 段，服务启动即自动拉取代理列表并入节点池：
+
+```bash
+export OPENCODE2API_WEBSHARE_API_KEY="your-webshare-api-token"
+
+# 可选
+export OPENCODE2API_WEBSHARE_NAME="webshare"     # 源显示名（节点名前缀）
+export OPENCODE2API_WEBSHARE_MODE="direct"       # direct（默认）| backbone
+export OPENCODE2API_WEBSHARE_INTERVAL="24"       # 刷新间隔（小时）
+```
+
+不填 `OPENCODE2API_WEBSHARE_API_KEY` 时不生成 webshare 段，行为与之前完全一致。webshare 与 Tor/WARP 的 SOCKS5 配置可同时存在（socks5 走代理、webshare 节点入池并行），已在启动后通过管理面板修改或删除。
+
 ## 方式 1：单独运行
 
 ```bash

@@ -118,7 +118,7 @@ SOCKS5 代理列表。
 - 订阅内容支持：Clash YAML（只读 `proxies`）、整条 base64 包裹、每行一条 `vless://`/`ss://`/`hysteria2://`/`anytls://`/`socks5://` URI。
 - 订阅 URL 需要认证时：`url` 可直接附 query；base64 包裹的订阅会自动解码。
 - 免费额度耗尽自动切换：请求遇 `FreeUsageLimitError`/`insufficient_quota`/`credits_error`/`billing_error`（`error.type`）或 `free usage limit`/`quota`/`insufficient`/`limit exceeded`（`error.message`）时，标记当前节点为 **已耗尽**，透明切换下一个节点重试；单个请求最多切换 `max_quota_node_switches`（默认 5）次。**403 无签名视为耗尽、429 无签名不视为耗尽**。
-- 判定可定制：
+- 判定可定制；`error_types` / `message_keywords` 为空数组、`max_quota_node_switches` 为 0 时按默认值处理（面板文本框未配置时回显默认值）：
 
 ```json
 {
@@ -134,6 +134,29 @@ SOCKS5 代理列表。
 
 - 节点状态持久化在配置同目录 `proxy_state.json`（运行时按订阅指纹学习、重启不丢失）；节点客户端与订阅缓存缓存在 `.subscriptions/` 目录。
 - 管理面板新增「节点池」卡片：查看状态/冷却、手动切换节点、解除耗尽标记、重新加载订阅。
+
+### `webshare`（Webshare 代理池）
+
+通过 [webshare.io](https://webshare.io) 代理列表 API v2 拉取代理并转为 SOCKS5 节点，并入节点池（与订阅共用池、轮询与健康检查）。
+
+```json
+{
+  "webshare": [
+    {
+      "name": "webshare-main",
+      "api_key": "your-webshare-api-token",
+      "mode": "direct",
+      "update_interval_hours": 12
+    }
+  ]
+}
+```
+
+- `api_key`：在 webshare 面板「API Keys」生成，请求头为 `Authorization: Token <key>`。
+- `mode`：`direct`（默认）或 `backbone`，对应 API 的 `mode` 参数。
+- `update_interval_hours`：刷新间隔，0/缺省 = 24h。
+- 只导入 `valid != false` 的代理；每页最多 100 条自动分页拉全。
+- 节点名形如 `webshare-main::US-38.153.152.244:9594`，与订阅节点一样参与健康探测、配额切换和耗尽标记。
 
 ## 管理面板
 

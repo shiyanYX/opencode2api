@@ -11,6 +11,8 @@ ARG VERSION=dev
 ARG COMMIT=none
 ARG DATE=unknown
 
+ENV GOPROXY=https://goproxy.cn,direct
+
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -39,7 +41,8 @@ COPY docker/entrypoint.sh /entrypoint.sh
 
 ENV OPENCODE2API_PORT=8000 \
     OPENCODE2API_CONFIG=/data/config.json \
-    OPENCODE2API_PASSWORD=123456
+    OPENCODE2API_PASSWORD=123456 \
+    TZ=Asia/Shanghai
 
 EXPOSE 8000
 

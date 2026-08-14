@@ -36,6 +36,18 @@ export OPENCODE2API_IMAGE="ghcr.io/OWNER/opencode2api:latest"
 
 更多说明见 `deploy/compose/README.md`。
 
+### Webshare 代理池（可选）
+
+compose 模版预留了 webshare 代理源的环境变量，容器**首次启动**生成配置时自动写入 `webshare` 段并拉取代理：
+
+```bash
+export OPENCODE2API_WEBSHARE_API_KEY="your-webshare-api-token"
+# OPENCODE2API_WEBSHARE_NAME / _MODE / _INTERVAL 可选（默认 webshare / direct / 24h）
+docker compose -f deploy/compose/compose.yml up -d
+```
+
+已在[配置说明](CONFIGURATION.md#websharewebshare-代理池)描述 webshare 段的完整字段；管理面板也能直接增删 webshare 源。
+
 ## 使用 release 二进制
 
 从 GitHub Releases 下载对应系统的包：
