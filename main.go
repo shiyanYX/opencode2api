@@ -6619,9 +6619,9 @@ input,select,textarea{font-family:inherit;color:inherit}
     </div>
     <div class="card">
       <h2>Webshare 代理池</h2>
-      <p class="hint">填 webshare.io API key，自动从代理列表 API 拉取 SOCKS5 代理并入节点池（失效代理自动排除，健康检查由节点池统一负责）。</p>
+      <p class="hint">填 webshare.io API key，自动从代理列表 API 拉取 SOCKS5 代理并入节点池（失效代理自动排除，健康检查由节点池统一负责）。本机访问 webshare 网络不佳时可在「代理」列填中转（http/https/socks5，如 http://127.0.0.1:7890），留空则用环境变量 HTTP(S)_PROXY。</p>
       <div style="overflow-x:auto"><table class="tbl" id="webshareTable">
-        <thead><tr><th style="width:13%">名称</th><th style="width:26%">API Key</th><th style="width:10%">间隔(小时)</th><th class="num" style="width:7%">节点数</th><th style="width:14%">上次拉取</th><th style="width:21%">最近错误</th><th style="width:9%"></th></tr></thead>
+        <thead><tr><th style="width:11%">名称</th><th style="width:22%">API Key</th><th style="width:18%">代理 (拉取 API 用)</th><th style="width:9%">间隔(小时)</th><th class="num" style="width:6%">节点数</th><th style="width:12%">上次拉取</th><th style="width:15%">最近错误</th><th style="width:7%"></th></tr></thead>
         <tbody></tbody>
       </table></div>
       <div class="actions"><button class="btn btn-secondary" onclick="addWebshare()">添加 Webshare 源</button></div>
@@ -7117,8 +7117,8 @@ function applyWsSnapshot(subs){
 }
 function renderWebshareTable(){
   const tb=q('#webshareTable tbody');
-  if(!wsData.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">暂无 Webshare 源，填入 API key 后自动拉取代理列表</td></tr>';return}
-  tb.innerHTML=wsData.map((w,i)=>{const m=wsInfo[w.name]||{};return '<tr><td><input value="'+esc(w.name||'')+'" data-f="ws-name" placeholder="例如: webshare-主池"></td><td><input value="'+esc(w.api_key||'')+'" data-f="ws-key" type="password" placeholder="Token APIKEY" style="font-family:monospace"></td><td><input type="number" min="0" value="'+(w.update_interval_hours||'')+'" data-f="ws-interval" placeholder="24"></td><td class="num muted">'+(m.nodes||0)+'</td><td class="num muted" style="font-size:12px">'+esc(fmtTime(m.last_updated_at||w.last_updated_at))+'</td><td class="muted" style="font-size:12px;color:var(--red)">'+esc(m.last_error||w.last_error||'')+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delWebshare('+i+')">删除</button></td></tr>'}).join('');
+  if(!wsData.length){tb.innerHTML='<tr><td colspan="8" class="empty-hint">暂无 Webshare 源，填入 API key 后自动拉取代理列表</td></tr>';return}
+  tb.innerHTML=wsData.map((w,i)=>{const m=wsInfo[w.name]||{};return '<tr><td><input value="'+esc(w.name||'')+'" data-f="ws-name" placeholder="例如: webshare-主池"></td><td><input value="'+esc(w.api_key||'')+'" data-f="ws-key" type="password" placeholder="Token APIKEY" style="font-family:monospace"></td><td><input value="'+esc(w.proxy_url||'')+'" data-f="ws-proxy" placeholder="http://127.0.0.1:7890 / socks5://" style="font-family:monospace"></td><td><input type="number" min="0" value="'+(w.update_interval_hours||'')+'" data-f="ws-interval" placeholder="24"></td><td class="num muted">'+(m.nodes||0)+'</td><td class="num muted" style="font-size:12px">'+esc(fmtTime(m.last_updated_at||w.last_updated_at))+'</td><td class="muted" style="font-size:12px;color:var(--red)">'+esc(m.last_error||w.last_error||'')+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delWebshare('+i+')">删除</button></td></tr>'}).join('');
 }
 function addWebshare(){wsData.push({name:'',api_key:'',update_interval_hours:24});renderWebshareTable()}
 function delWebshare(i){wsData.splice(i,1);renderWebshareTable()}
@@ -7130,7 +7130,8 @@ function collectWebshare(){
     if(!name||!key||seen.has(name))return;
     seen.add(name);
     const iv=parseInt(tr.querySelector('[data-f="ws-interval"]').value||'0',10)||0;
-    out.push({name:name,api_key:key,update_interval_hours:iv});
+    const proxy=(tr.querySelector('[data-f="ws-proxy"]').value||'').trim();
+    out.push({name:name,api_key:key,proxy_url:proxy,update_interval_hours:iv});
   });
   wsData=out;return wsData;
 }

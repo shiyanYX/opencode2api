@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.4
+
+- Webshare 代理池支持按源配置 `proxy_url`（webshare 面板「代理」列 / `config.json` `webshare[].proxy_url`）：拉取 webshare API 时走指定代理，支持 `http://`、`https://`、`socks5://`；留空则回退进程环境变量 `HTTP(S)_PROXY`（直连）。适用于本机到 webshare 网络不佳、需经中转的场景。面板表格新增代理列并随配置保存、回显。
+
 ## v0.4.3
 
 - Webshare proxy pool: `config.json` `webshare[]` sources (name / api_key / mode / update_interval_hours) are fetched from the webshare.io API v2 proxy list (`Authorization: Token`, paginated page_size=100, `valid != false` only, string-or-number ports) and merged into the node pool as SOCKS5 nodes (`source::US-addr:port`, `webshare API` snapshot info shown in the panel). Panel 「订阅源」page gains a Webshare card with per-source node count / last fetch / error; saved via `/api/nodes` `save` from `webshare` rows. Deploy support: entrypoint generates the `webshare` config section on first boot from `OPENCODE2API_WEBSHARE_API_KEY` / `_NAME` / `_MODE` / `_INTERVAL` (optional, coexist with Tor/WARP socks5), all three compose templates pass the variables through, example config + docs updated.
