@@ -129,6 +129,75 @@ func TestFetchWebshareEmpty(t *testing.T) {
 	}
 }
 
+// TestFetchWebshareViaHTTPProxy 验证 proxy_url 的 http 代理生效：
+// webshare API 请求应经代理服务器发出（代理收到绝对 URI），且鉴权头不变。
+func TestFetchWebshareViaHTTPProxy(t *testing.T) {
+	var proxied bool
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.IsAbs() {
+			proxied = true
+		}
+		if got := r.Header.Get("Authorization"); got != "Token test-api-key" {
+			http.Error(w, "auth header lost", http.StatusBadGateway)
+			return
+		}
+		valid := true
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"count":1,"next":"null","results":`)
+		json.NewEncoder(w).Encode([]webshareProxyDTO{{Username: "up", Password: "pp", ProxyAddress: "38.153.152.244", Port: "9594", Valid: &valid}})
+		fmt.Fprint(w, `}`)
+	}))
+	defer proxySrv.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("webshare API 请求未走代理")
+	}))
+	defer origin.Close()
+
+	old := webshareListURL
+	webshareListURL = origin.URL + "/api/v2/proxy/list/"
+	defer func() { webshareListURL = old }()
+
+	nodes, err := fetchWebshare(context.Background(), WebshareConfig{
+		Name: "ws", APIKey: "test-api-key", Proxy: proxySrv.URL,
+	})
+	if err != nil {
+		t.Fatalf("fetchWebshare via proxy: %v", err)
+	}
+	if !proxied {
+		t.Fatal("proxy server 未收到绝对 URI 请求")
+	}
+	if len(nodes) != 1 || nodes[0].Address != "38.153.152.244" {
+		t.Fatalf("unexpected nodes via proxy: %+v", nodes)
+	}
+}
+
+func TestWebshareInvalidProxy(t *testing.T) {
+	proxySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"count":0,"next":"null","results":[]}`)
+	}))
+	defer proxySrv.Close()
+
+	for _, tc := range []struct{ name, proxy string }{
+		{"unsupported scheme", "ftp://127.0.0.1:21"},
+		{"bad url", "http://[::1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := fetchWebshare(context.Background(), WebshareConfig{Name: "ws", APIKey: "k", Proxy: tc.proxy})
+			if err == nil {
+				t.Fatal("want error for invalid proxy")
+			}
+		})
+	}
+	// http 代理地址合法但不通 → 报连接错误而非解析错误
+	_, err := fetchWebshare(context.Background(), WebshareConfig{Name: "ws", APIKey: "k",
+		Proxy: "http://127.0.0.1:1"})
+	if err == nil {
+		t.Fatal("want connection error for unreachable proxy")
+	}
+}
+
 func TestWebshareToNodePorts(t *testing.T) {
 	valid := true
 	cases := []struct {

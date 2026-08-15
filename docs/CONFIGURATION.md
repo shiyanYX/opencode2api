@@ -146,6 +146,7 @@ SOCKS5 代理列表。
       "name": "webshare-main",
       "api_key": "your-webshare-api-token",
       "mode": "direct",
+      "proxy_url": "http://127.0.0.1:7890",
       "update_interval_hours": 12
     }
   ]
@@ -154,6 +155,7 @@ SOCKS5 代理列表。
 
 - `api_key`：在 webshare 面板「API Keys」生成，请求头为 `Authorization: Token <key>`。
 - `mode`：`direct`（默认）或 `backbone`，对应 API 的 `mode` 参数。
+- `proxy_url`：可选。拉取 API 时走的代理，支持 `http://`/`https://`/`socks5://`（如 `http://127.0.0.1:7890`）；留空则使用进程环境变量 `HTTP(S)_PROXY`（即默认 Go 行为，通常直连）。本机到 webshare 网络不佳时建议配置。
 - `update_interval_hours`：刷新间隔，0/缺省 = 24h。
 - 只导入 `valid != false` 的代理；每页最多 100 条自动分页拉全。
 - 节点名形如 `webshare-main::US-38.153.152.244:9594`，与订阅节点一样参与健康探测、配额切换和耗尽标记。

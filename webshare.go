@@ -21,6 +21,7 @@ type WebshareConfig struct {
 	Name                string `json:"name"`
 	APIKey              string `json:"api_key"`
 	Mode                string `json:"mode,omitempty"`                  // direct（默认）| backbone
+	Proxy               string `json:"proxy_url,omitempty"`             // 拉取 API 走代理（http/https/socks5），空则用环境变量
 	UpdateIntervalHours int    `json:"update_interval_hours,omitempty"` // 0 → 默认 24h
 }
 
@@ -70,9 +71,44 @@ type webshareListResponse struct {
 	Results []webshareProxyDTO `json:"results"`
 }
 
+// webshareHTTPClient 构造 webshare 拉取 API 用的 HTTP 客户端：
+// - 配置了 proxy_url → 走指定代理（支持 http/https/socks5）
+// - 未配置 → 默认客户端（HTTP(S)_PROXY 环境变量天然生效）
+func webshareHTTPClient(proxy string) (*http.Client, error) {
+	proxy = strings.TrimSpace(proxy)
+	if proxy == "" {
+		return http.DefaultClient, nil
+	}
+	u, err := url.Parse(proxy)
+	if err != nil {
+		return nil, fmt.Errorf("webshare 代理地址不合法: %w", err)
+	}
+	switch u.Scheme {
+	case "http", "https":
+		return &http.Client{Transport: &http.Transport{
+			Proxy:           http.ProxyURL(u),
+			MaxIdleConns:    10,
+			IdleConnTimeout: 90 * time.Second,
+		}}, nil
+	case "socks5", "socks5h":
+		pw, _ := u.User.Password()
+		transport := &http.Transport{
+			DialContext:     socks5Dial(Socks5Proxy{Addr: u.Host, Username: u.User.Username(), Password: pw}),
+			MaxIdleConns:    10,
+			IdleConnTimeout: 90 * time.Second,
+		}
+		return &http.Client{Transport: transport}, nil
+	}
+	return nil, fmt.Errorf("webshare 代理协议不支持: %s（支持 http/https/socks5）", u.Scheme)
+}
+
 // fetchWebshare 分页拉取 Webshare 代理列表并转为 SOCKS5 节点。
 // 只保留 valid != false 的代理；非 200 或解析失败返回错误。
 func fetchWebshare(ctx context.Context, w WebshareConfig) ([]*ProxyNode, error) {
+	client, err := webshareHTTPClient(w.Proxy)
+	if err != nil {
+		return nil, err
+	}
 	var nodes []*ProxyNode
 	seen := map[string]bool{}
 	page := 1
@@ -93,7 +129,7 @@ func fetchWebshare(ctx context.Context, w WebshareConfig) ([]*ProxyNode, error) 
 		}
 		req.Header.Set("Authorization", "Token "+w.APIKey)
 		req.Header.Set("User-Agent", "opencode2api/"+versionString()+" (webshare source)")
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return nil, err
 		}
