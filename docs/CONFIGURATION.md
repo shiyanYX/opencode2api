@@ -117,7 +117,7 @@ SOCKS5 代理列表。
 - 支持协议：`vless`（含 reality）、`ss`、`hysteria2`、`anytls`、`socks5`（`socks5://` URI 走账户限制，clash 配置按原样处理）。
 - 订阅内容支持：Clash YAML（只读 `proxies`）、整条 base64 包裹、每行一条 `vless://`/`ss://`/`hysteria2://`/`anytls://`/`socks5://` URI。
 - 订阅 URL 需要认证时：`url` 可直接附 query；base64 包裹的订阅会自动解码。
-- 免费额度耗尽自动切换：请求遇 `FreeUsageLimitError`/`insufficient_quota`/`credits_error`/`billing_error`（`error.type`）或 `free usage limit`/`quota`/`insufficient`/`limit exceeded`（`error.message`）时，标记当前节点为 **已耗尽**，透明切换下一个节点重试；单个请求最多切换 `max_quota_node_switches`（默认 5）次。**403 无签名视为耗尽、429 无签名不视为耗尽**。
+- 免费额度耗尽自动切换：请求遇 `FreeUsageLimitError`/`insufficient_quota`/`credits_error`/`billing_error`（`error.type`）或 `free usage limit`/`quota`/`insufficient`/`limit exceeded`（`error.message`）时，标记当前节点为 **已耗尽**，透明切换下一个节点重试；单个请求最多切换 `max_quota_node_switches`（默认 5）次（配额预算与重试上限独立：循环上限 = 重试 3 次 + 配额预算 5 次，普通重试仍封顶 3 次）。**403 无签名视为耗尽、429 无签名不视为耗尽**。已耗尽节点在配额冷却到期后自动恢复（标记清除、重新参与路由）；健康探测失败标记的 **故障** 节点每分钟复探，探测成功即恢复；调度巡检只探测可用节点，不打扰已耗尽节点。
 - 判定可定制；`error_types` / `message_keywords` 为空数组、`max_quota_node_switches` 为 0 时按默认值处理（面板文本框未配置时回显默认值）：
 
 ```json
@@ -127,7 +127,7 @@ SOCKS5 代理列表。
     "message_keywords": ["free usage limit", "quota", "limit exceeded"]
   },
   "max_quota_node_switches": 5,
-  "node_cooldown_exhausted_hours": 24,
+  "node_cooldown_exhausted_hours": 1,
   "node_cooldown_dead_minutes": 1
 }
 ```
