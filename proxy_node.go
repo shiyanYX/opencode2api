@@ -510,8 +510,8 @@ type probeFilter int
 
 const (
 	probeAll       probeFilter = iota // 全量（含 exhausted）：面板手动"测速"使用
-	probeAvailable                   // 计划巡检：仅 available（dead 由 probeDead 复探，exhausted 由冷却恢复）
-	probeDead                        // 每分钟复探 dead 节点（事件恢复）
+	probeAvailable                    // 计划巡检：仅 available（dead 由 probeDead 复探，exhausted 由冷却恢复）
+	probeDead                         // 每分钟复探 dead 节点（事件恢复）
 )
 
 // checkNodes 并发探测池内全部节点并更新状态。失败标记 dead（冷却=探测周期），
@@ -551,7 +551,7 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 		return 0
 	}
 	var (
-		wg    sync.WaitGroup
+		wg     sync.WaitGroup
 		probed int
 	)
 	for _, n := range nodes {
