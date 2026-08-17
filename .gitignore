@@ -17,3 +17,5 @@ opencode2api.exe
 .vscode/
 *.swp
 .env
+.gocache/
+.gotmp/

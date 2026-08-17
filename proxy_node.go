@@ -238,15 +238,40 @@ func (p *nodePool) effectiveDeadCooldown() time.Duration {
 	return time.Minute
 }
 
-// eligible 判断节点现在是否可用（冷却期内的标记节点不可用）。
+// eligible 判断节点当前是否参与路由选路。仅 available 可用：
+//   - exhausted：配额冷却到期后由 sweepExpiredLocked 定时恢复（翻回 available）；
+//   - dead：只由探测成功（recordProbeSuccess）事件恢复，冷却时间不参与判定。
 func (p *nodePool) eligible(n *ProxyNode, now time.Time) bool {
-	if n.State == NodeAvailable {
-		return true
+	return n.State == NodeAvailable
+}
+
+// sweepExpiredLocked 把冷却已过期的 exhausted 节点翻回 available 并清空标记
+// （定时恢复：配额冷却到期即恢复，面板徽标/计数与路由选路保持一致）。
+// dead 节点不受影响：其恢复由探测成功驱动（事件恢复）。
+// 调用方必须持有写锁；仅在确有翻转时异步持久化一次。
+func (p *nodePool) sweepExpiredLocked(now time.Time) {
+	dirty := false
+	for _, n := range p.nodes {
+		if n.State != NodeExhausted {
+			continue
+		}
+		if n.CooldownUntil.IsZero() || !now.After(n.CooldownUntil) {
+			continue
+		}
+		slog.Info("node auto-recovered from exhausted",
+			"node", n.Name, "fp", n.Fingerprint,
+			"reason_before", n.LastError,
+			"until", n.CooldownUntil.Format(time.RFC3339))
+		n.State = NodeAvailable
+		n.MarkedAt = time.Time{}
+		n.CooldownUntil = time.Time{}
+		n.LastError = ""
+		dirty = true
 	}
-	if n.CooldownUntil.IsZero() {
-		return false
+	if dirty {
+		p.saveWG.Add(1)
+		go func() { defer p.saveWG.Done(); p.saveState() }()
 	}
-	return now.After(n.CooldownUntil)
 }
 
 // orderedLogic 返回 [可用节点..., 不可用节点...] 与池是否非空。
@@ -276,6 +301,7 @@ func (p *nodePool) pick(force bool) *ProxyNode {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
+	p.sweepExpiredLocked(now)
 
 	ordered, anyPool := p.orderedLocked()
 	if !anyPool || len(ordered) == 0 {
@@ -342,6 +368,7 @@ func (p *nodePool) current() *ProxyNode {
 func (p *nodePool) manual(fp string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.sweepExpiredLocked(time.Now())
 	if n := p.byID[fp]; n == nil {
 		return p.activeID
 	} else if !p.eligible(n, time.Now()) {
@@ -362,6 +389,7 @@ func (p *nodePool) pickState() (active, manual string) {
 func (p *nodePool) switchToNext() string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.sweepExpiredLocked(time.Now())
 	ordered, anyPool := p.orderedLocked()
 	if !anyPool || len(ordered) == 0 {
 		return ""
@@ -477,17 +505,67 @@ func (p *nodePool) probeNode(ctx context.Context, n *ProxyNode, probeURL string)
 	return time.Since(start).Milliseconds(), nil
 }
 
-// checkNodes 并发探测池内全部节点并更新状态。失败标记 dead（冷却=探测周期，
-// 恢复完全由下一次探测驱动）；成功恢复 available 并记录延迟。
-// 返回检查节点数。配额标记（exhausted）不会被探测成功解除。
+// probeFilter 限定一次探测的节点子集。
+type probeFilter int
+
+const (
+	probeAll       probeFilter = iota // 全量（含 exhausted）：面板手动"测速"使用
+	probeAvailable                   // 计划巡检：仅 available（dead 由 probeDead 复探，exhausted 由冷却恢复）
+	probeDead                        // 每分钟复探 dead 节点（事件恢复）
+)
+
+// checkNodes 并发探测池内全部节点并更新状态。失败标记 dead（冷却=探测周期），
+// 成功恢复 available 并记录延迟。配额标记（exhausted）不会被探测成功解除。
+// 返回检查节点数。面板手动"测速"与测试使用。
 func (p *nodePool) checkNodes(ctx context.Context) int {
+	return p.checkFiltered(ctx, probeAll)
+}
+
+// checkAvailable 计划巡检：只探测 available 节点（刷新延迟/标 dead）。
+// exhausted 由配额冷却到期自动恢复，dead 由 checkDead 复探，均不在此轮探测。
+func (p *nodePool) checkAvailable(ctx context.Context) int {
+	return p.checkFiltered(ctx, probeAvailable)
+}
+
+// checkDead 每分钟复探 dead 节点：探测成功即恢复 available；失败仅记录（防刷屏）。
+func (p *nodePool) checkDead(ctx context.Context) int {
+	return p.checkFiltered(ctx, probeDead)
+}
+
+// hasDeadNodes 是否存在待复探的 dead 节点（健康循环据此跳过空转）。
+func (p *nodePool) hasDeadNodes() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, n := range p.nodes {
+		if n.State == NodeDead {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 	probeURL := p.effectiveProbeURL()
-	nodes := p.snapshot()
+	nodes := p.snapshot() // 快照即触发清扫：面板看到的节点状态始终与路由一致
 	if len(nodes) == 0 {
 		return 0
 	}
-	var wg sync.WaitGroup
+	var (
+		wg    sync.WaitGroup
+		probed int
+	)
 	for _, n := range nodes {
+		switch filter {
+		case probeAvailable:
+			if n.State != NodeAvailable {
+				continue
+			}
+		case probeDead:
+			if n.State != NodeDead {
+				continue
+			}
+		}
+		probed++
 		wg.Add(1)
 		go func(n *ProxyNode) {
 			defer wg.Done()
@@ -504,12 +582,13 @@ func (p *nodePool) checkNodes(ctx context.Context) int {
 		}(n)
 	}
 	wg.Wait()
-	return len(nodes)
+	return probed
 }
 
 // markProbeDead 探测失败标记：冷却至下一次探测时刻（跟随探测周期），
 // 无独立自动重试计时——恢复仅由后续探测成功驱动。
 // 已耗尽（exhausted）的节点不会被覆盖：配额冷却优先，探测失败仅作日志。
+// 已是 dead 的节点（每分钟复探）失败时仅记录，不重复标记/延长冷却/刷日志。
 func (p *nodePool) markProbeDead(fp, reason string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -522,6 +601,11 @@ func (p *nodePool) markProbeDead(fp, reason string) {
 		slog.Debug("node health probe failed while exhausted (marker kept)",
 			"node", n.Name, "fp", fp, "error", reason,
 			"until", n.CooldownUntil.Format(time.RFC3339))
+		return
+	}
+	if n.State == NodeDead {
+		slog.Debug("node still dead (re-probe failed)",
+			"node", n.Name, "fp", fp, "error", reason)
 		return
 	}
 	n.State = NodeDead
@@ -649,10 +733,12 @@ func (p *nodePool) waitStateSaves() {
 	p.saveWG.Wait()
 }
 
-// snapshot 深拷贝快照（管理面板用）。
+// snapshot 深拷贝快照（管理面板用）；快照前先清扫，保证面板看到的
+// exhausted 节点在冷却到期后即显示为 available（与路由选路一致）。
 func (p *nodePool) snapshot() []*ProxyNode {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sweepExpiredLocked(time.Now())
 	out := make([]*ProxyNode, 0, len(p.nodes))
 	for _, n := range p.nodes {
 		out = append(out, n)
