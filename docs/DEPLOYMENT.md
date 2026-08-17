@@ -28,7 +28,7 @@ docker compose -f deploy/compose/compose.tor.yml up -d
 docker compose -f deploy/compose/compose.warp.yml up -d
 ```
 
-默认镜像是 `ghcr.io/6kmfi6hp/opencode2api:latest`。如果使用 fork 或私有镜像，设置：
+默认镜像是 `ghcr.io/shiyanYX/opencode2api:latest`（本 fork 的 CI 自动构建）。如需使用其他镜像（例如上游或私有构建），设置：
 
 ```bash
 export OPENCODE2API_IMAGE="ghcr.io/OWNER/opencode2api:latest"
