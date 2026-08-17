@@ -2036,12 +2036,14 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		maxAttempts = max401Retries
 	}
 
-	// 免费额度耗尽自动切节点：独立预算（默认 5 个节点），不消耗上游重试次数
+	// 免费额度耗尽自动切节点：独立预算（默认 5 个节点），不占用重试闸门；
+	// 循环上限 = 重试上限 + 配额预算，两者各自封顶互不挤占（重试仍由 canRetry 限制）。
 	nodeSwitchPending := false
 	quotaSwitches := 0
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
+	loopBudget := maxAttempts + maxQuotaSwitches
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := 0; attempt < loopBudget; attempt++ {
 		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint)
 		if err != nil {
 			return nil, 500, nil, err
@@ -2189,12 +2191,14 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		maxAttempts = max401Retries
 	}
 
-	// 免费额度耗尽自动切节点（流式：仅头部非 2xx 时可切；已吐字节不可重试）
+	// 免费额度耗尽自动切节点（流式：仅头部非 2xx 时可切；已吐字节不可重试）：
+	// 独立预算（默认 5 个节点），不占用重试闸门；循环上限 = 重试上限 + 配额预算。
 	nodeSwitchPending := false
 	quotaSwitches := 0
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
+	loopBudget := maxAttempts + maxQuotaSwitches
 
-	for attempt := 0; attempt < maxAttempts; attempt++ {
+	for attempt := 0; attempt < loopBudget; attempt++ {
 		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint)
 		if err != nil {
 			return nil, 500, nil, err
@@ -7194,7 +7198,7 @@ function renderQuota(c){
   q('#q_health_interval').value=c.node_health_interval_minutes||15;
   q('#q_health_url').value=c.node_health_probe_url||'';
 }
-function collectQuota(){return{quota_error_signals:{error_types:q('#q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:q('#q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(q('#q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(q('#q_cooldown_h').value||'24',10),node_cooldown_dead_minutes:parseInt(q('#q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(q('#q_health_interval').value||'15',10),node_health_probe_url:q('#q_health_url').value.trim()}}
+function collectQuota(){return{quota_error_signals:{error_types:q('#q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:q('#q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(q('#q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(q('#q_cooldown_h').value||'1',10),node_cooldown_dead_minutes:parseInt(q('#q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(q('#q_health_interval').value||'15',10),node_health_probe_url:q('#q_health_url').value.trim()}}
 async function saveSubsConfig(){
   const st=q('#subSaveStatus');st.textContent='保存中…';
   if(DEMO_MODE){await new Promise(r=>setTimeout(r,350));collectSubs();collectNodes();st.textContent='已保存（演示）';showToast('订阅与节点已保存','success');return}

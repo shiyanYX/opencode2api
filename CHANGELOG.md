@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.4.5
+
+- 节点状态恢复语义（#1）：`exhausted` 改为**定时恢复**——配额冷却到期后由惰性清扫 `sweepExpiredLocked()` 在路由/快照入口把节点翻回 `available` 并清空标记（原实现冷却一到期就放行流量、但 State 从不清回，导致面板徽标/`exhausted_count` 与路由选路脱节；重启后 past-cooldown 标记也立即放行）。`dead` 改为**事件恢复**：`eligible()` 塌缩为只认 `available`，dead 仅由探测成功解除；健康循环每分钟复探 dead 节点（`node_cooldown_dead_minutes` 语义重定义为复探间隔，默认 1 分钟，故障恢复延迟从 ≤15 分钟降到 ≤1 分钟）；调度巡检只探测 `available`（跳过 exhausted），面板手动「测速」才全量探测。`markProbeDead` 对已 dead 节点幂等（复探失败仅记录，不再重复标记/延长冷却/刷日志）。面板「故障冷却（分钟）」标签改为「故障复探间隔（分钟）」，配额提示补充自动恢复语义。
+- 配额切换预算真正生效（#2）：`callOpenCodeAPI` 与 `callOpenCodeAPIStream` 的重试循环上限从 `max(重试3, 401重试3)=3` 改为「重试上限 3 + 配额预算 5」= 8——配额切换 `continue` 不再挤占重试次数，`max_quota_node_switches`（默认 5）预算首次真正可达（旧实现最多切 2-3 个节点即被循环上限截断）。普通重试（401/429/5xx）仍由 `canRetry` 闸门封顶 3 次，预算用尽后落回原有错误返回。面板配额「耗尽冷却（小时）」空值回退修正为 1（原先 '24' 与渲染默认不一致）。
+- 测试：新增节点状态恢复语义测试 6 项（清扫翻回/冷却内不翻/manual 与快照清扫/dead 塌缩语义/巡检跳过 exhausted/markProbeDead 防刷屏）与配额预算测试 5 项（预算 5 生效/预算耗尽返回末错/重试仍封顶 3/切换后重试封顶/流式同测）；新增 `docs/adr/0001-node-state-recovery.md`，`CONTEXT.md` 补充节点状态/复探间隔/配额预算术语，`docs/CONFIGURATION.md` 与 `README.md` 同步恢复语义与预算说明。
+
 ## v0.4.4
 
 - Webshare 代理池支持按源配置 `proxy_url`（webshare 面板「代理」列 / `config.json` `webshare[].proxy_url`）：拉取 webshare API 时走指定代理，支持 `http://`、`https://`、`socks5://`；留空则回退进程环境变量 `HTTP(S)_PROXY`（直连）。适用于本机到 webshare 网络不佳、需经中转的场景。面板表格新增代理列并随配置保存、回显。
