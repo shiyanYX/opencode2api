@@ -1,6 +1,6 @@
 services:
   opencode2api:
-    image: ${OPENCODE2API_IMAGE:-ghcr.io/6kmfi6hp/opencode2api:latest}
+    image: ${OPENCODE2API_IMAGE:-ghcr.io/shiyanYX/opencode2api:latest}
     container_name: opencode2api
     restart: unless-stopped
     ports:
