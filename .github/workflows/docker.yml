@@ -28,6 +28,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # GHCR 镜像名必须全小写：owner 大小写混合（如 shiyanYX）时
+      # docker push/pull 会报 invalid reference format，这里统一小写化。
+      - name: Normalize image name (lowercase)
+        id: img_name
+        run: echo "name=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
@@ -58,7 +64,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.img_name.outputs.name }}
           tags: |
             type=ref,event=branch
             type=ref,event=tag
