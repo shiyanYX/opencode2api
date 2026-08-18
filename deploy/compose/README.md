@@ -6,7 +6,7 @@
 - `compose.tor.yml`：同时启动 Tor，`opencode2api` 通过 `tor:9050` 走 SOCKS5。
 - `compose.warp.yml`：同时启动 Cloudflare WARP，`opencode2api` 通过 `warp:1080` 走 SOCKS5。
 
-默认镜像是 `ghcr.io/shiyanYX/opencode2api:latest`（本 fork 的 CI 自动构建）。仍可通过 `OPENCODE2API_IMAGE` 覆盖为其他镜像。
+默认镜像是 `ghcr.io/shiyanyx/opencode2api:latest`（本 fork 的 CI 自动构建）。仍可通过 `OPENCODE2API_IMAGE` 覆盖为其他镜像。
 
 ## 通用变量
 
