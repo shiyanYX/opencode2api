@@ -1131,10 +1131,12 @@ func resolveModel(model string) string {
 		return alias
 	}
 	// Clients see free models without the "-free" suffix from /v1/models.
-	// Map the display name back to the upstream free ID when that is the only match.
+	// Map the display name back to the upstream free ID whenever that free
+	// version exists in the catalog (project only serves free models, so the
+	// presence of a paid twin does not prevent the free mapping).
 	if m != "" && !isFreeModel(m) {
 		freeID := m + "-free"
-		if !modelExistsInCaches(m) && modelExistsInCaches(freeID) {
+		if modelExistsInCaches(freeID) {
 			return freeID
 		}
 	}
@@ -6869,7 +6871,7 @@ async function loadStats(){
 }
 async function loadCaps(){
   if(DEMO_MODE){renderCaps(DEMO.caps);return}
-  try{const r=await fetch('/api/models');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();renderCaps((d.data||[]).map(x=>{if(typeof x==='string')return{id:x};return{id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities}}).filter(x=>x.id))}
+  try{const r=await fetch('/api/models');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();renderCaps((d.data||[]).filter(x=>(x.id||x).endsWith('-free')).map(x=>{if(typeof x==='string')return{id:x};return{id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities}}).filter(x=>x.id))}
   catch(e){q('#capTable').innerHTML='<thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadCaps()">重试</button></td></tr></tbody>'}
 }
 async function fetchModelList(){if(DEMO_MODE){modelList=DEMO.models.slice().sort();return}try{let m=await fetch('/api/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort()}else if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}}catch(e){}}
@@ -7251,8 +7253,8 @@ function renderAliasTable(){
   const tb=q('#aliasTable tbody');
   const manual=cfg.model_alias||{};
   const hidden=new Set(cfg.hidden_free_aliases||[]);
-  const auto=freeAutoAliases().filter(a=>!(a.alias in manual)&&!hidden.has(a.alias));
-  const hiddenRows=freeAutoAliases().filter(a=>!(a.alias in manual)&&hidden.has(a.alias));
+  const auto=freeAutoAliases().filter(a=>!hidden.has(a.alias));
+  const hiddenRows=freeAutoAliases().filter(a=>hidden.has(a.alias));
   const ks=Object.keys(manual);
   if(!auto.length&&!ks.length&&!hiddenRows.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置 · 免费模型自动映射，点「添加别名」可自定义</td></tr>';return}
   let h='';

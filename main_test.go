@@ -757,6 +757,41 @@ func TestResolveModelMapsStrippedFreeNameBackToUpstream(t *testing.T) {
 	}
 }
 
+// TestResolveModelMapsFreeTwinEvenWhenPaidExists 验证付费版与免费版共存时，
+// 请求去后缀名仍映射到免费版（本项目只服务免费模型）。
+func TestResolveModelMapsFreeTwinEvenWhenPaidExists(t *testing.T) {
+	oldModelsCache := modelsCache
+	oldGoModelsCache := goModelsCache
+	oldModelAlias := modelAlias
+	modelMu.Lock()
+	modelsCache = []ModelInfo{{ID: "hy3"}, {ID: "hy3-free"}}
+	goModelsCache = nil
+	modelMu.Unlock()
+	configMu.Lock()
+	modelAlias = map[string]string{}
+	configMu.Unlock()
+	t.Cleanup(func() {
+		modelMu.Lock()
+		modelsCache = oldModelsCache
+		goModelsCache = oldGoModelsCache
+		modelMu.Unlock()
+		configMu.Lock()
+		modelAlias = oldModelAlias
+		configMu.Unlock()
+	})
+
+	if got := resolveModel("hy3"); got != "hy3-free" {
+		t.Fatalf("resolveModel(hy3) with paid twin present = %q, want hy3-free", got)
+	}
+	// 手动别名仍优先：别名显式指向付费版时不应被自动免费映射覆盖
+	configMu.Lock()
+	modelAlias = map[string]string{"hy3-paid": "hy3"}
+	configMu.Unlock()
+	if got := resolveModel("hy3-paid"); got != "hy3" {
+		t.Fatalf("resolveModel(hy3-paid) = %q, want hy3 (manual alias wins)", got)
+	}
+}
+
 func TestExtractUpstreamAuthKeyValidation(t *testing.T) {
 	tests := []struct {
 		name       string
