@@ -1,4 +1,4 @@
-module github.com/6Kmfi6HP/opencode2api
+module github.com/shiyanYX/opencode2api
 
 go 1.26
 
