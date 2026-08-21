@@ -2723,21 +2723,30 @@ func adminModelsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	modelMu.RLock()
 	seen := make(map[string]struct{}, len(modelsCache)+len(goModelsCache))
-	ids := make([]string, 0, len(modelsCache)+len(goModelsCache))
-	appendIDs := func(list []ModelInfo) {
+	var allModels []ModelInfo
+	appendModels := func(list []ModelInfo) {
 		for _, m := range list {
 			if _, ok := seen[m.ID]; ok {
 				continue
 			}
 			seen[m.ID] = struct{}{}
-			ids = append(ids, m.ID)
+			// 从 models.dev 目录填充上下文/输出上限/输入模态（与 listModelsHandler 一致）
+			if limit, ok := lookupModelLimit(m.ID); ok {
+				ctx, out := limit.Context, limit.Output
+				m.ContextWindow, m.MaxOutputTokens = &ctx, &out
+				m.InputModalities = limit.InputModalities
+			} else if limit, ok := lookupModelLimit(publicFacingModelID(m.ID)); ok {
+				ctx, out := limit.Context, limit.Output
+				m.ContextWindow, m.MaxOutputTokens = &ctx, &out
+				m.InputModalities = limit.InputModalities
+			}
+			allModels = append(allModels, m)
 		}
 	}
-	appendIDs(modelsCache)
-	appendIDs(goModelsCache)
+	appendModels(modelsCache)
+	appendModels(goModelsCache)
 	modelMu.RUnlock()
-	sort.Strings(ids)
-	if len(ids) == 0 {
+	if len(allModels) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -2748,7 +2757,7 @@ func adminModelsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"object": "list",
-		"data":   ids,
+		"data":   allModels,
 	})
 }
 
@@ -6860,7 +6869,7 @@ async function loadStats(){
 }
 async function loadCaps(){
   if(DEMO_MODE){renderCaps(DEMO.caps);return}
-  try{const r=await fetch('/v1/models');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();renderCaps((d.data||[]).map(x=>({id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities})))}
+  try{const r=await fetch('/api/models');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();renderCaps((d.data||[]).map(x=>{if(typeof x==='string')return{id:x};return{id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities}}).filter(x=>x.id))}
   catch(e){q('#capTable').innerHTML='<thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadCaps()">重试</button></td></tr></tbody>'}
 }
 async function fetchModelList(){if(DEMO_MODE){modelList=DEMO.models.slice().sort();return}try{let m=await fetch('/api/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort()}else if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}}catch(e){}}
@@ -6883,7 +6892,7 @@ function renderCaps(rows){
   rows=(rows||[]).filter(x=>x&&x.id).sort((a,b)=>a.id.localeCompare(b.id));
   let h='';
   if(!rows.length){h='<tr><td colspan="4" class="empty-hint">暂无模型数据</td></tr>'}
-  else{for(const m of rows){h+='<tr><td class="mono">'+esc(m.id)+'</td><td class="num">'+fmtTokens(m.cw)+'</td><td class="num">'+fmtTokens(m.mo)+'</td><td>'+fmtModalities(m.mod)+'</td></tr>'}}
+  else{for(const m of rows){const isFree=m.id.endsWith('-free');const label=isFree?esc(m.id.slice(0,-5)):esc(m.id);const badge=isFree?'<span class="auto-badge">免费</span>':'';h+='<tr'+(isFree?' class="row-auto"':'')+'><td class="mono">'+label+badge+'</td><td class="num">'+fmtTokens(m.cw)+'</td><td class="num">'+fmtTokens(m.mo)+'</td><td>'+fmtModalities(m.mod)+'</td></tr>'}}
   q('#capTable').innerHTML='<thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody>'+h+'</tbody>';
 }
 
@@ -7243,16 +7252,23 @@ function renderAliasTable(){
   const manual=cfg.model_alias||{};
   const hidden=new Set(cfg.hidden_free_aliases||[]);
   const auto=freeAutoAliases().filter(a=>!(a.alias in manual)&&!hidden.has(a.alias));
+  const hiddenRows=freeAutoAliases().filter(a=>!(a.alias in manual)&&hidden.has(a.alias));
   const ks=Object.keys(manual);
-  if(!auto.length&&!ks.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置 · 免费模型自动映射，点「添加别名」可自定义</td></tr>';return}
+  if(!auto.length&&!ks.length&&!hiddenRows.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置 · 免费模型自动映射，点「添加别名」可自定义</td></tr>';return}
   let h='';
   for(const a of auto)h+='<tr data-auto="1" class="row-auto"><td><span class="auto-name">'+esc(a.alias)+'</span></td><td><span class="auto-up">'+esc(a.upstream)+'</span><span class="auto-badge">自动</span></td><td class="acts"><span class="auto-hide" onclick="hideAutoAlias(\''+esc(a.alias)+'\')" title="隐藏此自动映射">隐藏</span></td></tr>';
+  for(const a of hiddenRows)h+='<tr data-auto="1" class="row-auto" style="opacity:.45"><td><span class="auto-name">'+esc(a.alias)+'</span></td><td><span class="auto-up">'+esc(a.upstream)+'</span><span class="auto-badge" style="background:var(--bg-2);color:var(--text-ter)">已隐藏</span></td><td class="acts"><span class="auto-hide" onclick="unhideAutoAlias(\''+esc(a.alias)+'\')" title="取消隐藏">取消隐藏</span></td></tr>';
   h+=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key" placeholder="例如: gpt-5.5"></td><td>'+modelSelectHtml(manual[k])+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>').join('');
   tb.innerHTML=h;
 }
 function hideAutoAlias(alias){
   if(!cfg.hidden_free_aliases)cfg.hidden_free_aliases=[];
   if(!cfg.hidden_free_aliases.includes(alias)){cfg.hidden_free_aliases.push(alias);saveConfig()}
+  renderAliasTable();
+}
+function unhideAutoAlias(alias){
+  cfg.hidden_free_aliases=(cfg.hidden_free_aliases||[]).filter(a=>a!==alias);
+  saveConfig();
   renderAliasTable();
 }
 function addAliasRow(){const tb=q('#aliasTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: gpt-5.5" data-field="key"></td><td>'+modelSelectHtml('')+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>';tb.appendChild(tr)}

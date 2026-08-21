@@ -1,0 +1,19 @@
+services:
+  opencode2api:
+    image: ghcr.io/shiyanyx/opencode2api:latest
+    container_name: opencode2api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - opencode2api-data:/data
+    environment:
+      OPENCODE2API_PORT: "8000"
+      OPENCODE2API_CONFIG: /data/config.json
+      OPENCODE2API_PASSWORD: "f23fa11e61aa21fcef44075a11d1348f"
+      TZ: Asia/Shanghai
+
+volumes:
+  opencode2api-data:
+    external: true
+    name: compose_opencode2api-data
