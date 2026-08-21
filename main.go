@@ -875,6 +875,7 @@ type ToolFunction struct {
 
 type AppConfig struct {
 	ModelAlias           map[string]string `json:"model_alias"`
+	HiddenFreeAliases    []string          `json:"hidden_free_aliases,omitempty"`
 	ReasoningEffortMap   map[string]string `json:"reasoning_effort_map"`
 	ForceDisableThinking bool              `json:"force_disable_thinking"`
 	// ApiKey 统一网关密钥：客户端用它通过鉴权并按付费档获取全量模型；
@@ -2412,7 +2413,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 			if upResp != nil {
 				errBody, _ := io.ReadAll(upResp)
 				if len(errBody) > 0 {
-					w.Write(errBody)
+					w.Write(rewriteUpstreamError(errBody))
 					return
 				}
 			}
@@ -2525,7 +2526,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
-			w.Write(respBody)
+			w.Write(rewriteUpstreamError(respBody))
 		} else {
 			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "upstream error", "type": "upstream_error"}})
 		}
@@ -3437,13 +3438,19 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
 		if err != nil || status < 200 || status >= 300 {
 			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
-			errResp := map[string]any{
-				"type":  "error",
-				"error": map[string]string{"type": "api_error", "message": "upstream error"},
-			}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(status)
-			json.NewEncoder(w).Encode(errResp)
+			if upResp != nil {
+				errBody, _ := io.ReadAll(upResp)
+				if len(errBody) > 0 {
+					w.Write(rewriteUpstreamError(errBody))
+					return
+				}
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"type":  "error",
+				"error": map[string]string{"type": "api_error", "message": "upstream error"},
+			})
 			return
 		}
 		defer upResp.Close()
@@ -3459,7 +3466,7 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
-			w.Write(respBody)
+			w.Write(rewriteUpstreamError(respBody))
 		} else {
 			json.NewEncoder(w).Encode(map[string]any{"type": "error", "error": map[string]string{"type": "api_error", "message": "upstream error"}})
 		}
@@ -4649,7 +4656,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 			if upResp != nil {
 				errBody, _ := io.ReadAll(upResp)
 				if len(errBody) > 0 {
-					w.Write(errBody)
+					w.Write(rewriteUpstreamError(errBody))
 					return
 				}
 			}
@@ -4675,7 +4682,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
-			w.Write(respBody)
+			w.Write(rewriteUpstreamError(respBody))
 		} else {
 			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "upstream error"}})
 		}
@@ -5452,6 +5459,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"model_alias":                   merged.ModelAlias,
+			"hidden_free_aliases":           merged.HiddenFreeAliases,
 			"reasoning_effort_map":          merged.ReasoningEffortMap,
 			"force_disable_thinking":        merged.ForceDisableThinking,
 			"socks5_proxies":                merged.Socks5Proxies,
@@ -5517,6 +5525,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 // 使 false / 空串 / 0 也能被保存（清零语义）。
 type configPatch struct {
 	ModelAlias                 map[string]string    `json:"model_alias"`
+	HiddenFreeAliases          *[]string            `json:"hidden_free_aliases"`
 	ReasoningEffortMap         map[string]string    `json:"reasoning_effort_map"`
 	ForceDisableThinking       *bool                `json:"force_disable_thinking"`
 	Socks5Proxies              []Socks5Proxy        `json:"socks5_proxies"`
@@ -5539,6 +5548,9 @@ func mergeAppConfig(base, patch AppConfig) AppConfig {
 	out := base
 	if patch.ModelAlias != nil {
 		out.ModelAlias = patch.ModelAlias
+	}
+	if patch.HiddenFreeAliases != nil {
+		out.HiddenFreeAliases = patch.HiddenFreeAliases
 	}
 	if patch.ReasoningEffortMap != nil {
 		out.ReasoningEffortMap = patch.ReasoningEffortMap
@@ -5593,6 +5605,9 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	out := base
 	if patch.ModelAlias != nil {
 		out.ModelAlias = patch.ModelAlias
+	}
+	if patch.HiddenFreeAliases != nil {
+		out.HiddenFreeAliases = *patch.HiddenFreeAliases
 	}
 	if patch.ReasoningEffortMap != nil {
 		out.ReasoningEffortMap = patch.ReasoningEffortMap
@@ -6161,6 +6176,14 @@ const adminHTML = `
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>OPENCODE TO API · 管理面板</title>
 <style>
+/* ---------- 免费模型自动映射行 ---------- */
+.row-auto td{color:var(--text-sec);background:color-mix(in srgb,var(--accent-dim) 30%,transparent)}
+.tbl tbody tr.row-auto:hover{background:color-mix(in srgb,var(--accent-dim) 48%,transparent)!important}
+.auto-name{font-family:var(--mono);font-size:13px;color:var(--text)}
+.auto-up{font-family:var(--mono);font-size:12px}
+.auto-badge{display:inline-flex;align-items:center;padding:1px 8px;border-radius:999px;font-size:10.5px;font-weight:600;letter-spacing:.04em;background:var(--accent-dim);color:var(--accent);margin-left:7px;vertical-align:1px}
+.auto-hide{font-size:11px;color:var(--text-ter);cursor:pointer;opacity:.6;transition:opacity .15s}.auto-hide:hover{opacity:1}
+
 /* ============================================================
    OPENCODE TO API · 管理面板 (重构版)
    设计方向：tech-utility · 深色优先 · 无外网字体依赖
@@ -6670,6 +6693,7 @@ input,select,textarea{font-family:inherit;color:inherit}
     <div class="card">
       <h2>模型映射</h2>
       <div style="overflow-x:auto"><table class="tbl" id="aliasTable"><thead><tr><th style="width:38%">别名（请求名）</th><th style="width:44%">实际模型（上游名）</th><th style="width:18%"></th></tr></thead><tbody></tbody></table></div>
+      <div style="font-size:12px;color:var(--text-sec);margin:8px 2px 0;line-height:1.6">以 <code style="font-family:var(--mono)">-free</code> 结尾的免费模型自动映射（请求名 → 上游名），跟随上游模型列表变动；点击「隐藏」可跳过已下线模型，「添加别名」可自定义映射并覆盖自动项。</div>
       <div class="actions"><button class="btn btn-secondary" onclick="addAliasRow()">添加别名</button><button class="btn btn-primary" onclick="saveConfig()">保存全部</button></div>
     </div>
     <div class="card">
@@ -7213,10 +7237,28 @@ async function saveQuotaConfig(){
    配置编辑（代理与模型）
    ============================================================ */
 function modelSelectHtml(selected){let h='<select data-field="val" class="m-select"><option value="">-- 选择模型 --</option>';for(const m of modelList){h+='<option value="'+esc(m)+'"'+(selected===m?' selected':'')+'>'+esc(m)+'</option>'}h+='</select>';return h}
-function renderAliasTable(){const tb=q('#aliasTable tbody');const ks=Object.keys(cfg.model_alias||{});if(!ks.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置</td></tr>';return}tb.innerHTML=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key" placeholder="例如: gpt-5.5"></td><td>'+modelSelectHtml(cfg.model_alias[k])+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>').join('')}
+function freeAutoAliases(){const out=[];for(const m of modelList){if(typeof m==='string'&&m.endsWith('-free'))out.push({alias:m.slice(0,-5),upstream:m})}out.sort((a,b)=>a.alias.localeCompare(b.alias));return out}
+function renderAliasTable(){
+  const tb=q('#aliasTable tbody');
+  const manual=cfg.model_alias||{};
+  const hidden=new Set(cfg.hidden_free_aliases||[]);
+  const auto=freeAutoAliases().filter(a=>!(a.alias in manual)&&!hidden.has(a.alias));
+  const ks=Object.keys(manual);
+  if(!auto.length&&!ks.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置 · 免费模型自动映射，点「添加别名」可自定义</td></tr>';return}
+  let h='';
+  for(const a of auto)h+='<tr data-auto="1" class="row-auto"><td><span class="auto-name">'+esc(a.alias)+'</span></td><td><span class="auto-up">'+esc(a.upstream)+'</span><span class="auto-badge">自动</span></td><td class="acts"><span class="auto-hide" onclick="hideAutoAlias(\''+esc(a.alias)+'\')" title="隐藏此自动映射">隐藏</span></td></tr>';
+  h+=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key" placeholder="例如: gpt-5.5"></td><td>'+modelSelectHtml(manual[k])+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>').join('');
+  tb.innerHTML=h;
+}
+function hideAutoAlias(alias){
+  if(!cfg.hidden_free_aliases)cfg.hidden_free_aliases=[];
+  if(!cfg.hidden_free_aliases.includes(alias)){cfg.hidden_free_aliases.push(alias);saveConfig()}
+  renderAliasTable();
+}
 function addAliasRow(){const tb=q('#aliasTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: gpt-5.5" data-field="key"></td><td>'+modelSelectHtml('')+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>';tb.appendChild(tr)}
 function delAlias(b){b.closest('tr').remove()}
-function collectAliases(){const r={};qa('#aliasTable tbody tr').forEach(tr=>{const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});cfg.model_alias=r;return r}
+function collectAliases(){const r={};qa('#aliasTable tbody tr').forEach(tr=>{if(tr.dataset.auto)return;const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});cfg.model_alias=r;return r}
+function collectHidden(){return cfg.hidden_free_aliases||[]}
 function renderEffortTable(){const tb=q('#effortTable tbody');const es=Object.keys(cfg.reasoning_effort_map||{});if(!es.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无映射配置</td></tr>';return}tb.innerHTML=es.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key" placeholder="例如: low"></td><td><input value="'+esc(cfg.reasoning_effort_map[k])+'" data-field="val" placeholder="例如: high"></td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delEffort(this)">删除</button></td></tr>').join('')}
 function addEffortRow(){const tb=q('#effortTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: low" data-field="key"></td><td><input placeholder="例如: high" data-field="val"></td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delEffort(this)">删除</button></td></tr>';tb.appendChild(tr)}
 function delEffort(b){b.closest('tr').remove()}
@@ -7228,7 +7270,7 @@ function collectSocks5(){const r=[];qa('#socks5Table tbody tr').forEach(tr=>{con
 function renderSocks5Select(){const sel=q('#activeSocks5');sel.innerHTML='<option value="">直连（不使用代理）</option>';(cfg.socks5_proxies||[]).forEach(p=>{if(p.addr){const opt=document.createElement('option');opt.value=p.addr;opt.textContent=p.name?p.name+' ('+p.addr+')':p.addr;sel.appendChild(opt)}});if((cfg.socks5_proxies||[]).length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cfg.active_socks5||'';q('#socks5_paid_direct').value=cfg.socks5_paid_direct?'1':'0'}
 async function saveConfig(){
   collectEfforts();collectAliases();collectSocks5();
-  const body={model_alias:cfg.model_alias,reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:q('#force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:q('#activeSocks5').value,socks5_paid_direct:q('#socks5_paid_direct').value==='1',api_key:q('#apiKeyInput').value};
+  const body={model_alias:cfg.model_alias,hidden_free_aliases:collectHidden(),reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:q('#force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:q('#activeSocks5').value,socks5_paid_direct:q('#socks5_paid_direct').value==='1',api_key:q('#apiKeyInput').value};
   if(DEMO_MODE){cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存（演示）','success');return}
   try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}
 }
@@ -7499,7 +7541,7 @@ const DEMO={
     {id:'glm-5.2',cw:200000,mo:16384,mod:['text']},
     {id:'deepseek-r1',cw:128000,mo:8192,mod:['text']}
   ],
-  models:['gpt-4o-mini','gpt-5.5','glm-5.2','deepseek-r1']
+  models:['gpt-4o-mini','gpt-5.5','glm-5.2','deepseek-r1','deepseek-v4-flash-free','mimo-v2.5-free']
 };
 
 /* ============================================================

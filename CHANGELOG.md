@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- 模型映射免费模型自动映射：上游目录中以 `-free` 结尾的免费模型无需再逐个手动配置别名——请求时（`resolveModel`）已自动把去后缀名映射到 `xxx-free`，管理面板「模型映射」现在自动列出这些映射行（带「自动」徽标、跟随上游模型列表变动，刷新/重载后自动更新），「添加别名」按钮保留，自定义映射（含同名覆盖自动项）照常保存；自动行右侧有「隐藏」按钮，点击后该条自动映射不再显示（适用于已下线的免费模型，如 `deepseek-v4-flash-free`）；`collectAliases` 跳过自动行，不会把派生映射写回 `config.json`。`config.example.json` 精简为单个自定义别名示例，`docs/CONFIGURATION.md` 与 `README.md` 同步说明，DEMO 数据补充 `-free` 模型演示自动行。
+- 免费模型已下线错误改写：当下游请求的免费模型（通过自动映射解析到 `-free` 上游）已停止服务时，上游返回的原始错误信息（如 "Free promotion has ended"）会被网关改写为清晰的中文提示——"该免费模型已停止服务，请更换其他免费模型（管理面板 → 模型映射 中可查看当前可用的免费模型），或通过订阅获取更多模型。"，错误类型标记为 `free_model_ended`，原始类型保留在 `original_type` 字段。该改写覆盖 OpenAI/Anthropic/Responses 三种协议的所有错误路径（stream + 非 stream）。
+
 ## v0.4.5
 
 - 节点状态恢复语义（#1）：`exhausted` 改为**定时恢复**——配额冷却到期后由惰性清扫 `sweepExpiredLocked()` 在路由/快照入口把节点翻回 `available` 并清空标记（原实现冷却一到期就放行流量、但 State 从不清回，导致面板徽标/`exhausted_count` 与路由选路脱节；重启后 past-cooldown 标记也立即放行）。`dead` 改为**事件恢复**：`eligible()` 塌缩为只认 `available`，dead 仅由探测成功解除；健康循环每分钟复探 dead 节点（`node_cooldown_dead_minutes` 语义重定义为复探间隔，默认 1 分钟，故障恢复延迟从 ≤15 分钟降到 ≤1 分钟）；调度巡检只探测 `available`（跳过 exhausted），面板手动「测速」才全量探测。`markProbeDead` 对已 dead 节点幂等（复探失败仅记录，不再重复标记/延长冷却/刷日志）。面板「故障冷却（分钟）」标签改为「故障复探间隔（分钟）」，配额提示补充自动恢复语义。
