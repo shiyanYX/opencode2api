@@ -65,6 +65,66 @@ SOCKS5 代理列表。
 - 某个 `addr`：固定使用该代理
 - `__round_robin__`：在多个代理之间轮询
 
+### `socks5_sticky`
+
+会话粘性出口（仅作用于静态 `socks5_proxies` + `__round_robin__` 轮询模式）。
+
+- 不填或 `true`（默认）：同一账号（按 API token）或同一客户端会话（按 Claude metadata 的 session_id / 请求 user 字段）固定走同一出口代理。上游免费层的 prompt 缓存按出口 IP 隔离，随机轮换出口会导致缓存命中率归零；固定出口后缓存持续累积（上游实测固定出口命中 99.8% vs 随机轮换 ~0%）。不同会话之间仍分散到不同出口。
+- `false`：纯轮询，每次请求随机换出口。
+- 上游 429/5xx/连接错误重试前自动切断当前绑定、换下一个出口重试；代理配置变化时清空全部绑定。
+- 节点池（订阅/webshare）路径本身是全局粘性（单 active 节点），不依赖此开关。
+
+```json
+{
+  "socks5_sticky": true
+}
+```
+
+### `prompt_cache_retention`
+
+注入上游请求的 prompt 前缀缓存保留时长。zen 网关默认只保留 ~5 分钟（in_memory），agent 任务间歇即过期；注入后拉长到一天。
+
+- 不填或 `"24h"`：注入 `prompt_cache_retention: "24h"`
+- `"in_memory"`：注入 `"in_memory"`（上游默认行为）
+- `"off"`：不注入
+
+客户端 `extra_body` 中显式传入的值优先于注入默认值。
+
+```json
+{
+  "prompt_cache_retention": "24h"
+}
+```
+
+### `cache_control_breakpoints`
+
+是否向支持该字段的上游模型注入 Anthropic 风格的 `cache_control` 断点（`{"type":"ephemeral","ttl":"1h"}`），显式标记缓存前缀边界并拉长 TTL。
+
+- 缺省或 `true`：注入（对支持的上游提升缓存命中；GLM/Zhipu 模型会拒绝该字段，自动跳过）
+- `false`：不注入
+
+运行时观测：`stats.json` 中每个模型的 `cache_read_tokens` / `cache_created_tokens` 聚合（来自上游 `cache_read_input_tokens` / `cache_creation_input_tokens`、DeepSeek 的 `prompt_cache_hit_tokens` 或 `prompt_tokens_details.cached_tokens`）。Claude 协议面 `input_tokens` 已对齐 Anthropic 语义——扣除缓存读取部分（input/read/creation 互斥），客户端不会重复计费。DeepSeek 的 `prompt_cache_miss_tokens` 是普通未命中输入，不计为缓存写入。
+
+```json
+{
+  "cache_control_breakpoints": true
+}
+```
+
+### `text_only_models`
+
+只接受文本输入的上游模型前缀列表。请求解析到这些模型时，消息里的图片/文档内容会被**静默降级**为文本标注（`[image attached]` / `[document attached]`）后继续转发，而不是把无法处理的多模态内容交给上游报错。
+
+匹配是**大小写不敏感的前缀匹配**：一个前缀覆盖该模型的所有变体。例如 `"deepseek"` 同时匹配 `deepseek-v4-flash` 和 `deepseek-v4-flash-free`。
+
+不填时默认 `["deepseek"]`；显式设置（即使是空数组）会替换默认值。此字段同样作用于 Chat、Responses、Claude 三条协议面。
+
+```json
+{
+  "text_only_models": ["deepseek"]
+}
+```
+
 ### `socks5_paid_direct`
 
 控制**带 key / 付费**上游请求是否绕过 SOCKS5。

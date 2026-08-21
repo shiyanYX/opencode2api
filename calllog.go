@@ -310,6 +310,8 @@ func usageFromMap(u map[string]any) (pt, ct, cc, cr int64) {
 		if v, ok := usageIntField(d, "cached_tokens"); ok {
 			cr = int64(v)
 		}
+	} else if v, ok := usageIntField(u, "prompt_cache_hit_tokens"); ok {
+		cr = int64(v)
 	}
 	return pt, ct, cc, cr
 }

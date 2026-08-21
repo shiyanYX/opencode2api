@@ -8,6 +8,9 @@
     "high": "high"
   },
   "force_disable_thinking": false,
+  "prompt_cache_retention": "24h",
+  "cache_control_breakpoints": true,
+  "text_only_models": ["deepseek"],
   "socks5_proxies": [
     {
       "name": "local",
@@ -18,5 +21,6 @@
   ],
   "active_socks5": "",
   "socks5_paid_direct": false,
+  "socks5_sticky": true,
   "webshare": []
 }

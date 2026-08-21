@@ -195,12 +195,162 @@ var (
 	socks5Proxies    []Socks5Proxy
 	activeSocks5     string // 启用的代理 Addr，空表示直连，__round_robin__ 表示轮询
 	socks5PaidDirect bool   // true=带 key/付费直连；false/缺省=全部走代理
+	socks5Sticky     bool   // 轮询模式下按会话固定出口（默认 true）
 	socks5Mu         sync.RWMutex
 )
 
 const socks5RR = "__round_robin__"
 
 var socks5RRIndex uint32
+
+// ======================== 会话粘性代理（sticky egress） ========================
+//
+// 上游免费层（opencode.ai/zen -free 模型）的 prompt 缓存按出口 IP 隔离：
+// 同一请求经不同出口会各自冷启动，缓存几乎无法命中。轮询模式下若每次请求
+// 随机换出口，命中率会归零（上游实测 0% vs 固定出口 99.8%）。
+//
+// sticky 模式为同一会话（账号 token 或客户端会话 user）固定一个出口代理，
+// 让缓存持续累积；不同会话之间仍轮询分散，保留多出口的意义。绑定 TTL
+// 过期或代理连接失败时自动解除，重新分配出口。
+//
+// 注意：节点池（订阅/webshare）路径本身是全局粘性（单 active 节点），
+// 此机制只作用于静态 socks5_proxies + __round_robin__ 轮询模式。
+
+type stickyProxyEntry struct {
+	proxyIdx int
+	client   *http.Client
+	lastUsed time.Time
+}
+
+var (
+	stickyMu      sync.Mutex
+	stickyEntries = map[string]*stickyProxyEntry{}
+)
+
+const (
+	stickyEntryTTL       = 15 * time.Minute
+	stickyMaxEntries     = 256
+	stickyPublicFallback = "cli://public-shared" // 无会话标识的 public 请求共用同一出口
+)
+
+// stickyRebindSeq 每次重新绑定递增，参与哈希，保证同一会话在绑定被切断
+// （上游 429/5xx/连接错误）后重新分配时换到不同出口，而不是永远钉死
+// 在同一个确定性哈希结果上。
+var stickyRebindSeq uint32
+
+// stickyKeyForRequest 生成会话粘性键。优先级：账号 token > 会话 user
+// （来自 Claude metadata 的 session_id 等）> 公共兜底。
+func stickyKeyForRequest(auth UpstreamAuth, bodyMap map[string]any) string {
+	if auth.Token != "" {
+		return "tok:" + auth.Token
+	}
+	if u, ok := bodyMap["user"].(string); ok && u != "" {
+		return "usr:" + u
+	}
+	return stickyPublicFallback
+}
+
+// buildProxyClient 为指定代理构建带 SOCKS5 dial 的 HTTP 客户端。
+func buildProxyClient(proxy Socks5Proxy) *http.Client {
+	return &http.Client{
+		Timeout: 300 * time.Second,
+		Transport: &http.Transport{
+			DialContext:         socks5Dial(proxy),
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 20,
+			IdleConnTimeout:     90 * time.Second,
+		},
+	}
+}
+
+// getHTTPClientSticky 在静态轮询代理模式下选择客户端：
+// sticky 开启时按会话固定出口，否则退化为普通轮询/直连逻辑。
+func getHTTPClientSticky(auth UpstreamAuth, bodyMap map[string]any) *http.Client {
+	// 带 key 直连配置优先，不参与粘性。
+	if auth.tier() == TierPaid && getSocks5PaidDirect() {
+		return httpClient
+	}
+	if !getSocks5Sticky() {
+		return getHTTPClientForTier(auth.tier())
+	}
+	socks5Mu.RLock()
+	rr := activeSocks5 == socks5RR
+	proxies := append([]Socks5Proxy(nil), socks5Proxies...)
+	socks5Mu.RUnlock()
+	if !rr || len(proxies) == 0 {
+		return getHTTPClientForTier(auth.tier())
+	}
+
+	key := stickyKeyForRequest(auth, bodyMap)
+
+	stickyMu.Lock()
+	now := time.Now()
+	// 懒清理：先清过期条目，超出上限时再清最旧的。
+	if len(stickyEntries) > 0 {
+		for k, e := range stickyEntries {
+			if now.Sub(e.lastUsed) > stickyEntryTTL {
+				delete(stickyEntries, k)
+			}
+		}
+	}
+	if len(stickyEntries) > stickyMaxEntries {
+		var oldestKey string
+		var oldest time.Time
+		for k, e := range stickyEntries {
+			if oldestKey == "" || e.lastUsed.Before(oldest) {
+				oldestKey, oldest = k, e.lastUsed
+			}
+		}
+		delete(stickyEntries, oldestKey)
+	}
+	if e, ok := stickyEntries[key]; ok {
+		e.lastUsed = now
+		client := e.client
+		stickyMu.Unlock()
+		return client
+	}
+
+	// 哈希 + 递增序号：同一 key 的连续绑定会落在不同出口，使代理切换真正生效。
+	seq := atomic.AddUint32(&stickyRebindSeq, 1)
+	idx := int((fnv32a(key)+seq)%uint32(len(proxies))) % len(proxies)
+	entry := &stickyProxyEntry{proxyIdx: idx, client: buildProxyClient(proxies[idx]), lastUsed: now}
+	stickyEntries[key] = entry
+	stickyMu.Unlock()
+	return entry.client
+}
+
+// invalidateStickyProxy 在代理连接失败/上游限流时解除会话的 sticky 绑定，
+// 让下一次请求重新分配出口，避免持续使用故障或被限流的代理。
+func invalidateStickyProxy(auth UpstreamAuth, bodyMap map[string]any) {
+	if !getSocks5Sticky() {
+		return
+	}
+	socks5Mu.RLock()
+	rr := activeSocks5 == socks5RR
+	socks5Mu.RUnlock()
+	if !rr {
+		return
+	}
+	key := stickyKeyForRequest(auth, bodyMap)
+	stickyMu.Lock()
+	delete(stickyEntries, key)
+	stickyMu.Unlock()
+}
+
+func fnv32a(s string) uint32 {
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return h
+}
+
+func getSocks5Sticky() bool {
+	socks5Mu.RLock()
+	defer socks5Mu.RUnlock()
+	return socks5Sticky
+}
 
 // legacySocks5Nodes 把 config.json 里遗留的 socks5Proxies 迁移为池内节点。
 // 若旧配置有名字，优先用名字；否则用 Addr。
@@ -335,6 +485,23 @@ func getNodeClientForTier(tier TierType, forceSwitch bool) (*http.Client, string
 		return httpClient, ""
 	}
 	return getHTTPClientForTier(tier), ""
+}
+
+// getNodeClientSticky 在 getNodeClientForTier 基础上，为无节点池时的静态
+// socks5 轮询模式提供会话粘性（见 sticky egress 注释）。节点池路径保持原样：
+// 池本身是全局粘性（单 active 节点），缓存命中语义已满足。
+func getNodeClientSticky(auth UpstreamAuth, forceSwitch bool, bodyMap map[string]any) (*http.Client, string) {
+	if auth.tier() == TierPaid && getSocks5PaidDirect() {
+		return httpClient, ""
+	}
+	if nodesActive() {
+		n := proxyPool.pick(forceSwitch)
+		if n != nil {
+			return proxyPool.getClient(n.Fingerprint), n.Fingerprint
+		}
+		return httpClient, ""
+	}
+	return getHTTPClientSticky(auth, bodyMap), ""
 }
 
 // ======================== 随机 ID ========================
@@ -718,6 +885,10 @@ var (
 	reasoningEffortMap   = map[string]string{}
 	forceDisableThinking bool
 	apiKey               string // 统一网关密钥（config.api_key），空 = 不启用
+	// promptCacheRetention 注入上游的缓存保留时长；"" = 运行时默认 "24h"，"off" 禁用注入。
+	promptCacheRetention string
+	cacheBreakpoints     = true                 // 是否注入 Anthropic 风格 cache_control 断点
+	textOnlyModels       = []string{"deepseek"} // 只接受文本的上游模型前缀（默认 deepseek 系）
 	debugMode            bool
 	configMu             sync.RWMutex
 	storedResponses      = map[string]StoredResponseState{}
@@ -809,10 +980,12 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 // ======================== Token 统计 ========================
 
 type ModelStats struct {
-	RequestCount     int64 `json:"request_count"`
-	PromptTokens     int64 `json:"prompt_tokens"`
-	CompletionTokens int64 `json:"completion_tokens"`
-	TotalTokens      int64 `json:"total_tokens"`
+	RequestCount       int64 `json:"request_count"`
+	PromptTokens       int64 `json:"prompt_tokens"`
+	CompletionTokens   int64 `json:"completion_tokens"`
+	TotalTokens        int64 `json:"total_tokens"`
+	CacheReadTokens    int64 `json:"cache_read_tokens,omitempty"`
+	CacheCreatedTokens int64 `json:"cache_created_tokens,omitempty"`
 }
 
 type TokenStatsData struct {
@@ -906,6 +1079,22 @@ type AppConfig struct {
 	// 0 = 默认 15min；URL 空 = 默认 https://www.gstatic.com/generate_204
 	NodeHealthIntervalMinutes int    `json:"node_health_interval_minutes,omitempty"`
 	NodeHealthProbeURL        string `json:"node_health_probe_url,omitempty"`
+
+	// ---- 缓存增强 ----
+	// PromptCacheRetention 注入上游的 prompt 前缀缓存保留时长：
+	// "24h"（默认，拉长 zen 网关 ~5min 的缓存 TTL）、"in_memory" 或 "off"（不注入）。
+	PromptCacheRetention string `json:"prompt_cache_retention,omitempty"`
+	// CacheControlBreakpoints 是否注入 Anthropic 风格 cache_control 断点
+	// （{type:ephemeral, ttl:1h}）；GLM/Zhipu 等拒绝未知字段的模型自动跳过。默认 true。
+	CacheControlBreakpoints *bool `json:"cache_control_breakpoints,omitempty"`
+	// Socks5Sticky 为 true（默认）时，静态 socks5_proxies 轮询模式按会话固定出口：
+	// 同一账号/会话始终走同一出口代理，上游按出口隔离的 prompt 缓存得以持续累积。
+	// 置为 false 恢复纯轮询。
+	Socks5Sticky *bool `json:"socks5_sticky,omitempty"`
+	// TextOnlyModels 只接受文本输入的上游模型前缀列表（大小写不敏感前缀匹配）。
+	// 请求解析到这些模型时，图片/文档内容静默降级为文本标注后继续转发。
+	// 不填默认 ["deepseek"]；显式设置（含空数组）替换默认值。
+	TextOnlyModels []string `json:"text_only_models,omitempty"`
 }
 
 // QuotaSignalsConfig 配额耗尽判定签名（纯配置，不记运行时状态）。
@@ -1063,6 +1252,16 @@ func applyConfig(cfg AppConfig) {
 	}
 	forceDisableThinking = cfg.ForceDisableThinking
 	apiKey = cfg.ApiKey
+	if cfg.PromptCacheRetention != "" {
+		promptCacheRetention = cfg.PromptCacheRetention
+	}
+	if cfg.CacheControlBreakpoints != nil {
+		cacheBreakpoints = *cfg.CacheControlBreakpoints
+	}
+	// text_only_models：显式设置（含空数组）替换默认值；未配置保持默认 ["deepseek"]。
+	if cfg.TextOnlyModels != nil {
+		textOnlyModels = cfg.TextOnlyModels
+	}
 
 	socks5Mu.Lock()
 	if cfg.Socks5Proxies != nil {
@@ -1073,6 +1272,14 @@ func applyConfig(cfg AppConfig) {
 		socks5Client = nil
 		socks5ClientAddr = ""
 		atomic.StoreUint32(&socks5RRIndex, 0)
+	}
+	// 代理配置变化后旧 sticky 绑定可能指向已不存在的出口，全部清空重建。
+	stickyMu.Lock()
+	stickyEntries = map[string]*stickyProxyEntry{}
+	stickyMu.Unlock()
+	socks5Sticky = true
+	if cfg.Socks5Sticky != nil {
+		socks5Sticky = *cfg.Socks5Sticky
 	}
 	socks5PaidDirect = cfg.Socks5PaidDirect
 	socks5Mu.Unlock()
@@ -1159,6 +1366,31 @@ func getReasoningEffortMap() map[string]string {
 	return cp
 }
 
+// getPromptCacheRetention 返回注入上游请求的缓存保留时长。
+// ""（未配置）返回运行时默认 "24h"——把 zen 网关的前缀缓存 TTL 从 ~5 分钟拉长到一天；
+// "off" 完全禁用注入。
+func getPromptCacheRetention() string {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	if promptCacheRetention == "" {
+		return "24h"
+	}
+	return promptCacheRetention
+}
+
+func getCacheBreakpoints() bool {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return cacheBreakpoints
+}
+
+// rejectsCacheControl 报告解析后的上游模型是否已知会拒绝 Anthropic 风格的
+// cache_control 字段（GLM/Zhipu 对未知顶层字段报 "Extra inputs are not permitted"）。
+func rejectsCacheControl(modelID string) bool {
+	name := strings.ToLower(strings.TrimSpace(modelID))
+	return strings.HasPrefix(name, "glm") || strings.HasPrefix(name, "zhipu") || strings.HasPrefix(name, "z-ai") || strings.HasPrefix(name, "zai")
+}
+
 // ======================== Token 统计 ========================
 
 func loadTokenStats() {
@@ -1189,6 +1421,13 @@ func saveTokenStats() {
 }
 
 func recordTokenUsage(model string, promptTokens, completionTokens, totalTokens int64) {
+	recordTokenUsageWithCache(model, promptTokens, completionTokens, totalTokens, 0, 0)
+}
+
+// recordTokenUsageWithCache 在 recordTokenUsage 基础上累计缓存读/写 token。
+// cacheCreated 仅统计 Anthropic 风格的缓存写入；DeepSeek 的
+// prompt_cache_miss_tokens 是普通未命中输入，不算缓存写入。
+func recordTokenUsageWithCache(model string, promptTokens, completionTokens, totalTokens, cacheCreated, cacheRead int64) {
 	tokenStatsMu.Lock()
 	tokenStats.TotalRequests++
 	ms, ok := tokenStats.Models[model]
@@ -1200,8 +1439,33 @@ func recordTokenUsage(model string, promptTokens, completionTokens, totalTokens 
 	ms.PromptTokens += promptTokens
 	ms.CompletionTokens += completionTokens
 	ms.TotalTokens += totalTokens
+	if cacheCreated > 0 {
+		ms.CacheCreatedTokens += cacheCreated
+	}
+	if cacheRead > 0 {
+		ms.CacheReadTokens += cacheRead
+	}
 	tokenStatsMu.Unlock()
 	go saveTokenStats()
+}
+
+// parseCacheUsage 从上游 usage 提取（缓存读取, 缓存写入）。canonical Anthropic
+// 字段优先，DeepSeek/cached_tokens 兜底互斥，避免多种 usage 形态同时出现时重复计数。
+func parseCacheUsage(usage map[string]any) (int64, int64) {
+	var read, created int64
+	if v, ok := usageIntField(usage, "cache_read_input_tokens"); ok {
+		read = int64(v)
+	} else if v, ok := usageIntField(usage, "prompt_cache_hit_tokens"); ok {
+		read = int64(v)
+	} else if details, ok := usageMapField(usage, "prompt_tokens_details"); ok {
+		if v, ok := usageIntField(details, "cached_tokens"); ok {
+			read = int64(v)
+		}
+	}
+	if v, ok := usageIntField(usage, "cache_creation_input_tokens"); ok {
+		created = int64(v)
+	}
+	return read, created
 }
 
 // ======================== Thinking/Reasoning 判断 ========================
@@ -1383,7 +1647,65 @@ func ensureReasoningContent(messages []Message, thinking bool) []Message {
 	return messages
 }
 
-func convertMessagesForUpstream(messages []Message) []map[string]any {
+// multimodalAttachedLabel / multimodalDocumentLabel 是文本-only 上游模型收到
+// 图片/文档内容时的替换标注，与 Claude 转换器对 tool_result 附件使用的标注一致，
+// 保证工具图片与消息图片降级行为相同。
+const (
+	multimodalAttachedLabel = "[image attached]"
+	multimodalDocumentLabel = "[document attached]"
+)
+
+// isTextOnlyModel 报告解析后的上游模型是否只接受文本输入
+// （大小写不敏感前缀匹配 text_only_models 配置，默认 ["deepseek"]）。
+func isTextOnlyModel(modelID string) bool {
+	name := strings.ToLower(strings.TrimSpace(modelID))
+	if name == "" {
+		return false
+	}
+	configMu.RLock()
+	defer configMu.RUnlock()
+	for _, prefix := range textOnlyModels {
+		if strings.HasPrefix(name, strings.ToLower(strings.TrimSpace(prefix))) {
+			return true
+		}
+	}
+	return false
+}
+
+// downgradeMultimodalContent 把 image_url（"[image attached]"）和 file
+// （"[document attached]"）内容部分替换为文本标注，使发往 text-only 上游模型
+// （如 DeepSeek）的请求继续工作而不是报 "image not supported"。
+// 文本与其他部分保留，相对顺序不变。非 text-only 或无多模态内容时原样返回。
+func downgradeMultimodalContent(content []any, textOnly bool) any {
+	if !textOnly {
+		return content
+	}
+	out := make([]any, 0, len(content))
+	downgraded := false
+	for _, part := range content {
+		pm, ok := part.(map[string]any)
+		if !ok {
+			out = append(out, part)
+			continue
+		}
+		switch pm["type"] {
+		case "image_url":
+			downgraded = true
+			out = append(out, map[string]any{"type": "text", "text": multimodalAttachedLabel})
+		case "file":
+			downgraded = true
+			out = append(out, map[string]any{"type": "text", "text": multimodalDocumentLabel})
+		default:
+			out = append(out, part)
+		}
+	}
+	if !downgraded {
+		return content
+	}
+	return out
+}
+
+func convertMessagesForUpstream(messages []Message, textOnly bool) []map[string]any {
 	converted := make([]map[string]any, 0, len(messages))
 	for _, msg := range messages {
 		clean := map[string]any{}
@@ -1391,6 +1713,9 @@ func convertMessagesForUpstream(messages []Message) []map[string]any {
 			clean["role"] = msg.Role
 		}
 		content := normalizeContent(msg.Content)
+		if arr, ok := content.([]any); ok {
+			content = downgradeMultimodalContent(arr, textOnly)
+		}
 		reasoningContent := msg.ReasoningContent
 		if content != nil {
 			clean["content"] = content
@@ -1417,7 +1742,7 @@ func convertMessagesForUpstream(messages []Message) []map[string]any {
 func convertRequest(req *OpenAIRequest) map[string]any {
 	converted := map[string]any{
 		"model":    req.Model,
-		"messages": convertMessagesForUpstream(req.Messages),
+		"messages": convertMessagesForUpstream(req.Messages, isTextOnlyModel(req.Model)),
 		"stream":   req.Stream,
 	}
 	if req.Temperature != nil {
@@ -1466,6 +1791,22 @@ func convertRequest(req *OpenAIRequest) map[string]any {
 			if _, exists := converted[k]; !exists {
 				converted[k] = v
 			}
+		}
+	}
+	// 缓存增强：向 zen 上游显式声明 prompt 前缀缓存的保留时长。
+	// 上游默认约 5 分钟(in_memory)，agent 任务间歇易过期，导致缓存难命中；
+	// 注入 retention 后拉长到 24h。客户端显式传入的值(extra_body)优先。
+	if retention := getPromptCacheRetention(); retention != "off" {
+		if _, exists := converted["prompt_cache_retention"]; !exists {
+			converted["prompt_cache_retention"] = retention
+		}
+	}
+	// Anthropic 风格 cache_control 断点：对接受该字段的模型(排除 GLM/Zhipu)
+	// 显式标记缓存断点并拉长 TTL。对不支持的上游，zen 网关负责剥离；
+	// DeepSeek 等自动前缀缓存不受影响。
+	if getCacheBreakpoints() && !rejectsCacheControl(req.Model) {
+		if _, exists := converted["cache_control"]; !exists {
+			converted["cache_control"] = map[string]any{"type": "ephemeral", "ttl": "1h"}
 		}
 	}
 	return converted
@@ -1935,7 +2276,10 @@ func (auth UpstreamAuth) shouldUseGoEndpoint(modelID string) bool {
 	case AuthRouteAuto:
 		return isGoCatalogOnlyModel(modelID)
 	default:
-		return false
+		// Go-catalog-only models (e.g. ox-alpha-free) must be routed to the
+		// Go endpoint regardless of auth mode; otherwise the zen endpoint
+		// rejects them with "Model ... is not supported".
+		return isGoCatalogOnlyModel(modelID)
 	}
 }
 
@@ -2051,7 +2395,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		if err != nil {
 			return nil, 500, nil, err
 		}
-		client, nodeFp := getNodeClientForTier(auth.tier(), nodeSwitchPending)
+		client, nodeFp := getNodeClientSticky(auth, nodeSwitchPending, bodyMap)
 		nodeSwitchPending = false
 		attemptStart := time.Now()
 		resp, err := client.Do(up)
@@ -2076,6 +2420,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			)
 			if canRetry {
 				client.CloseIdleConnections()
+				invalidateStickyProxy(auth, bodyMap)
 				retryCount++
 				continue
 			}
@@ -2091,6 +2436,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			if isAnthropicFormat(b) {
 				b = convertAnthropicToOpenAI(b, modelID)
 			}
+			b = convertRawToolCallsInBody(b)
 			log.Info("upstream_attempt",
 				"try_model", modelID,
 				"surface", surface,
@@ -2156,6 +2502,9 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		if !canRetry {
 			break
 		}
+		// 免费层 429 按出口 IP 限流，5xx 也可能是出口问题：
+		// 重试前切断 sticky，让同一会话换到下一个出口。
+		invalidateStickyProxy(auth, bodyMap)
 		client.CloseIdleConnections()
 		retryCount++
 	}
@@ -2206,7 +2555,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		if err != nil {
 			return nil, 500, nil, err
 		}
-		client, nodeFp := getNodeClientForTier(auth.tier(), nodeSwitchPending)
+		client, nodeFp := getNodeClientSticky(auth, nodeSwitchPending, bodyMap)
 		nodeSwitchPending = false
 		attemptStart := time.Now()
 		resp, err := client.Do(up)
@@ -2229,6 +2578,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			)
 			if canRetry {
 				client.CloseIdleConnections()
+				invalidateStickyProxy(auth, bodyMap)
 				retryCount++
 				continue
 			}
@@ -2249,7 +2599,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				"final_status", resp.StatusCode,
 				"fallback_used", false,
 			)
-			return resp.Body, resp.StatusCode, resp.Header, nil
+			return wrapRawSSE(resp.Body), resp.StatusCode, resp.Header, nil
 		}
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -2299,6 +2649,9 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		if !canRetry {
 			break
 		}
+		// 免费层 429 按出口 IP 限流，5xx 也可能是出口问题：
+		// 重试前切断 sticky，让同一会话换到下一个出口。
+		invalidateStickyProxy(auth, bodyMap)
 		client.CloseIdleConnections()
 		retryCount++
 	}
@@ -2484,9 +2837,10 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 				// 空choices chunk，但可能有 usage
 				if usage != nil {
 					pt, ct, cc, cr := usageFromMap(usage)
+					_, pcr := parseCacheUsage(usage)
 					tt, _ := usage["total_tokens"].(float64)
 					if tt > 0 {
-						recordTokenUsage(req.Model, pt, ct, int64(tt))
+						recordTokenUsageWithCache(req.Model, pt, ct, int64(tt), cc, pcr)
 						lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
 					} else if pt > 0 {
 						lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
@@ -2498,9 +2852,10 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 			// 提取 usage（已在 convertStreamChunkWithUsage 中解析）
 			if usage != nil && !doneSeen {
 				pt, ct, cc, cr := usageFromMap(usage)
+				_, pcr := parseCacheUsage(usage)
 				tt, _ := usage["total_tokens"].(float64)
 				if tt > 0 {
-					recordTokenUsage(req.Model, pt, ct, int64(tt))
+					recordTokenUsageWithCache(req.Model, pt, ct, int64(tt), cc, pcr)
 					lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
 				} else if pt > 0 {
 					lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
@@ -2564,8 +2919,9 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 			pt, _ := u["prompt_tokens"].(float64)
 			ct, _ := u["completion_tokens"].(float64)
 			tt, _ := u["total_tokens"].(float64)
+			cc, cr := parseCacheUsage(u)
 			if tt > 0 {
-				recordTokenUsage(req.Model, int64(pt), int64(ct), int64(tt))
+				recordTokenUsageWithCache(req.Model, int64(pt), int64(ct), int64(tt), cc, cr)
 			}
 		}
 	}
@@ -2637,6 +2993,14 @@ func listModelsHandler(w http.ResponseWriter, r *http.Request) {
 				filtered = append(filtered, m)
 			}
 		}
+		// Also include free models from Go catalog that aren't in the regular catalog.
+		modelMu.RLock()
+		for _, goModel := range goModelsCache {
+			if isFreeModel(goModel.ID) && !containsModelWithID(filtered, goModel.ID) {
+				filtered = append(filtered, goModel)
+			}
+		}
+		modelMu.RUnlock()
 		if len(filtered) > 0 {
 			combinedModels = filtered
 		}
@@ -3286,6 +3650,12 @@ func buildClaudeUsageCore(upstreamUsage map[string]any) ClaudeUsage {
 	}
 
 	usage := ClaudeUsage{}
+	// readFromSplit marks cache_read sourced from DeepSeek/OpenAI-style
+	// counters (prompt_cache_hit_tokens / prompt_tokens_details.cached_tokens),
+	// whose prompt_tokens includes the hit portion. An Anthropic-style
+	// cache_read_input_tokens is already exclusive of input_tokens and must
+	// not be subtracted.
+	readFromSplit := false
 	if value, ok := usageIntField(upstreamUsage, "prompt_tokens"); ok {
 		usage["input_tokens"] = value
 	}
@@ -3310,6 +3680,31 @@ func buildClaudeUsageCore(upstreamUsage map[string]any) ClaudeUsage {
 	} else if promptDetails, ok := usageMapField(upstreamUsage, "prompt_tokens_details"); ok {
 		if value, ok := usageIntField(promptDetails, "cached_tokens"); ok {
 			usage["cache_read_input_tokens"] = value
+			readFromSplit = true
+		}
+	}
+	// DeepSeek-style counters split the prompt into hit (read) and miss
+	// (ordinary input). Miss is not a cache write, so it is intentionally
+	// left out of the Claude cache fields.
+	if _, exists := usage["cache_read_input_tokens"]; !exists {
+		if value, ok := usageIntField(upstreamUsage, "prompt_cache_hit_tokens"); ok {
+			usage["cache_read_input_tokens"] = value
+			readFromSplit = true
+		}
+	}
+	// Anthropic semantics: input_tokens excludes cache reads (input, read and
+	// creation are mutually exclusive). prompt_tokens from DeepSeek/OpenAI
+	// includes the hit portion, so subtract it here; otherwise a client that
+	// prices input and cache reads separately would bill the hit tokens twice.
+	if readFromSplit {
+		if read, ok := usage["cache_read_input_tokens"].(int); ok && read > 0 {
+			if input, ok := usage["input_tokens"].(int); ok {
+				if read >= input {
+					usage["input_tokens"] = 0
+				} else {
+					usage["input_tokens"] = input - read
+				}
+			}
 		}
 	}
 	if outputDetails, ok := usageMapField(upstreamUsage, "output_tokens_details"); ok {
@@ -3511,8 +3906,9 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 			pt, _ := u["prompt_tokens"].(float64)
 			ct, _ := u["completion_tokens"].(float64)
 			tt, _ := u["total_tokens"].(float64)
+			cc, cr := parseCacheUsage(u)
 			if tt > 0 {
-				recordTokenUsage(claudeReq.Model, int64(pt), int64(ct), int64(tt))
+				recordTokenUsageWithCache(claudeReq.Model, int64(pt), int64(ct), int64(tt), cc, cr)
 			}
 		}
 	}
@@ -3552,9 +3948,10 @@ func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io
 	reasoningFallback := strings.Builder{}
 	defer func() {
 		lpt, lct, lcc, lcr := usageFromMap(fullUsage)
+		lpcc, lpcr := parseCacheUsage(fullUsage)
 		tt, _ := fullUsage["total_tokens"].(float64)
 		if tt > 0 {
-			recordTokenUsage(model, lpt, lct, int64(tt))
+			recordTokenUsageWithCache(model, lpt, lct, int64(tt), lpcc, lpcr)
 		}
 		pt, ct, cc, cr = lpt, lct, lcc, lcr
 		stats.toolCallCount = len(toolCallOrder)
@@ -4719,8 +5116,9 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 			pt, _ := u["prompt_tokens"].(float64)
 			ct, _ := u["completion_tokens"].(float64)
 			tt, _ := u["total_tokens"].(float64)
+			cc, cr := parseCacheUsage(u)
 			if tt > 0 {
-				recordTokenUsage(chatReq.Model, int64(pt), int64(ct), int64(tt))
+				recordTokenUsageWithCache(chatReq.Model, int64(pt), int64(ct), int64(tt), cc, cr)
 			}
 		}
 	}
@@ -5252,9 +5650,10 @@ func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.R
 
 	if totalUsage != nil {
 		lpt, lct, lcc, lcr := usageFromMap(totalUsage)
+		lpcc, lpcr := parseCacheUsage(totalUsage)
 		tt, _ := totalUsage["total_tokens"].(float64)
 		if tt > 0 {
-			recordTokenUsage(model, lpt, lct, int64(tt))
+			recordTokenUsageWithCache(model, lpt, lct, int64(tt), lpcc, lpcr)
 		}
 		pt, ct, cc, cr = lpt, lct, lcc, lcr
 	}
@@ -7665,6 +8064,7 @@ func main() {
 	mux.HandleFunc("/v1/chat/completions", loggingMiddleware(chatCompletionsHandler))
 	mux.HandleFunc("/v1/responses", loggingMiddleware(responsesHandler))
 	mux.HandleFunc("/v1/messages", loggingMiddleware(claudeMessagesHandler))
+	mux.HandleFunc("/v1/messages/count_tokens", loggingMiddleware(claudeCountTokensHandler))
 	mux.HandleFunc("/v1/models", loggingMiddleware(listModelsHandler))
 	mux.HandleFunc("/api/models", loggingMiddleware(requireAuth(adminModelsHandler)))
 	mux.HandleFunc("/login", loggingMiddleware(loginHandler))
