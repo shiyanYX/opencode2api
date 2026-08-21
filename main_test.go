@@ -841,3 +841,519 @@ func TestExtractUpstreamAuthKeyValidation(t *testing.T) {
 		})
 	}
 }
+
+// ---- 上游 v0.4.7/v0.4.8 移植：Claude usage 缓存语义 ----
+
+func TestBuildClaudeUsageCoreDeepSeekMissIsNotCreation(t *testing.T) {
+	usage := buildClaudeUsageCore(map[string]any{
+		"prompt_tokens":            float64(200),
+		"prompt_cache_hit_tokens":  float64(160),
+		"prompt_cache_miss_tokens": float64(40),
+		"completion_tokens":        float64(35),
+	})
+	if got := usage["input_tokens"]; got != 40 {
+		t.Fatalf("input_tokens = %v, want 40 (200-160 hit excluded)", got)
+	}
+	if got := usage["output_tokens"]; got != 35 {
+		t.Fatalf("output_tokens = %v, want 35", got)
+	}
+	if got := usage["cache_read_input_tokens"]; got != 160 {
+		t.Fatalf("cache_read_input_tokens = %v, want 160", got)
+	}
+	if _, ok := usage["cache_creation_input_tokens"]; ok {
+		t.Fatalf("cache_creation_input_tokens should be absent for DeepSeek miss-only usage, got %v", usage["cache_creation_input_tokens"])
+	}
+}
+
+func TestBuildClaudeUsageCoreAnthropicStyleUntouched(t *testing.T) {
+	usage := buildClaudeUsageCore(map[string]any{
+		"input_tokens":                float64(33),
+		"cache_read_input_tokens":     float64(256),
+		"cache_creation_input_tokens": float64(10),
+		"output_tokens":               float64(7),
+	})
+	if got := usage["input_tokens"]; got != 33 {
+		t.Fatalf("input_tokens = %v, want 33 (canonical Anthropic fields not subtracted)", got)
+	}
+}
+
+func TestParseCacheUsageCanonicalFields(t *testing.T) {
+	read, created := parseCacheUsage(map[string]any{
+		"cache_read_input_tokens":     float64(64),
+		"cache_creation_input_tokens": float64(8),
+	})
+	if read != 64 || created != 8 {
+		t.Fatalf("parseCacheUsage = (%d, %d), want (64, 8)", read, created)
+	}
+}
+
+func TestParseCacheUsageDeepSeekMissIsNotCreation(t *testing.T) {
+	read, created := parseCacheUsage(map[string]any{
+		"prompt_tokens":            float64(200),
+		"prompt_cache_hit_tokens":  float64(160),
+		"prompt_cache_miss_tokens": float64(40),
+	})
+	if read != 160 || created != 0 {
+		t.Fatalf("parseCacheUsage = (%d, %d), want (160, 0)", read, created)
+	}
+}
+
+func TestParseCacheUsagePrefersCanonicalRead(t *testing.T) {
+	read, created := parseCacheUsage(map[string]any{
+		"cache_read_input_tokens": float64(80),
+		"prompt_cache_hit_tokens": float64(160),
+		"prompt_tokens_details": map[string]any{
+			"cached_tokens": float64(200),
+		},
+	})
+	if read != 80 || created != 0 {
+		t.Fatalf("parseCacheUsage = (%d, %d), want (80, 0)", read, created)
+	}
+}
+
+// ---- 上游 v0.5.0 移植：/v1/messages/count_tokens 本地估算 ----
+
+func TestEstimateClaudeInputTokens(t *testing.T) {
+	req := ClaudeRequest{
+		Model:  "hy3",
+		System: "You are helpful.",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: []any{
+				map[string]any{"type": "text", "text": "hi there"},
+			}},
+			{Role: "user", Content: []any{
+				map[string]any{"type": "image", "source": map[string]any{}},
+				map[string]any{"type": "text", "text": "what is this"},
+			}},
+		},
+	}
+	got := estimateClaudeInputTokens(req)
+	// system(4+4) + msg(4+2) + msg(4+2) + msg(4+1600+3) = 1627
+	if got != 1627 {
+		t.Fatalf("estimateClaudeInputTokens = %d, want 1627", got)
+	}
+}
+
+func TestEstimateTextTokensRuneBased(t *testing.T) {
+	if got := estimateTextTokens(""); got != 0 {
+		t.Fatalf("empty = %d, want 0", got)
+	}
+	if got := estimateTextTokens("ab"); got != 1 {
+		t.Fatalf("short = %d, want 1 (round up)", got)
+	}
+	// 8 个中文字符 = 8 rune ≈ 2 token（按字节会错算成 6）
+	if got := estimateTextTokens("一二三四五六七八"); got != 2 {
+		t.Fatalf("cjk = %d, want 2", got)
+	}
+}
+
+func TestClaudeCountTokensHandler(t *testing.T) {
+	body := `{"model":"hy3","messages":[{"role":"user","content":"hello world"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	claudeCountTokensHandler(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp map[string]int
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["input_tokens"] <= 0 {
+		t.Fatalf("input_tokens = %d, want > 0", resp["input_tokens"])
+	}
+
+	// 缺 model → 400 协议错误结构
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/messages/count_tokens", strings.NewReader(`{"messages":[]}`))
+	rec2 := httptest.NewRecorder()
+	claudeCountTokensHandler(rec2, req2)
+	if rec2.Code != 400 {
+		t.Fatalf("missing model status = %d, want 400", rec2.Code)
+	}
+	// GET → 405
+	req3 := httptest.NewRequest(http.MethodGet, "/v1/messages/count_tokens", nil)
+	rec3 := httptest.NewRecorder()
+	claudeCountTokensHandler(rec3, req3)
+	if rec3.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET status = %d, want 405", rec3.Code)
+	}
+}
+
+// ---- 上游 v0.4.5 移植：prompt_cache_retention / cache_control 注入 ----
+
+func TestConvertRequestInjectsCacheDefaults(t *testing.T) {
+	oldRetention := promptCacheRetention
+	oldBreakpoints := cacheBreakpoints
+	promptCacheRetention = ""
+	cacheBreakpoints = true
+	t.Cleanup(func() { promptCacheRetention = oldRetention; cacheBreakpoints = oldBreakpoints })
+
+	req := &OpenAIRequest{Model: "deepseek-v4-flash-free", Messages: []Message{{Role: "user", Content: "hi"}}}
+	body := convertRequest(req)
+	if v, _ := body["prompt_cache_retention"].(string); v != "24h" {
+		t.Fatalf("prompt_cache_retention = %#v, want 24h", body["prompt_cache_retention"])
+	}
+	cc, ok := body["cache_control"].(map[string]any)
+	if !ok || cc["type"] != "ephemeral" || cc["ttl"] != "1h" {
+		t.Fatalf("cache_control = %#v, want {type:ephemeral ttl:1h}", body["cache_control"])
+	}
+}
+
+func TestConvertRequestSkipsCacheControlForGLM(t *testing.T) {
+	oldBreakpoints := cacheBreakpoints
+	cacheBreakpoints = true
+	t.Cleanup(func() { cacheBreakpoints = oldBreakpoints })
+
+	for _, m := range []string{"glm-5.2", "GLM-5", "zhipu-x", "z-ai-model"} {
+		req := &OpenAIRequest{Model: m, Messages: []Message{{Role: "user", Content: "hi"}}}
+		body := convertRequest(req)
+		if _, ok := body["cache_control"]; ok {
+			t.Fatalf("model %s: cache_control should be skipped, got %#v", m, body["cache_control"])
+		}
+		if v, _ := body["prompt_cache_retention"].(string); v != "24h" {
+			t.Fatalf("model %s: retention still injected, got %#v", m, body["prompt_cache_retention"])
+		}
+	}
+}
+
+func TestConvertRequestExtraBodyWinsOverInjection(t *testing.T) {
+	oldRetention := promptCacheRetention
+	promptCacheRetention = ""
+	t.Cleanup(func() { promptCacheRetention = oldRetention })
+
+	req := &OpenAIRequest{
+		Model:    "deepseek-v4-flash-free",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+		ExtraBody: map[string]any{
+			"prompt_cache_retention": "in_memory",
+		},
+	}
+	body := convertRequest(req)
+	if v, _ := body["prompt_cache_retention"].(string); v != "in_memory" {
+		t.Fatalf("explicit extra_body retention lost: %#v", body["prompt_cache_retention"])
+	}
+}
+
+func TestConvertRequestRetentionOff(t *testing.T) {
+	oldRetention := promptCacheRetention
+	oldBreakpoints := cacheBreakpoints
+	promptCacheRetention = "off"
+	cacheBreakpoints = false
+	t.Cleanup(func() { promptCacheRetention = oldRetention; cacheBreakpoints = oldBreakpoints })
+
+	req := &OpenAIRequest{Model: "deepseek-v4-flash-free", Messages: []Message{{Role: "user", Content: "hi"}}}
+	body := convertRequest(req)
+	if _, ok := body["prompt_cache_retention"]; ok {
+		t.Fatalf("retention=off should not inject, got %#v", body["prompt_cache_retention"])
+	}
+	if _, ok := body["cache_control"]; ok {
+		t.Fatalf("breakpoints=false should not inject, got %#v", body["cache_control"])
+	}
+}
+
+// ---- 上游 v0.4.6 移植：SOCKS5 会话粘性出口 ----
+
+func withStickyProxyEnv(t *testing.T, proxies []Socks5Proxy, active string, sticky bool, paidDirect bool) {
+	t.Helper()
+	socks5Mu.Lock()
+	oldProxies := socks5Proxies
+	oldActive := activeSocks5
+	oldSticky := socks5Sticky
+	oldPaidDirect := socks5PaidDirect
+	socks5Proxies = proxies
+	activeSocks5 = active
+	socks5Sticky = sticky
+	socks5PaidDirect = paidDirect
+	socks5Mu.Unlock()
+	stickyMu.Lock()
+	stickyEntries = map[string]*stickyProxyEntry{}
+	stickyMu.Unlock()
+	t.Cleanup(func() {
+		socks5Mu.Lock()
+		socks5Proxies = oldProxies
+		activeSocks5 = oldActive
+		socks5Sticky = oldSticky
+		socks5PaidDirect = oldPaidDirect
+		socks5Mu.Unlock()
+		stickyMu.Lock()
+		stickyEntries = map[string]*stickyProxyEntry{}
+		stickyMu.Unlock()
+	})
+}
+
+func TestStickyKeyForRequest(t *testing.T) {
+	cases := []struct {
+		name string
+		auth UpstreamAuth
+		body map[string]any
+		want string
+	}{
+		{"paid token wins", UpstreamAuth{Token: "sk-abc"}, nil, "tok:sk-abc"},
+		{"public session user", UpstreamAuth{}, map[string]any{"user": "sess-42"}, "usr:sess-42"},
+		{"public no session falls back", UpstreamAuth{}, map[string]any{}, stickyPublicFallback},
+		{"public no body falls back", UpstreamAuth{}, nil, stickyPublicFallback},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := stickyKeyForRequest(c.auth, c.body); got != c.want {
+				t.Fatalf("stickyKeyForRequest = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestGetHTTPClientStickyPinsSession(t *testing.T) {
+	withStickyProxyEnv(t, []Socks5Proxy{{Addr: "p1"}, {Addr: "p2"}, {Addr: "p3"}}, socks5RR, true, false)
+
+	c1 := getHTTPClientSticky(UpstreamAuth{Token: "tok-1"}, nil)
+	c2 := getHTTPClientSticky(UpstreamAuth{Token: "tok-1"}, nil)
+	if c1 != c2 {
+		t.Fatalf("same session got different clients")
+	}
+	u1 := getHTTPClientSticky(UpstreamAuth{}, map[string]any{"user": "sess-1"})
+	u2 := getHTTPClientSticky(UpstreamAuth{}, map[string]any{"user": "sess-1"})
+	if u1 != u2 {
+		t.Fatalf("same user session got different clients")
+	}
+	p1 := getHTTPClientSticky(UpstreamAuth{}, map[string]any{})
+	p2 := getHTTPClientSticky(UpstreamAuth{}, map[string]any{})
+	if p1 != p2 {
+		t.Fatalf("public fallback sessions should share one client")
+	}
+}
+
+func TestInvalidateStickyProxyRebinds(t *testing.T) {
+	withStickyProxyEnv(t, []Socks5Proxy{{Addr: "p1"}, {Addr: "p2"}, {Addr: "p3"}}, socks5RR, true, false)
+
+	auth := UpstreamAuth{Token: "tok-1"}
+	_ = getHTTPClientSticky(auth, nil)
+	if got := len(stickyEntries); got != 1 {
+		t.Fatalf("sticky entries = %d, want 1", got)
+	}
+	invalidateStickyProxy(auth, nil)
+	if got := len(stickyEntries); got != 0 {
+		t.Fatalf("sticky entries after invalidate = %d, want 0", got)
+	}
+	_ = getHTTPClientSticky(auth, nil)
+	if _, ok := stickyEntries["tok:tok-1"]; !ok {
+		t.Fatal("binding should be recreated after invalidate")
+	}
+}
+
+func TestInvalidateStickyProxyRotatesEgress(t *testing.T) {
+	withStickyProxyEnv(t, []Socks5Proxy{{Addr: "p1"}, {Addr: "p2"}, {Addr: "p3"}}, socks5RR, true, false)
+
+	auth := UpstreamAuth{Token: "tok-2"}
+	seen := map[int]bool{}
+	for i := 0; i < 4; i++ {
+		_ = getHTTPClientSticky(auth, nil)
+		stickyMu.Lock()
+		idx := stickyEntries["tok:tok-2"].proxyIdx
+		stickyMu.Unlock()
+		seen[idx] = true
+		invalidateStickyProxy(auth, nil)
+	}
+	if len(seen) < 2 {
+		t.Fatalf("egress did not rotate across rebinds: %v", seen)
+	}
+}
+
+func TestGetHTTPClientStickySkipsWhenDisabled(t *testing.T) {
+	withStickyProxyEnv(t, []Socks5Proxy{{Addr: "p1"}, {Addr: "p2"}}, socks5RR, false, false)
+
+	getHTTPClientSticky(UpstreamAuth{Token: "tok-1"}, nil)
+	if got := len(stickyEntries); got != 0 {
+		t.Fatalf("sticky disabled but entries = %d", got)
+	}
+}
+
+// ---- 上游 v0.4.9 移植：text_only_models 多模态降级 ----
+
+func TestIsTextOnlyModelPrefixMatch(t *testing.T) {
+	old := textOnlyModels
+	textOnlyModels = []string{"deepseek"}
+	t.Cleanup(func() { textOnlyModels = old })
+
+	for _, m := range []string{"deepseek-v4-flash", "DeepSeek-V4-Pro", "deepseek-v4-flash-free"} {
+		if !isTextOnlyModel(m) {
+			t.Fatalf("isTextOnlyModel(%q) = false, want true", m)
+		}
+	}
+	if isTextOnlyModel("glm-5.2") || isTextOnlyModel("") {
+		t.Fatal("non-deepseek models should not be text-only")
+	}
+}
+
+func TestDowngradeMultimodalContent(t *testing.T) {
+	content := []any{
+		map[string]any{"type": "text", "text": "look at this"},
+		map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,xx"}},
+		map[string]any{"type": "file", "file": map[string]any{}},
+	}
+	got := downgradeMultimodalContent(content, true).([]any)
+	if len(got) != 3 {
+		t.Fatalf("parts = %d, want 3 (order preserved)", len(got))
+	}
+	if got[0].(map[string]any)["text"] != "look at this" {
+		t.Fatalf("text part lost: %#v", got[0])
+	}
+	if got[1].(map[string]any)["text"] != "[image attached]" {
+		t.Fatalf("image not downgraded: %#v", got[1])
+	}
+	if got[2].(map[string]any)["text"] != "[document attached]" {
+		t.Fatalf("file not downgraded: %#v", got[2])
+	}
+	// 非 text-only 模型原样返回
+	same := downgradeMultimodalContent(content, false).([]any)
+	if len(same) != 3 || same[1].(map[string]any)["type"] != "image_url" {
+		t.Fatal("non-text-only should return content unchanged")
+	}
+}
+
+func TestConvertRequestDowngradesForTextOnlyModel(t *testing.T) {
+	old := textOnlyModels
+	textOnlyModels = []string{"deepseek"}
+	t.Cleanup(func() { textOnlyModels = old })
+
+	req := &OpenAIRequest{
+		Model: "deepseek-v4-flash-free",
+		Messages: []Message{{
+			Role: "user",
+			Content: []any{
+				map[string]any{"type": "text", "text": "hi"},
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "x"}},
+			},
+		}},
+	}
+	body := convertRequest(req)
+	msgs := body["messages"].([]map[string]any)
+	content := msgs[0]["content"].([]any)
+	if content[1].(map[string]any)["text"] != "[image attached]" {
+		t.Fatalf("upstream still has image part: %#v", content[1])
+	}
+}
+
+// ---- 上游 v0.4.4 移植：原始 DSML/Qwen 工具调用转换 ----
+
+func TestParseRawToolCalls(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    string
+		want  int
+		first string
+		args  string
+	}{
+		{
+			name: "dsml name parameters",
+			in:   `<｜DSML｜tool_calls><name>ls</name><parameters>{"path":"."}</parameters></｜DSML｜tool_calls>`,
+			want: 1, first: "ls", args: `{"path":"."}`,
+		},
+		{
+			name: "dsml invoke",
+			in:   `<｜DSML｜tool_calls><｜DSML｜invoke name="read_file"><｜DSML｜parameter name="path">/tmp/a.txt</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`,
+			want: 1, first: "read_file", args: `{"path":"/tmp/a.txt"}`,
+		},
+		{
+			name: "qwen",
+			in:   `<tool_call><name>search</name><parameters>{"q":"go"}</parameters></tool_call>`,
+			want: 1, first: "search", args: `{"q":"go"}`,
+		},
+		{
+			name: "qwen function",
+			in:   `<function=search><parameter=q>go</parameter></function>`,
+			want: 1, first: "search", args: `{"q":"go"}`,
+		},
+		{
+			name: "multiple",
+			in:   `<｜DSML｜tool_calls><name>a</name><parameters>{}</parameters><name>b</name><parameters>{"x":1}</parameters></｜DSML｜tool_calls>`,
+			want: 2, first: "a", args: `{}`,
+		},
+		{
+			name: "malformed",
+			in:   `<｜DSML｜tool_calls><name>ls</name></｜DSML｜tool_calls>`,
+			want: 0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseRawToolCalls(tt.in)
+			if len(got) != tt.want {
+				t.Fatalf("parseRawToolCalls = %d calls, want %d: %#v", len(got), tt.want, got)
+			}
+			if tt.want > 0 {
+				if got[0].Function.Name != tt.first || got[0].Function.Arguments != tt.args {
+					t.Fatalf("first call = %#v, want name=%q args=%q", got[0], tt.first, tt.args)
+				}
+				if !strings.HasPrefix(got[0].ID, "call_") {
+					t.Fatalf("call ID = %q, want call_ prefix", got[0].ID)
+				}
+			}
+		})
+	}
+}
+
+func TestConvertRawToolCallsInBody(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"<tool_call><name>ls</name><parameters>{\"path\":\".\"}</parameters></tool_call>"},"finish_reason":"stop"}]}`)
+	out := convertRawToolCallsInBody(body)
+	var m map[string]any
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	msg := m["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
+	tcs := msg["tool_calls"].([]any)
+	if len(tcs) != 1 {
+		t.Fatalf("tool_calls = %d, want 1", len(tcs))
+	}
+	tc := tcs[0].(map[string]any)
+	if tc["type"] != "function" {
+		t.Fatalf("type = %#v, want function", tc["type"])
+	}
+	fn := tc["function"].(map[string]any)
+	if fn["name"] != "ls" || fn["arguments"] != `{"path":"."}` {
+		t.Fatalf("function = %#v", fn)
+	}
+	fr := m["choices"].([]any)[0].(map[string]any)["finish_reason"]
+	if fr != "tool_calls" {
+		t.Fatalf("finish_reason = %v, want tool_calls", fr)
+	}
+}
+
+func TestConvertRawToolCallsInBodySkipsNative(t *testing.T) {
+	body := []byte(`{"choices":[{"message":{"role":"assistant","content":"see <tool_call> doc","tool_calls":[{"id":"call_x","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}`)
+	out := convertRawToolCallsInBody(body)
+	if string(out) != string(body) {
+		t.Fatal("native tool_calls body must not be modified")
+	}
+}
+
+func TestWrapRawSSEConvertsSplitDSML(t *testing.T) {
+	sse := "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"<tool\"}}]}\n\n" +
+		"data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"_call><name>ls</name><parameters>{\\\"path\\\":\\\".\\\"}</parameters></tool_call>\"}}]}\n\n" +
+		"data: [DONE]\n\n"
+	r := wrapRawSSE(io.NopCloser(strings.NewReader(sse)))
+	outBytes, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	out := string(outBytes)
+	if !strings.Contains(out, `"tool_calls"`) {
+		t.Fatalf("output missing synthesized tool_calls:\n%s", out)
+	}
+	if strings.Contains(out, "<tool_call>") && !strings.Contains(out, "arguments") {
+		t.Fatalf("raw markup leaked to client:\n%s", out)
+	}
+	if !strings.Contains(out, "[DONE]") {
+		t.Fatal("[DONE] lost")
+	}
+}
+
+func TestWrapRawSSENativePassThrough(t *testing.T) {
+	sse := "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\"}]}}]}\n\n" +
+		"data: [DONE]\n\n"
+	r := wrapRawSSE(io.NopCloser(strings.NewReader(sse)))
+	outBytes, _ := io.ReadAll(r)
+	if string(outBytes) != sse {
+		t.Fatalf("native stream must pass through unchanged, got:\n%s", string(outBytes))
+	}
+}

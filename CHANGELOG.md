@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- 跟进上游 6Kmfi6HP/opencode2api v0.4.5–v0.5.0（手工移植，适配单体结构）：
+  - **Claude usage 缓存语义修复**：DeepSeek 风格 `prompt_cache_hit_tokens` 现映射为 `cache_read_input_tokens`；`input_tokens` 扣除缓存命中部分（Anthropic 语义中 input/read/creation 互斥），客户端不再对命中 token 重复计费。`prompt_cache_miss_tokens` 是普通未命中输入，不再计入 `cache_creation_input_tokens`；stats.json 新增 `cache_read_tokens`/`cache_created_tokens` 聚合，canonical Anthropic 字段优先、多种 usage 形态不重复计数。
+  - **`POST /v1/messages/count_tokens`**：本地启发式估算输入 token（~4 字符/token + 每消息/system/工具结构开销，图片 1600 / 文档 3000 固定估算），不调上游不产生用量；Claude Code 用它做上下文管理和自动压缩，此前 404。
+  - **prompt 缓存增强**：向上游注入 `prompt_cache_retention: "24h"`（默认；zen 网关默认仅 ~5 分钟）与 Anthropic 风格 `cache_control: {type:ephemeral, ttl:1h}` 断点；GLM/Zhipu 等拒绝未知字段的模型自动跳过；客户端 `extra_body` 显式值优先。可经 `prompt_cache_retention`（"24h"/"in_memory"/"off"）与 `cache_control_breakpoints` 配置。
+  - **SOCKS5 会话粘性出口**（`socks5_sticky`，默认 true）：静态 `socks5_proxies` + `__round_robin__` 模式下同一账号/会话固定一个出口代理，上游按出口隔离的 prompt 缓存得以持续累积（上游实测固定出口 99.8% vs 随机轮换 ~0%）；429/5xx/连接错误重试前自动切断绑定换下一出口；代理配置变化时清空全部绑定。节点池（订阅/webshare）路径本身为全局粘性，不受影响。
+  - **`text_only_models` 多模态静默降级**：匹配配置前缀（默认 `["deepseek"]`，大小写不敏感）的模型收到图片/文档内容时替换为 `[image attached]`/`[document attached]` 文本标注后继续转发，而不是交由上游报错；Chat/Claude/Responses 三条协议面统一生效。
+  - **原始 DSML/Qwen 工具调用转换**：DeepSeek/Qwen 模型输出的 `<｜DSML｜tool_calls>`、`<|DSML|tool_calls>`、`<tool_calls>`、`<tool_call>`、`<function=...>` 标记在到达下游前转换为标准 OpenAI `tool_calls`；非流式在响应归一化层转换，流式以 SSE 包装器按需缓冲改写；原生 tool_calls 流直通，usage/finish_reason/[DONE] 语义保留。
 - 模型映射免费模型自动映射：上游目录中以 `-free` 结尾的免费模型无需再逐个手动配置别名——请求时（`resolveModel`）已自动把去后缀名映射到 `xxx-free`，管理面板「模型映射」现在自动列出这些映射行（带「自动」徽标、跟随上游模型列表变动，刷新/重载后自动更新），「添加别名」按钮保留，自定义映射（含同名覆盖自动项）照常保存；自动行右侧有「隐藏」按钮，点击后该条自动映射不再显示（适用于已下线的免费模型，如 `deepseek-v4-flash-free`）；`collectAliases` 跳过自动行，不会把派生映射写回 `config.json`。`config.example.json` 精简为单个自定义别名示例，`docs/CONFIGURATION.md` 与 `README.md` 同步说明，DEMO 数据补充 `-free` 模型演示自动行。
 - 免费模型已下线错误改写：当下游请求的免费模型（通过自动映射解析到 `-free` 上游）已停止服务时，上游返回的原始错误信息（如 "Free promotion has ended"）会被网关改写为清晰的中文提示——"该免费模型已停止服务，请更换其他免费模型（管理面板 → 模型映射 中可查看当前可用的免费模型），或通过订阅获取更多模型。"，错误类型标记为 `free_model_ended`，原始类型保留在 `original_type` 字段。该改写覆盖 OpenAI/Anthropic/Responses 三种协议的所有错误路径（stream + 非 stream）。
 - 概览·模型能力只显示免费模型：表格过滤为仅 `-free` 上游模型（带「免费」徽标并高亮），与「模型映射」自动行数量一致；`/api/models` 从纯 ID 字符串改为完整模型对象，并填充 models.dev 目录的上下文窗口/最大输出/输入模态。

@@ -601,10 +601,15 @@ func TestClaudeCodePayloadDropsContextManagementAndCacheControl(t *testing.T) {
 	}
 	out, skipped := convertClaudeRequest(req)
 	body := convertRequest(&out)
-	for _, key := range []string{"context_management", "cache_control", "anthropic-beta"} {
+	for _, key := range []string{"context_management", "anthropic-beta"} {
 		if _, ok := body[key]; ok {
 			t.Fatalf("upstream still has %s: %#v", key, body[key])
 		}
+	}
+	// 网关现在为支持该字段的模型注入受控的 cache_control 断点
+	// （客户端提供的 cache_control 仍被丢弃；GLM 豁免，见 TestConvertRequestSkipsCacheControlForGLM）。
+	if cc, ok := body["cache_control"].(map[string]any); !ok || cc["type"] != "ephemeral" || cc["ttl"] != "1h" {
+		t.Fatalf("upstream cache_control = %#v, want {type:ephemeral ttl:1h}", body["cache_control"])
 	}
 	msgsRaw := body["messages"]
 	var msgs []map[string]any
