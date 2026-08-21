@@ -10,7 +10,7 @@
 - OpenAI Responses 兼容接口：`/v1/responses`
 - Anthropic Messages 兼容接口：`/v1/messages`
 - 流式 SSE 转换和 token 用量统计
-- 模型别名、reasoning effort 映射、强制禁用 thinking
+- 模型别名、reasoning effort 映射、强制禁用 thinking；`-free` 免费模型自动映射（无需逐个手动配置，面板自动列出并跟随上游变动）
 - 订阅/手配节点池（vless/reality、ss、hysteria2、anytls、socks5）：进程内直连，无需 mihomo 子进程
 - Webshare 代理池：API key 自动拉取 webshare.io 代理列表并入节点池（SOCKS5，分页全量、失效自动排除）
 - 免费额度耗尽自动切换节点（FreeUsageLimitError 等，单请求预算 5 次，与重试上限独立）；耗尽节点 1h 冷却到期自动恢复，故障节点每分钟复探、成功即恢复

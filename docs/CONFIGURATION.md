@@ -12,15 +12,12 @@ cp config.example.json config.json
 
 模型别名映射。键是客户端请求的模型名，值是实际传给上游的模型名。
 
+**免费模型自动映射**：上游目录中以 `-free` 结尾的免费模型无需手动配置——客户端用去掉 `-free` 后缀的名称请求时会被自动映射到对应免费上游模型（如 `deepseek-v4-flash` → `deepseek-v4-flash-free`），管理面板「模型映射」也会自动列出这些映射并跟随上游列表变动。若某免费模型已下线（如 `deepseek-v4-flash-free` 返回 401），点击自动行右侧的「隐藏」即可跳过该条。只有自定义别名（含覆盖自动映射）才需要写在这里：
+
 ```json
 {
   "model_alias": {
-    "deepseek-v4-flash": "deepseek-v4-flash-free",
-    "mimo-v2.5": "mimo-v2.5-free",
-    "ling-3.0-flash": "ling-3.0-flash-free",
-    "nemotron-3-ultra": "nemotron-3-ultra-free",
-    "north-mini-code": "north-mini-code-free",
-    "laguna-s-2.1": "laguna-s-2.1-free"
+    "my-fast-model": "deepseek-v4-flash-free"
   }
 }
 ```
