@@ -5884,6 +5884,10 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"node_cooldown_dead_minutes":    cooldownDead,
 			"node_health_interval_minutes":  merged.NodeHealthIntervalMinutes,
 			"node_health_probe_url":         merged.NodeHealthProbeURL,
+			"prompt_cache_retention":        merged.PromptCacheRetention,
+			"cache_control_breakpoints":     merged.CacheControlBreakpoints,
+			"text_only_models":              merged.TextOnlyModels,
+			"socks5_sticky":                 merged.Socks5Sticky,
 			"api_key":                       merged.ApiKey,
 			"log_level":                     getLogLevelString(),
 			"log_bodies":                    getLogBodies(),
@@ -5950,6 +5954,10 @@ type configPatch struct {
 	NodeCooldownDeadMinutes    *int                 `json:"node_cooldown_dead_minutes"`
 	NodeHealthIntervalMinutes  *int                 `json:"node_health_interval_minutes"`
 	NodeHealthProbeURL         *string              `json:"node_health_probe_url"`
+	PromptCacheRetention       *string              `json:"prompt_cache_retention"`
+	CacheControlBreakpoints    *bool                `json:"cache_control_breakpoints"`
+	TextOnlyModels             []string             `json:"text_only_models"`
+	Socks5Sticky               *bool                `json:"socks5_sticky"`
 	ApiKey                     *string              `json:"api_key"`
 }
 
@@ -6007,6 +6015,18 @@ func mergeAppConfig(base, patch AppConfig) AppConfig {
 	if patch.NodeHealthProbeURL != "" {
 		out.NodeHealthProbeURL = patch.NodeHealthProbeURL
 	}
+	if patch.PromptCacheRetention != "" {
+		out.PromptCacheRetention = patch.PromptCacheRetention
+	}
+	if patch.CacheControlBreakpoints != nil {
+		out.CacheControlBreakpoints = patch.CacheControlBreakpoints
+	}
+	if patch.TextOnlyModels != nil {
+		out.TextOnlyModels = patch.TextOnlyModels
+	}
+	if patch.Socks5Sticky != nil {
+		out.Socks5Sticky = patch.Socks5Sticky
+	}
 	return out
 }
 
@@ -6063,6 +6083,18 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	}
 	if patch.NodeHealthProbeURL != nil {
 		out.NodeHealthProbeURL = *patch.NodeHealthProbeURL
+	}
+	if patch.PromptCacheRetention != nil {
+		out.PromptCacheRetention = *patch.PromptCacheRetention
+	}
+	if patch.CacheControlBreakpoints != nil {
+		out.CacheControlBreakpoints = patch.CacheControlBreakpoints
+	}
+	if patch.TextOnlyModels != nil {
+		out.TextOnlyModels = patch.TextOnlyModels
+	}
+	if patch.Socks5Sticky != nil {
+		out.Socks5Sticky = patch.Socks5Sticky
 	}
 	if patch.ApiKey != nil {
 		out.ApiKey = *patch.ApiKey
