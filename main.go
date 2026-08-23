@@ -887,12 +887,16 @@ var (
 	apiKey               string // 统一网关密钥（config.api_key），空 = 不启用
 	// promptCacheRetention 注入上游的缓存保留时长；"" = 运行时默认 "24h"，"off" 禁用注入。
 	promptCacheRetention string
-	cacheBreakpoints     = true                 // 是否注入 Anthropic 风格 cache_control 断点
-	textOnlyModels       = []string{"deepseek"} // 只接受文本的上游模型前缀（默认 deepseek 系）
-	debugMode            bool
-	configMu             sync.RWMutex
-	storedResponses      = map[string]StoredResponseState{}
-	storedResponsesMu    sync.RWMutex
+	// truncationStopReasonCfg 决定“流未见到合法 finish_reason 就结束”时向下游声明的
+	// 停止原因（OpenAI 语义；Claude 输出经 claudeStopReasonFromOpenAI 映射）。
+	// "" = 运行时默认 "length"。目的是不再把截断洗白成 end_turn/stop。
+	truncationStopReasonCfg string
+	cacheBreakpoints        = true                 // 是否注入 Anthropic 风格 cache_control 断点
+	textOnlyModels          = []string{"deepseek"} // 只接受文本的上游模型前缀（默认 deepseek 系）
+	debugMode               bool
+	configMu                sync.RWMutex
+	storedResponses         = map[string]StoredResponseState{}
+	storedResponsesMu       sync.RWMutex
 )
 
 // ======================== 管理面板认证 ========================
@@ -1095,6 +1099,10 @@ type AppConfig struct {
 	// 请求解析到这些模型时，图片/文档内容静默降级为文本标注后继续转发。
 	// 不填默认 ["deepseek"]；显式设置（含空数组）替换默认值。
 	TextOnlyModels []string `json:"text_only_models,omitempty"`
+	// TruncationStopReason 流未见到合法 finish_reason 就结束时的兜底停止原因
+	// （OpenAI 语义：stop/length/tool_calls/content_filter，默认 "length"）。
+	// Claude 输出自动映射为 max_tokens 等对应值。用于把上游静默截断如实告知下游。
+	TruncationStopReason string `json:"truncation_stop_reason,omitempty"`
 }
 
 // QuotaSignalsConfig 配额耗尽判定签名（纯配置，不记运行时状态）。
@@ -1252,6 +1260,7 @@ func applyConfig(cfg AppConfig) {
 	}
 	forceDisableThinking = cfg.ForceDisableThinking
 	apiKey = cfg.ApiKey
+	truncationStopReasonCfg = cfg.TruncationStopReason
 	if cfg.PromptCacheRetention != "" {
 		promptCacheRetention = cfg.PromptCacheRetention
 	}
@@ -1382,6 +1391,24 @@ func getCacheBreakpoints() bool {
 	configMu.RLock()
 	defer configMu.RUnlock()
 	return cacheBreakpoints
+}
+
+// truncationStopReason 返回“流未见到合法 finish_reason 就结束”时应声明的
+// OpenAI 语义停止原因。默认 "length"——语义上最接近“输出在自然停止前被切断”，
+// 且多数 agent 客户端对 length 有续写/截断处理路径，而不是像 end_turn 那样
+// 把残缺回复当完整结果。
+func truncationStopReason() string {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	switch truncationStopReasonCfg {
+	case "", "length":
+		return "length"
+	case "stop", "tool_calls", "content_filter":
+		return truncationStopReasonCfg
+	default:
+		// 配了协议外的值：回退默认，不把垃圾透传给下游。
+		return "length"
+	}
 }
 
 // rejectsCacheControl 报告解析后的上游模型是否已知会拒绝 Anthropic 风格的
@@ -2133,6 +2160,11 @@ func convertStreamChunkWithUsage(line string, keepReasoning bool) (string, map[s
 		if s, ok := choice["finish_reason"].(string); ok && s == "" {
 			delete(choice, "finish_reason")
 		}
+		// L1：过滤别名（如 Zen 的 "sensitive"）归一为 content_filter；
+		// 协议外未知值按异常终止改写为配置的截断原因，不再原样透传。
+		if s, ok := choice["finish_reason"].(string); ok && s != "" {
+			choice["finish_reason"] = mapUpstreamFinishReason(s)
+		}
 		choices[i] = choice
 	}
 	raw["choices"] = choices
@@ -2163,6 +2195,10 @@ func convertResponse(data []byte, keepReasoning bool) ([]byte, error) {
 						delete(msg, "reasoning_content")
 					}
 					choice["message"] = msg
+				}
+				// L1：非流式响应同样归一化异常 finish 值（过滤别名/协议外值）。
+				if s, ok := choice["finish_reason"].(string); ok && s != "" {
+					choice["finish_reason"] = mapUpstreamFinishReason(s)
 				}
 				if v, ok := choice["logprobs"]; ok && v == nil {
 					delete(choice, "logprobs")
@@ -2760,82 +2796,91 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.Stream {
 		clCtx := beginCallLog(r.Context(), r.URL.Path, req.Model, true, authModeString(auth.Mode))
-		upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, req.Model, auth)
-		if err != nil || status < 200 || status >= 300 {
-			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
-			if upResp != nil {
-				errBody, _ := io.ReadAll(upResp)
-				if len(errBody) > 0 {
-					w.Write(rewriteUpstreamError(errBody))
-					return
-				}
-			}
-			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "upstream error", "type": "upstream_error"}})
-			return
-		}
-		defer upResp.Close()
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.Header().Set("Cache-Control", "no-cache")
-		w.Header().Set("Connection", "keep-alive")
-		w.WriteHeader(http.StatusOK)
-		reader := bufio.NewReader(upResp)
 		stats := &streamResultStats{start: time.Now()}
 		doneSeen := false
+		// L2：forwardedAny 一旦置位就不可再重放——下游已经收到字节。
+		forwardedAny := false
+		// 记录最近一个 chunk 的标识字段，截断终止 chunk 沿用之以保持流连续性。
+		lastChunkID, lastChunkModel := "", ""
+		var lastCreated float64
+		haveLastCreated := false
 		var lastPt, lastCt, lastCc, lastCr int64
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if err == io.EOF {
-					break
-				}
-				reqLogger(r.Context()).Error("stream read error", "error", err)
-				callLogEvent(clCtx, "stream_interrupt", "", err.Error())
-				callLogFinish(clCtx, 500, err.Error(), 0, 0, 0, 0)
-				// 发送错误事件通知客户端
-				w.Write([]byte("data: {\"error\":\"stream read error\"}\n\n"))
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
-				}
-				stats.log(r.Context(), "chat")
-				return
-			}
-			if doneSeen {
-				continue
-			}
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "data: [DONE]" {
-				doneSeen = true
-				stats.doneSeen = true
-				w.Write([]byte("data: [DONE]\n\n"))
-				if f, ok := w.(http.Flusher); ok {
-					f.Flush()
-				}
-				continue
-			}
+		lastReadFailed := false
 
-			if strings.HasPrefix(line, "data: ") {
-				var raw map[string]any
-				if json.Unmarshal([]byte(line[6:]), &raw) == nil {
-					if choices, ok := raw["choices"].([]any); ok && len(choices) > 0 {
-						if choice, ok := choices[0].(map[string]any); ok {
-							if delta, ok := choice["delta"].(map[string]any); ok {
-								stats.observeDelta(delta, keepReasoning)
-							}
-							if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
-								stats.finishReason = fr
-								stats.sawFinish = true
+		consumeChatStream := func(upResp io.ReadCloser) (readFailed bool) {
+			reader := bufio.NewReader(upResp)
+			for {
+				line, rerr := reader.ReadString('\n')
+				if rerr != nil {
+					if rerr == io.EOF {
+						return false
+					}
+					reqLogger(r.Context()).Error("stream read error", "error", rerr)
+					callLogEvent(clCtx, "stream_interrupt", "", rerr.Error())
+					// 读错误本身不写任何下游字节：是否可重试由外层按 forwardedAny 判定。
+					return true
+				}
+				if doneSeen {
+					continue
+				}
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "data: [DONE]" {
+					doneSeen = true
+					stats.doneSeen = true
+					forwardedAny = true
+					w.Write([]byte("data: [DONE]\n\n"))
+					if f, ok := w.(http.Flusher); ok {
+						f.Flush()
+					}
+					continue
+				}
+
+				if strings.HasPrefix(line, "data: ") {
+					var raw map[string]any
+					if json.Unmarshal([]byte(line[6:]), &raw) == nil {
+						if v, ok := raw["id"].(string); ok && v != "" {
+							lastChunkID = v
+						}
+						if v, ok := raw["model"].(string); ok && v != "" {
+							lastChunkModel = v
+						}
+						if v, ok := raw["created"].(float64); ok {
+							lastCreated = v
+							haveLastCreated = true
+						}
+						if choices, ok := raw["choices"].([]any); ok && len(choices) > 0 {
+							if choice, ok := choices[0].(map[string]any); ok {
+								if delta, ok := choice["delta"].(map[string]any); ok {
+									stats.observeDelta(delta, keepReasoning)
+								}
+								if fr, ok := choice["finish_reason"].(string); ok && fr != "" {
+									stats.finishReason = fr
+									stats.sawFinish = true
+								}
 							}
 						}
 					}
 				}
-			}
 
-			out, usage := convertStreamChunkWithUsage(line, keepReasoning)
-			if out == "" {
-				// 空choices chunk，但可能有 usage
-				if usage != nil {
+				out, usage := convertStreamChunkWithUsage(line, keepReasoning)
+				if out == "" {
+					// 空choices chunk，但可能有 usage
+					if usage != nil {
+						pt, ct, cc, cr := usageFromMap(usage)
+						_, pcr := parseCacheUsage(usage)
+						tt, _ := usage["total_tokens"].(float64)
+						if tt > 0 {
+							recordTokenUsageWithCache(req.Model, pt, ct, int64(tt), cc, pcr)
+							lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
+						} else if pt > 0 {
+							lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
+						}
+					}
+					continue
+				}
+
+				// 提取 usage（已在 convertStreamChunkWithUsage 中解析）
+				if usage != nil && !doneSeen {
 					pt, ct, cc, cr := usageFromMap(usage)
 					_, pcr := parseCacheUsage(usage)
 					tt, _ := usage["total_tokens"].(float64)
@@ -2846,32 +2891,104 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 						lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
 					}
 				}
-				continue
-			}
 
-			// 提取 usage（已在 convertStreamChunkWithUsage 中解析）
-			if usage != nil && !doneSeen {
-				pt, ct, cc, cr := usageFromMap(usage)
-				_, pcr := parseCacheUsage(usage)
-				tt, _ := usage["total_tokens"].(float64)
-				if tt > 0 {
-					recordTokenUsageWithCache(req.Model, pt, ct, int64(tt), cc, pcr)
-					lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
-				} else if pt > 0 {
-					lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
+				forwardedAny = true
+				w.Write([]byte(out))
+				w.Write([]byte("\n"))
+				if f, ok := w.(http.Flusher); ok {
+					f.Flush()
 				}
 			}
+		}
 
-			w.Write([]byte(out))
-			w.Write([]byte("\n"))
+		headerWritten := false
+		for streamAttempt := 0; ; streamAttempt++ {
+			upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, req.Model, auth)
+			if err != nil || status < 200 || status >= 300 {
+				callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				if upResp != nil {
+					errBody, _ := io.ReadAll(upResp)
+					if len(errBody) > 0 {
+						w.Write(rewriteUpstreamError(errBody))
+						return
+					}
+				}
+				json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "upstream error", "type": "upstream_error"}})
+				return
+			}
+			if !headerWritten {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.WriteHeader(http.StatusOK)
+				headerWritten = true
+			}
+			readFailed := consumeChatStream(upResp)
+			upResp.Close()
+			lastReadFailed = readFailed
+
+			// L2：仅在尚未向下游转发任何字节时补试一次——重放零损失，
+			// 也避免对持续性故障无限烧钱。
+			retryable := (readFailed || !stats.sawFinish) && !forwardedAny
+			if retryable && streamAttempt == 0 {
+				reqLogger(r.Context()).Warn("empty_stream_retry",
+					"protocol", "chat",
+					"model", req.Model,
+					"reason", map[bool]string{true: "read_error", false: "empty_no_finish"}[readFailed],
+				)
+				stats = &streamResultStats{start: stats.start}
+				doneSeen = false
+				continue
+			}
+			break
+		}
+
+		// L1：上游没给合法 finish_reason 就断流——补一个如实声明截断的终止
+		// chunk 和 [DONE]，让下游状态机完整闭合，且不再伪装成正常完成。
+		if !stats.sawFinish {
+			termID := lastChunkID
+			if termID == "" {
+				termID = "chatcmpl-truncated-" + randomString(16)
+			}
+			termModel := lastChunkModel
+			if termModel == "" {
+				termModel = req.Model
+			}
+			created := lastCreated
+			if !haveLastCreated {
+				created = float64(time.Now().Unix())
+			}
+			synth, _ := json.Marshal(map[string]any{
+				"id":      termID,
+				"object":  "chat.completion.chunk",
+				"created": int64(created),
+				"model":   termModel,
+				"choices": []map[string]any{{
+					"index":         0,
+					"delta":         map[string]any{},
+					"finish_reason": truncationStopReason(),
+				}},
+			})
+			forwardedAny = true
+			w.Write([]byte("data: " + string(synth) + "\n\n"))
 			if f, ok := w.(http.Flusher); ok {
 				f.Flush()
 			}
 		}
 		if !doneSeen {
 			callLogEvent(clCtx, "stream_interrupt", "", "EOF without [DONE]")
+			w.Write([]byte("data: [DONE]\n\n"))
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
 		}
-		callLogFinish(clCtx, http.StatusOK, "", lastPt, lastCt, lastCc, lastCr)
+		if lastReadFailed {
+			callLogFinish(clCtx, http.StatusBadGateway, "stream read error", lastPt, lastCt, lastCc, lastCr)
+		} else {
+			callLogFinish(clCtx, http.StatusOK, "", lastPt, lastCt, lastCc, lastCr)
+		}
 		stats.log(r.Context(), "chat")
 		return
 	}
@@ -3577,15 +3694,23 @@ func openAIToClaudeResponse(chatBody []byte, model string, wantReasoning bool) [
 				Input: input,
 			})
 		}
-		switch fr {
-		case "stop":
-			stopReason = "end_turn"
-		case "length":
-			stopReason = "max_tokens"
-		case "tool_calls", "function_call":
-			stopReason = "tool_use"
-		case "content_filter":
+		// L1：按 finish 语义分类映射，不再把缺失/未知值默认成 end_turn。
+		switch classifyFinishReason(fr) {
+		case finishNormal:
+			switch fr {
+			case "stop":
+				stopReason = "end_turn"
+			case "length":
+				stopReason = "max_tokens"
+			case "tool_calls", "function_call":
+				stopReason = "tool_use"
+			}
+		case finishFilter:
 			stopReason = "refusal"
+		default:
+			// finishNone（上游没给 finish）与 finishUnknown（协议外值）：
+			// 如实声明为截断，而不是伪装成正常收尾。
+			stopReason = claudeStopReasonFromOpenAI(truncationStopReason())
 		}
 	}
 
@@ -3841,26 +3966,40 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 
 	if claudeReq.Stream {
 		clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, true, authModeString(auth.Mode))
-		upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
-		if err != nil || status < 200 || status >= 300 {
-			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
-			if upResp != nil {
-				errBody, _ := io.ReadAll(upResp)
-				if len(errBody) > 0 {
-					w.Write(rewriteUpstreamError(errBody))
-					return
+		var clPt, clCt, clCc, clCr int64
+		for attempt := 0; ; attempt++ {
+			upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
+			if err != nil || status < 200 || status >= 300 {
+				callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				if upResp != nil {
+					errBody, _ := io.ReadAll(upResp)
+					if len(errBody) > 0 {
+						w.Write(rewriteUpstreamError(errBody))
+						return
+					}
 				}
+				json.NewEncoder(w).Encode(map[string]any{
+					"type":  "error",
+					"error": map[string]string{"type": "api_error", "message": "upstream error"},
+				})
+				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{
-				"type":  "error",
-				"error": map[string]string{"type": "api_error", "message": "upstream error"},
-			})
-			return
+			var emptyNoFinish bool
+			clPt, clCt, clCc, clCr, emptyNoFinish = claudeStreamHandler(clCtx, w, upResp, claudeReq.Model, keepReasoning)
+			upResp.Close()
+			// L2：整条流没吐出任何事件也没见到合法 finish——重放不会损失
+			// 已发出的字节。只补试一次，避免对持续故障无限烧钱。
+			if emptyNoFinish && attempt == 0 {
+				reqLogger(clCtx).Warn("empty_stream_retry",
+					"protocol", "claude",
+					"model", chatReq.Model,
+				)
+				continue
+			}
+			break
 		}
-		defer upResp.Close()
-		clPt, clCt, clCc, clCr := claudeStreamHandler(clCtx, w, upResp, claudeReq.Model, keepReasoning)
 		callLogFinish(clCtx, http.StatusOK, "", clPt, clCt, clCc, clCr)
 		return
 	}
@@ -3922,7 +4061,10 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // claudeStreamHandler 将上游 OpenAI 流转换为 Claude SSE 流，返回最终 输入/输出/缓存创建/缓存读取 token。
-func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io.ReadCloser, model string, keepReasoning bool) (pt, ct, cc, cr int64) {
+// claudeStreamHandler 把上游 OpenAI 形状的 SSE 流转换为 Anthropic Messages SSE。
+// 除用量四元组外，还返回 emptyNoFinish：整条流既没见到合法 finish_reason、
+// 也没向下游发出过任何事件——这是唯一可以安全重放的形态（L2 透明重试依据）。
+func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io.ReadCloser, model string, keepReasoning bool) (pt, ct, cc, cr int64, emptyNoFinish bool) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -4216,30 +4358,57 @@ func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io
 			}
 		}
 
-		if finishReason == "stop" || finishReason == "length" || finishReason == "tool_calls" || finishReason == "function_call" || finishReason == "content_filter" {
+		// L1：按语义分类处理 finish。已知值照旧映射；过滤别名（sensitive 等）
+		// 归为 refusal；缺失或协议外未知值不再落入默认 end_turn 的伪装，
+		// 而是保持未完成状态，由流末尾统一按截断声明。
+		sig := classifyFinishReason(finishReason)
+		if sig == finishNormal || sig == finishFilter {
 			stats.finishReason = finishReason
 			stats.sawFinish = true
 			finished = true
 			finalizeContentBlocks()
 
 			stopReason = "end_turn"
-			switch finishReason {
-			case "length":
-				stopReason = "max_tokens"
-			case "tool_calls", "function_call":
-				stopReason = "tool_use"
-			case "content_filter":
+			if sig == finishFilter {
 				stopReason = "refusal"
+			} else {
+				switch finishReason {
+				case "length":
+					stopReason = "max_tokens"
+				case "tool_calls", "function_call":
+					stopReason = "tool_use"
+				}
 			}
 			// Do not emit message_delta/stop yet: OpenAI-compatible upstreams often
 			// send the usage-only chunk after finish_reason when include_usage=true.
 			continue
 		}
+		if finishReason != "" {
+			stats.finishReason = finishReason
+			reqLogger(ctx).Warn("unknown_upstream_finish_reason",
+				"model", model,
+				"raw_finish", finishReason,
+			)
+		}
 	}
 
+	// L2 判定必须在 ensureMessageStart 之前：一旦发出 message_start 就不可重放。
+	emptyNoFinish = !stats.sawFinish && !messageStartSent
 	ensureMessageStart()
 	if !finished {
 		finalizeContentBlocks()
+		// L1：流没以合法 finish 收尾（提前 EOF / 协议外 finish 值），
+		// 如实声明截断，而不是沿用默认 end_turn 伪装成完整回复。
+		stopReason = claudeStopReasonFromOpenAI(truncationStopReason())
+		if !stats.sawFinish {
+			reqLogger(ctx).Warn("stream_ended_without_finish",
+				"protocol", "claude",
+				"model", model,
+				"done_seen", stats.doneSeen,
+				"synthetic_stop_reason", stopReason,
+				"retryable", emptyNoFinish,
+			)
+		}
 	}
 	emitClaudeEvent("message_delta", map[string]any{
 		"type":  "message_delta",
@@ -5056,29 +5225,42 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 
 	if respReq.Stream {
 		clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, true, authModeString(auth.Mode))
-		upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
-		if err != nil || status < 200 || status >= 300 {
-			callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
-			if upResp != nil {
-				errBody, _ := io.ReadAll(upResp)
-				if len(errBody) > 0 {
-					w.Write(rewriteUpstreamError(errBody))
-					return
+		var rpt, rct, rcc, rcr int64
+		for attempt := 0; ; attempt++ {
+			upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
+			if err != nil || status < 200 || status >= 300 {
+				callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				if upResp != nil {
+					errBody, _ := io.ReadAll(upResp)
+					if len(errBody) > 0 {
+						w.Write(rewriteUpstreamError(errBody))
+						return
+					}
 				}
+				json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "upstream error"}})
+				return
 			}
-			json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "upstream error"}})
-			return
-		}
-		defer upResp.Close()
 
-		resp := &http.Response{
-			StatusCode: status,
-			Body:       upResp,
-			Header:     make(http.Header),
+			// L2：整条流没吐出任何事件也没见到合法 finish——补试一次。
+			resp := &http.Response{
+				StatusCode: status,
+				Body:       upResp,
+				Header:     make(http.Header),
+			}
+			var emptyNoFinish bool
+			rpt, rct, rcc, rcr, emptyNoFinish = responsesStreamHandler(w, r, resp, chatReq.Model, chatReq.Model, wantReasoning, respReq.Tools, respReq.ToolChoice, respReq)
+			upResp.Close()
+			if emptyNoFinish && attempt == 0 {
+				reqLogger(clCtx).Warn("empty_stream_retry",
+					"protocol", "responses",
+					"model", chatReq.Model,
+				)
+				continue
+			}
+			break
 		}
-		rpt, rct, rcc, rcr := responsesStreamHandler(w, r, resp, chatReq.Model, chatReq.Model, wantReasoning, respReq.Tools, respReq.ToolChoice, respReq)
 		callLogFinish(clCtx, http.StatusOK, "", rpt, rct, rcc, rcr)
 		return
 	}
@@ -5133,7 +5315,10 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 // ======================== Responses Stream Handler ========================
 
 // responsesStreamHandler 将上游 OpenAI 流转换为 Responses SSE 流，返回最终 输入/输出/缓存创建/缓存读取 token。
-func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, _ string, wantReasoning bool, tools []ResponsesTool, toolChoice any, originalReq ResponsesAPIRequest) (pt, ct, cc, cr int64) {
+// responsesStreamHandler 把上游 OpenAI 形状的 SSE 流转换为 Responses API SSE。
+// 除用量四元组外，还返回 emptyNoFinish：整条流既没见到合法 finish_reason、
+// 也没向下游发出过任何事件（L2 透明重试依据）。
+func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.Response, model string, _ string, wantReasoning bool, tools []ResponsesTool, toolChoice any, originalReq ResponsesAPIRequest) (pt, ct, cc, cr int64, emptyNoFinish bool) {
 	ctx := context.Background()
 	if r != nil {
 		ctx = r.Context()
@@ -5325,7 +5510,9 @@ func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.R
 				break
 			}
 			reqLogger(ctx).Error("stream read error", "error", err)
-			return
+			// L1：读错误不再无声返回（那会让下游永远等不到终止事件），
+			// 落到收尾路径按截断声明 response.incomplete。
+			break
 		}
 
 		trimmed := strings.TrimSpace(line)
@@ -5379,6 +5566,9 @@ func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.R
 		if finishReason != "" {
 			stats.finishReason = finishReason
 			stats.sawFinish = true
+			// L1：过滤别名（sensitive 等）归一为 content_filter；
+			// 协议外未知值按异常终止改写为配置的截断原因。
+			finishReason = mapUpstreamFinishReason(finishReason)
 		}
 
 		if rc, ok := delta["reasoning_content"]; ok && wantReasoning {
@@ -5572,6 +5762,24 @@ func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.R
 	emitMessageDone()
 	for _, idx := range toolOrder {
 		emitToolCallDone(toolCalls[idx]["output_index"].(int), toolCalls[idx])
+	}
+
+	// L2 判定：没见过合法 finish 且 response.created 都还没发出——下游零字节，可安全重放。
+	emptyNoFinish = !stats.sawFinish && !createdSent
+
+	// L1：流没以合法 finish 收尾（提前 EOF / 读错误 / 协议外 finish 值），
+	// 终止事件如实声明 incomplete，而不是 completed。
+	if !stats.sawFinish {
+		terminalStatus = "incomplete"
+		terminalEvent = "response.incomplete"
+		itemStatus = "incomplete"
+		reqLogger(ctx).Warn("stream_ended_without_finish",
+			"protocol", "responses",
+			"model", model,
+			"done_seen", stats.doneSeen,
+			"terminal_event", terminalEvent,
+			"retryable", emptyNoFinish,
+		)
 	}
 
 	output := make([]any, indexAllocator.Len())
@@ -5959,6 +6167,7 @@ type configPatch struct {
 	TextOnlyModels             []string             `json:"text_only_models"`
 	Socks5Sticky               *bool                `json:"socks5_sticky"`
 	ApiKey                     *string              `json:"api_key"`
+	TruncationStopReason       *string              `json:"truncation_stop_reason"`
 }
 
 // mergeAppConfig 将补丁叠加到基础配置（GET 回显与订阅保存共用，AppConfig 语义）。
@@ -6026,6 +6235,9 @@ func mergeAppConfig(base, patch AppConfig) AppConfig {
 	}
 	if patch.Socks5Sticky != nil {
 		out.Socks5Sticky = patch.Socks5Sticky
+	}
+	if patch.TruncationStopReason != "" {
+		out.TruncationStopReason = patch.TruncationStopReason
 	}
 	return out
 }
@@ -6098,6 +6310,9 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	}
 	if patch.ApiKey != nil {
 		out.ApiKey = *patch.ApiKey
+	}
+	if patch.TruncationStopReason != nil {
+		out.TruncationStopReason = *patch.TruncationStopReason
 	}
 	return out
 }
