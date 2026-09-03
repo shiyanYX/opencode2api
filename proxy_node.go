@@ -73,6 +73,7 @@ type ProxyNode struct {
 	Flow     string         `json:"flow,omitempty"`     // vless flow（仅支持空 ""）
 	Insecure bool           `json:"insecure,omitempty"` // 跳过 TLS 证书校验
 	Reality  *RealityConfig `json:"reality,omitempty"`
+	Region   string         `json:"region,omitempty"` // 节点所在区域（us/eu/jp/hk 等），用于模型区域限制路由
 
 	// vmess/trojan 传输与安全选项
 	Network  string `json:"network,omitempty"`  // tcp | ws（默认 tcp）
@@ -116,6 +117,7 @@ type ProxyNodeConfig struct {
 	TLS      bool   `json:"tls,omitempty"`
 
 	Reality *RealityConfig `json:"reality,omitempty"`
+	Region  string         `json:"region,omitempty"` // 节点所在区域（us/eu/jp/hk 等）
 }
 
 func (c ProxyNodeConfig) toNode() *ProxyNode {
@@ -144,10 +146,20 @@ func (c ProxyNodeConfig) toNode() *ProxyNode {
 		AlterIDs: c.AlterIDs,
 		Security: c.Security,
 		TLS:      c.TLS,
+		Region:   c.Region,
 	}
 	if c.Reality != nil {
 		r := *c.Reality
 		n.Reality = &r
+	}
+	// 如果未显式指定区域，按优先级尝试推断：
+	// 1. 从节点名称推断（快速，无网络请求）
+	// 2. 从节点 IP 地址通过 GeoIP 推断（需要网络请求）
+	if n.Region == "" {
+		n.Region = inferRegionFromName(n.Name)
+	}
+	if n.Region == "" {
+		n.Region = inferRegionFromAddress(n.Address)
 	}
 	return n
 }
@@ -196,7 +208,7 @@ type nodePool struct {
 	deadCooldown      time.Duration
 
 	probeURL      string        // 健康探测目标（空 = 默认 gstatic 204）
-	probeInterval time.Duration // 健康检查周期（0 = 默认 15min）
+	probeInterval time.Duration // 健康检查周期（负数 = 禁用；0 = 默认 15min）
 
 	clients   map[string]*http.Client // 节点指纹 → 缓存客户端
 	statePath string
@@ -457,7 +469,11 @@ func (p *nodePool) unmark(fp string) bool {
 // ======================= 健康检查 =======================
 
 // healthIntervalLocked 返回当前探测周期（调用方持锁）。
+// probeInterval 为负数表示禁用健康检查；0 表示使用默认 15min。
 func (p *nodePool) healthIntervalLocked() time.Duration {
+	if p.probeInterval < 0 {
+		return 0 // 禁用
+	}
 	if p.probeInterval > 0 {
 		return p.probeInterval
 	}
@@ -701,6 +717,10 @@ func (p *nodePool) setNodes(nodes []*ProxyNode) {
 			continue
 		}
 		n.Fingerprint = computeFingerprint(n)
+		// 自动通过 GeoIP 补全区域信息
+		if n.Region == "" && n.Address != "" {
+			n.Region = inferRegionFromAddress(n.Address)
+		}
 		if prev, ok := old[n.Fingerprint]; ok {
 			n.State = prev.State
 			n.MarkedAt = prev.MarkedAt
@@ -800,4 +820,150 @@ func (p *nodePool) loadState() {
 
 type persistentState struct {
 	Nodes map[string]nodeRuntimeState `json:"nodes"`
+}
+
+// ======================= 区域推断 =======================
+
+// regionPatterns 定义区域名称到标准区域标识的映射（大小写不敏感）。
+var regionPatterns = map[string]string{
+	"us":             "us",
+	"usa":            "us",
+	"united states":  "us",
+	"america":        "us",
+	"eu":             "eu",
+	"europe":         "eu",
+	"de":             "eu",
+	"germany":        "eu",
+	"fr":             "eu",
+	"france":         "eu",
+	"uk":             "eu",
+	"united kingdom": "eu",
+	"jp":             "jp",
+	"japan":          "jp",
+	"hk":             "hk",
+	"hong kong":      "hk",
+	"sg":             "sg",
+	"singapore":      "sg",
+	"tw":             "tw",
+	"taiwan":         "tw",
+	"kr":             "kr",
+	"korea":          "kr",
+	"au":             "au",
+	"australia":      "au",
+	"ca":             "ca",
+	"canada":         "ca",
+}
+
+// inferRegionFromName 从节点名称推断区域。支持格式：
+//   - "订阅名::US-xxx" → "us"
+//   - "US-38.153.152.244:9594" → "us"
+//   - "webshare-main::US-xxx" → "us"
+//   - 名称中包含区域关键词（us/eu/jp/hk 等）
+//
+// 返回空字符串表示无法推断。
+func inferRegionFromName(name string) string {
+	// 取 :: 后的最后一段（节点名）
+	seg := name
+	if idx := strings.LastIndex(name, "::"); idx >= 0 {
+		seg = name[idx+2:]
+	}
+	seg = strings.TrimSpace(seg)
+	if seg == "" {
+		return ""
+	}
+	lower := strings.ToLower(seg)
+
+	// 尝试匹配 "XX-" 前缀（如 US-38.153.152.244:9594）
+	if dashIdx := strings.Index(seg, "-"); dashIdx >= 2 && dashIdx <= 4 {
+		prefix := strings.ToLower(seg[:dashIdx])
+		if region, ok := regionPatterns[prefix]; ok {
+			return region
+		}
+	}
+
+	// 尝试匹配连字符分隔的完整区域名称（如 hong-kong, united-states）
+	for pattern, region := range regionPatterns {
+		if len(pattern) >= 3 {
+			// 检查连字符分隔的情况（如 "hong-kong-01"）
+			normalized := strings.ReplaceAll(strings.ReplaceAll(lower, "-", ""), " ", "")
+			patternNormalized := strings.ReplaceAll(pattern, " ", "")
+			if strings.Contains(normalized, patternNormalized) {
+				return region
+			}
+			// 检查 "pattern-" 前缀
+			if strings.HasPrefix(lower, pattern+"-") || strings.HasPrefix(lower, pattern+" ") {
+				return region
+			}
+		}
+	}
+
+	// 尝试匹配整个段的前缀（如 "us01" "jp-tokyo"）
+	for pattern, region := range regionPatterns {
+		if len(pattern) >= 2 && strings.HasPrefix(lower, pattern) {
+			return region
+		}
+	}
+	return ""
+}
+
+// pickForRegion 选择当前生效节点，限定指定区域。
+// requiredRegion 为空时退化为普通 pick。
+// 返回 nil 表示没有可用节点（调用方返回错误或回退直连）。
+func (p *nodePool) pickForRegion(force bool, requiredRegion string) *ProxyNode {
+	if requiredRegion == "" {
+		return p.pick(force)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	p.sweepExpiredLocked(now)
+
+	ordered, anyPool := p.orderedLocked()
+	if !anyPool || len(ordered) == 0 {
+		return nil
+	}
+
+	// 过滤：仅选匹配区域的节点
+	var candidates []*ProxyNode
+	for _, n := range ordered {
+		if !p.eligible(n, now) {
+			continue
+		}
+		if n.Region != requiredRegion {
+			continue
+		}
+		if force && n.Fingerprint == p.activeID {
+			continue
+		}
+		candidates = append(candidates, n)
+	}
+	if len(candidates) == 0 {
+		return nil // 无匹配区域的可用节点
+	}
+	if p.rrIndex >= len(candidates) {
+		p.rrIndex = 0
+	}
+	n := candidates[p.rrIndex]
+	p.rrIndex = (p.rrIndex + 1) % len(candidates)
+	p.activeID = n.Fingerprint
+	return n
+}
+
+// availableRegions 返回当前可用节点的所有唯一区域标识（含空字符串表示未标记区域）。
+func (p *nodePool) availableRegions() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	seen := map[string]bool{}
+	var regions []string
+	for _, n := range p.nodes {
+		if !p.eligible(n, now) {
+			continue
+		}
+		if !seen[n.Region] {
+			seen[n.Region] = true
+			regions = append(regions, n.Region)
+		}
+	}
+	return regions
 }
