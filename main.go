@@ -34,10 +34,30 @@ var httpClient = &http.Client{
 	},
 }
 
+// mgmtClient 管理面专用 HTTP 客户端，使用系统默认 DNS 解析器，
+// 不受 mihomo ApplyConfig 的 DNS 劫持影响。
+// 用于 fetchModels / fetchModelsDevCatalog 等启动时管理请求。
+var mgmtClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 5,
+		IdleConnTimeout:     30 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 15 * time.Second,
+			Resolver:  net.DefaultResolver,
+		}).DialContext,
+	},
+}
+
 var (
 	version = "v0.3.7"
 	commit  = "none"
 	date    = "unknown"
+
+	// egress 是出口客户端的唯一入口（见 egress.go）。
+	egress *EgressClient
 )
 
 func versionString() string {
@@ -191,173 +211,14 @@ func socks5Dial(proxy Socks5Proxy) func(ctx context.Context, network, addr strin
 	}
 }
 
-var (
-	socks5Proxies    []Socks5Proxy
-	activeSocks5     string // 启用的代理 Addr，空表示直连，__round_robin__ 表示轮询
-	socks5PaidDirect bool   // true=带 key/付费直连；false/缺省=全部走代理
-	socks5Sticky     bool   // 轮询模式下按会话固定出口（默认 true）
-	socks5Mu         sync.RWMutex
-)
-
 const socks5RR = "__round_robin__"
 
-var socks5RRIndex uint32
-
-// ======================== 会话粘性代理（sticky egress） ========================
-//
-// 上游免费层（opencode.ai/zen -free 模型）的 prompt 缓存按出口 IP 隔离：
-// 同一请求经不同出口会各自冷启动，缓存几乎无法命中。轮询模式下若每次请求
-// 随机换出口，命中率会归零（上游实测 0% vs 固定出口 99.8%）。
-//
-// sticky 模式为同一会话（账号 token 或客户端会话 user）固定一个出口代理，
-// 让缓存持续累积；不同会话之间仍轮询分散，保留多出口的意义。绑定 TTL
-// 过期或代理连接失败时自动解除，重新分配出口。
-//
-// 注意：节点池（订阅/webshare）路径本身是全局粘性（单 active 节点），
-// 此机制只作用于静态 socks5_proxies + __round_robin__ 轮询模式。
-
-type stickyProxyEntry struct {
-	proxyIdx int
-	client   *http.Client
-	lastUsed time.Time
-}
-
-var (
-	stickyMu      sync.Mutex
-	stickyEntries = map[string]*stickyProxyEntry{}
-)
-
-const (
-	stickyEntryTTL       = 15 * time.Minute
-	stickyMaxEntries     = 256
-	stickyPublicFallback = "cli://public-shared" // 无会话标识的 public 请求共用同一出口
-)
-
-// stickyRebindSeq 每次重新绑定递增，参与哈希，保证同一会话在绑定被切断
-// （上游 429/5xx/连接错误）后重新分配时换到不同出口，而不是永远钉死
-// 在同一个确定性哈希结果上。
-var stickyRebindSeq uint32
-
-// stickyKeyForRequest 生成会话粘性键。优先级：账号 token > 会话 user
-// （来自 Claude metadata 的 session_id 等）> 公共兜底。
-func stickyKeyForRequest(auth UpstreamAuth, bodyMap map[string]any) string {
-	if auth.Token != "" {
-		return "tok:" + auth.Token
-	}
-	if u, ok := bodyMap["user"].(string); ok && u != "" {
-		return "usr:" + u
-	}
-	return stickyPublicFallback
-}
-
-// buildProxyClient 为指定代理构建带 SOCKS5 dial 的 HTTP 客户端。
-func buildProxyClient(proxy Socks5Proxy) *http.Client {
-	return &http.Client{
-		Timeout: 300 * time.Second,
-		Transport: &http.Transport{
-			DialContext:         socks5Dial(proxy),
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     90 * time.Second,
-		},
-	}
-}
-
-// getHTTPClientSticky 在静态轮询代理模式下选择客户端：
-// sticky 开启时按会话固定出口，否则退化为普通轮询/直连逻辑。
-func getHTTPClientSticky(auth UpstreamAuth, bodyMap map[string]any) *http.Client {
-	// 带 key 直连配置优先，不参与粘性。
-	if auth.tier() == TierPaid && getSocks5PaidDirect() {
-		return httpClient
-	}
-	if !getSocks5Sticky() {
-		return getHTTPClientForTier(auth.tier())
-	}
-	socks5Mu.RLock()
-	rr := activeSocks5 == socks5RR
-	proxies := append([]Socks5Proxy(nil), socks5Proxies...)
-	socks5Mu.RUnlock()
-	if !rr || len(proxies) == 0 {
-		return getHTTPClientForTier(auth.tier())
-	}
-
-	key := stickyKeyForRequest(auth, bodyMap)
-
-	stickyMu.Lock()
-	now := time.Now()
-	// 懒清理：先清过期条目，超出上限时再清最旧的。
-	if len(stickyEntries) > 0 {
-		for k, e := range stickyEntries {
-			if now.Sub(e.lastUsed) > stickyEntryTTL {
-				delete(stickyEntries, k)
-			}
-		}
-	}
-	if len(stickyEntries) > stickyMaxEntries {
-		var oldestKey string
-		var oldest time.Time
-		for k, e := range stickyEntries {
-			if oldestKey == "" || e.lastUsed.Before(oldest) {
-				oldestKey, oldest = k, e.lastUsed
-			}
-		}
-		delete(stickyEntries, oldestKey)
-	}
-	if e, ok := stickyEntries[key]; ok {
-		e.lastUsed = now
-		client := e.client
-		stickyMu.Unlock()
-		return client
-	}
-
-	// 哈希 + 递增序号：同一 key 的连续绑定会落在不同出口，使代理切换真正生效。
-	seq := atomic.AddUint32(&stickyRebindSeq, 1)
-	idx := int((fnv32a(key)+seq)%uint32(len(proxies))) % len(proxies)
-	entry := &stickyProxyEntry{proxyIdx: idx, client: buildProxyClient(proxies[idx]), lastUsed: now}
-	stickyEntries[key] = entry
-	stickyMu.Unlock()
-	return entry.client
-}
-
-// invalidateStickyProxy 在代理连接失败/上游限流时解除会话的 sticky 绑定，
-// 让下一次请求重新分配出口，避免持续使用故障或被限流的代理。
-func invalidateStickyProxy(auth UpstreamAuth, bodyMap map[string]any) {
-	if !getSocks5Sticky() {
-		return
-	}
-	socks5Mu.RLock()
-	rr := activeSocks5 == socks5RR
-	socks5Mu.RUnlock()
-	if !rr {
-		return
-	}
-	key := stickyKeyForRequest(auth, bodyMap)
-	stickyMu.Lock()
-	delete(stickyEntries, key)
-	stickyMu.Unlock()
-}
-
-func fnv32a(s string) uint32 {
-	var h uint32 = 2166136261
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= 16777619
-	}
-	return h
-}
-
-func getSocks5Sticky() bool {
-	socks5Mu.RLock()
-	defer socks5Mu.RUnlock()
-	return socks5Sticky
-}
-
 // legacySocks5Nodes 把 config.json 里遗留的 socks5Proxies 迁移为池内节点。
-// 若旧配置有名字，优先用名字；否则用 Addr。
 func legacySocks5Nodes() []*ProxyNode {
-	socks5Mu.RLock()
-	proxies := append([]Socks5Proxy(nil), socks5Proxies...)
-	socks5Mu.RUnlock()
+	if egress == nil {
+		return nil
+	}
+	proxies, _, _ := egress.GetSocks5Config()
 	out := make([]*ProxyNode, 0, len(proxies))
 	for _, p := range proxies {
 		if p.Addr == "" {
@@ -381,127 +242,6 @@ func legacySocks5Nodes() []*ProxyNode {
 		})
 	}
 	return out
-}
-
-var (
-	socks5Client     *http.Client // 缓存的 SOCKS5 客户端
-	socks5ClientAddr string       // 缓存对应的代理地址
-)
-
-func getHTTPClient() *http.Client {
-	socks5Mu.RLock()
-	defer socks5Mu.RUnlock()
-
-	// 新管线：节点池优先（refreshAll 成功后池非空）。池为空时回退旧 socks5 逻辑。
-	if nodesActive() {
-		n := proxyPool.pick(false)
-		if n != nil {
-			return proxyPool.getClient(n.Fingerprint)
-		}
-		return httpClient // 节点都在冷却中 → 直连
-	}
-
-	if activeSocks5 == "" {
-		return httpClient
-	}
-
-	var proxy Socks5Proxy
-	var useRR bool
-
-	if activeSocks5 == socks5RR {
-		if len(socks5Proxies) == 0 {
-			return httpClient
-		}
-		idx := atomic.AddUint32(&socks5RRIndex, 1) % uint32(len(socks5Proxies))
-		proxy = socks5Proxies[idx]
-		useRR = true
-	} else {
-		if socks5Client != nil && socks5ClientAddr == activeSocks5 {
-			return socks5Client
-		}
-
-		var found bool
-		for i := range socks5Proxies {
-			if socks5Proxies[i].Addr == activeSocks5 {
-				proxy = socks5Proxies[i]
-				found = true
-				break
-			}
-		}
-		if !found {
-			return httpClient
-		}
-	}
-
-	dial := socks5Dial(proxy)
-	client := &http.Client{
-		Timeout: 300 * time.Second,
-		Transport: &http.Transport{
-			DialContext:         dial,
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     90 * time.Second,
-		},
-	}
-
-	if !useRR {
-		socks5Client = client
-		socks5ClientAddr = activeSocks5
-	}
-	return client
-}
-
-// getHTTPClientForTier 按认证层级选择 HTTP 客户端。
-// 默认（socks5_paid_direct 未填或 false）：只要配置了 active_socks5，付费/带 key 与 public 都走代理。
-// socks5_paid_direct=true 时恢复旧行为：付费层直连，仅免费层走代理。
-func getHTTPClientForTier(tier TierType) *http.Client {
-	if tier == TierPaid && getSocks5PaidDirect() {
-		return httpClient
-	}
-	return getHTTPClient()
-}
-
-func getSocks5PaidDirect() bool {
-	socks5Mu.RLock()
-	defer socks5Mu.RUnlock()
-	return socks5PaidDirect
-}
-
-func nodesActive() bool {
-	return proxyPool.nodeCount() > 0
-}
-
-// getNodeClientForTier 供配额切换链路使用：返回本次请求所用客户端及其节点指纹。
-// 指纹为空表示直连（这些响应不参与节点标记）。forceSwitch=true 时强制换节点。
-func getNodeClientForTier(tier TierType, forceSwitch bool) (*http.Client, string) {
-	if tier == TierPaid && getSocks5PaidDirect() {
-		return httpClient, ""
-	}
-	if nodesActive() {
-		n := proxyPool.pick(forceSwitch)
-		if n != nil {
-			return proxyPool.getClient(n.Fingerprint), n.Fingerprint
-		}
-		return httpClient, ""
-	}
-	return getHTTPClientForTier(tier), ""
-}
-
-// getNodeClientSticky 在 getNodeClientForTier 基础上，为无节点池时的静态
-// socks5 轮询模式提供会话粘性（见 sticky egress 注释）。节点池路径保持原样：
-// 池本身是全局粘性（单 active 节点），缓存命中语义已满足。
-func getNodeClientSticky(auth UpstreamAuth, forceSwitch bool, bodyMap map[string]any) (*http.Client, string) {
-	if auth.tier() == TierPaid && getSocks5PaidDirect() {
-		return httpClient, ""
-	}
-	if nodesActive() {
-		n := proxyPool.pick(forceSwitch)
-		if n != nil {
-			return proxyPool.getClient(n.Fingerprint), n.Fingerprint
-		}
-		return httpClient, ""
-	}
-	return getHTTPClientSticky(auth, bodyMap), ""
 }
 
 // ======================== 随机 ID ========================
@@ -540,7 +280,7 @@ var (
 func fetchOCVersion() string {
 	req, _ := http.NewRequest("GET", "https://registry.npmjs.org/opencode-ai/latest", nil)
 	req.Header.Set("Accept", "application/json")
-	resp, err := getHTTPClient().Do(req)
+	resp, err := mgmtClient.Do(req)
 	if err != nil {
 		return "1.15.3"
 	}
@@ -643,7 +383,7 @@ func fetchModels() ([]ModelInfo, error) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", "https://opencode.ai/zen/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer public")
 	req.Header.Set("x-opencode-session", ocSessionID)
-	resp, err := getHTTPClient().Do(req)
+	resp, err := mgmtClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -671,7 +411,7 @@ func fetchGoModels() ([]ModelInfo, error) {
 	req, _ := http.NewRequestWithContext(ctx, "GET", "https://opencode.ai/zen/go/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer public")
 	req.Header.Set("x-opencode-session", ocSessionID)
-	resp, err := getHTTPClient().Do(req)
+	resp, err := mgmtClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -697,7 +437,7 @@ func fetchGoModels() ([]ModelInfo, error) {
 // opencode 上游模型的 limit 元数据（context/output）仅在 models.dev 发布，上游 models 接口不提供。
 func fetchModelsDevCatalog() (map[string]ModelLimit, error) {
 	req, _ := http.NewRequest("GET", "https://models.dev/api.json", nil)
-	resp, err := getHTTPClient().Do(req)
+	resp, err := mgmtClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -897,6 +637,7 @@ var (
 	configMu                sync.RWMutex
 	storedResponses         = map[string]StoredResponseState{}
 	storedResponsesMu       sync.RWMutex
+	modelRegionMap          = map[string]string{} // 模型区域限制：模型 ID → 所需区域
 )
 
 // ======================== 管理面板认证 ========================
@@ -1055,6 +796,9 @@ type AppConfig struct {
 	HiddenFreeAliases    []string          `json:"hidden_free_aliases,omitempty"`
 	ReasoningEffortMap   map[string]string `json:"reasoning_effort_map"`
 	ForceDisableThinking bool              `json:"force_disable_thinking"`
+	// ModelRegionMap 定义模型的区域限制：键是上游模型 ID（支持 "*" 通配），值是所需区域（如 "us"）。
+	// 匹配到的模型只会路由到该区域的代理节点；未匹配的模型不受区域限制。
+	ModelRegionMap map[string]string `json:"model_region_map,omitempty"`
 	// ApiKey 统一网关密钥：客户端用它通过鉴权并按付费档获取全量模型；
 	// 留空时退回现状（任意有效 sk- key 或免密钥免费档）。
 	ApiKey        string        `json:"api_key,omitempty"`
@@ -1080,7 +824,7 @@ type AppConfig struct {
 	MaxQuotaNodeSwitches int `json:"max_quota_node_switches,omitempty"`
 
 	// ---- 节点健康检查（可选）----
-	// 0 = 默认 15min；URL 空 = 默认 https://www.gstatic.com/generate_204
+	// 0 = 默认 15min；负数 = 禁用健康检查；URL 空 = 默认 https://www.gstatic.com/generate_204
 	NodeHealthIntervalMinutes int    `json:"node_health_interval_minutes,omitempty"`
 	NodeHealthProbeURL        string `json:"node_health_probe_url,omitempty"`
 
@@ -1255,6 +999,9 @@ func applyConfig(cfg AppConfig) {
 	if cfg.ModelAlias != nil {
 		modelAlias = cfg.ModelAlias
 	}
+	if cfg.ModelRegionMap != nil {
+		modelRegionMap = cfg.ModelRegionMap
+	}
 	if cfg.ReasoningEffortMap != nil {
 		reasoningEffortMap = cfg.ReasoningEffortMap
 	}
@@ -1272,26 +1019,15 @@ func applyConfig(cfg AppConfig) {
 		textOnlyModels = cfg.TextOnlyModels
 	}
 
-	socks5Mu.Lock()
-	if cfg.Socks5Proxies != nil {
-		socks5Proxies = cfg.Socks5Proxies
-	}
-	if activeSocks5 != cfg.ActiveSocks5 {
-		activeSocks5 = cfg.ActiveSocks5
-		socks5Client = nil
-		socks5ClientAddr = ""
-		atomic.StoreUint32(&socks5RRIndex, 0)
-	}
-	// 代理配置变化后旧 sticky 绑定可能指向已不存在的出口，全部清空重建。
-	stickyMu.Lock()
-	stickyEntries = map[string]*stickyProxyEntry{}
-	stickyMu.Unlock()
-	socks5Sticky = true
+	sticky := true
 	if cfg.Socks5Sticky != nil {
-		socks5Sticky = *cfg.Socks5Sticky
+		sticky = *cfg.Socks5Sticky
 	}
-	socks5PaidDirect = cfg.Socks5PaidDirect
-	socks5Mu.Unlock()
+
+	// 更新出口客户端配置
+	if egress != nil {
+		egress.Configure(cfg.Socks5Proxies, cfg.ActiveSocks5, cfg.Socks5PaidDirect, sticky)
+	}
 
 	// ---- 节点池配置 ----
 	if cfg.NodeCooldownExhaustedHours > 0 {
@@ -1321,10 +1057,13 @@ func applyConfig(cfg AppConfig) {
 	quotaSignalsMu.Unlock()
 
 	// ---- 健康检查配置 ----
-	if cfg.NodeHealthIntervalMinutes > 0 {
+	// 0 = 默认 15min；负数 = 禁用健康检查
+	if cfg.NodeHealthIntervalMinutes < 0 {
+		proxyPool.probeInterval = -1 // 禁用
+	} else if cfg.NodeHealthIntervalMinutes > 0 {
 		proxyPool.probeInterval = time.Duration(cfg.NodeHealthIntervalMinutes) * time.Minute
 	} else {
-		proxyPool.probeInterval = 0
+		proxyPool.probeInterval = 0 // 未设 → 默认 15min
 	}
 	proxyPool.probeURL = cfg.NodeHealthProbeURL
 }
@@ -1357,6 +1096,114 @@ func resolveModel(model string) string {
 		}
 	}
 	return m
+}
+
+// lookupModelRegion 查找模型的区域限制。支持精确匹配和 "*" 通配符。
+// 返回空字符串表示无区域限制。
+func lookupModelRegion(modelID string) string {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	if len(modelRegionMap) == 0 {
+		return ""
+	}
+	// 精确匹配
+	if region, ok := modelRegionMap[modelID]; ok {
+		return region
+	}
+	// 通配符匹配（取最长匹配前缀）
+	var bestMatch string
+	var bestRegion string
+	for pattern, region := range modelRegionMap {
+		if pattern == "*" {
+			continue // "*" 作为 fallback 在最后处理
+		}
+		// 支持 "*" 作为尾部通配符（如 "muse-*"）
+		if strings.HasSuffix(pattern, "*") {
+			prefix := strings.TrimSuffix(pattern, "*")
+			if strings.HasPrefix(modelID, prefix) && len(pattern) > len(bestMatch) {
+				bestMatch = pattern
+				bestRegion = region
+			}
+		}
+	}
+	if bestRegion != "" {
+		return bestRegion
+	}
+	// "*" 全局通配
+	if region, ok := modelRegionMap["*"]; ok {
+		return region
+	}
+	return ""
+}
+
+// persistModelRegion 自动学习的区域限制持久化到配置文件。
+func persistModelRegion(modelID, region string) {
+	cfg := loadConfig(configPath)
+	if cfg.ModelRegionMap == nil {
+		cfg.ModelRegionMap = map[string]string{}
+	}
+	cfg.ModelRegionMap[modelID] = region
+	if err := saveConfig(configPath, cfg); err != nil {
+		slog.Warn("failed to persist model region", "model", modelID, "region", region, "error", err)
+	} else {
+		slog.Info("model region persisted", "model", modelID, "region", region)
+	}
+}
+
+// ======================== 区域探测 ========================
+
+// regionProbeState 记录单个模型的区域探测进度。
+type regionProbeState struct {
+	triedRegions map[string]bool // 已尝试的区域
+	failedRegion string          // 区域已知但无节点
+}
+
+var (
+	regionProbeMap   = map[string]*regionProbeState{}
+	regionProbeMapMu sync.RWMutex
+)
+
+// getOrCreateProbeState 获取或创建模型的探测状态。
+func getOrCreateProbeState(modelID string) *regionProbeState {
+	regionProbeMapMu.Lock()
+	defer regionProbeMapMu.Unlock()
+	if s, ok := regionProbeMap[modelID]; ok {
+		return s
+	}
+	s := &regionProbeState{triedRegions: map[string]bool{}}
+	regionProbeMap[modelID] = s
+	return s
+}
+
+// nextUntriedRegion 从未尝试的区域中返回一个有可用节点的区域；全部试过则返回 ""。
+func nextUntriedRegion(modelID string) string {
+	probe := getOrCreateProbeState(modelID)
+	regions := proxyPool.availableRegions()
+	for _, r := range regions {
+		if r == "" {
+			continue // 跳过无区域标记的节点（直连/未知区域）
+		}
+		if probe.triedRegions[r] {
+			continue
+		}
+		// 检查该区域是否有可用节点
+		if n := proxyPool.pickForRegion(false, r); n != nil {
+			return r
+		}
+	}
+	return ""
+}
+
+// markRegionTried 标记区域已尝试（成功或失败均可调用）。
+func markRegionTried(modelID, region string) {
+	probe := getOrCreateProbeState(modelID)
+	probe.triedRegions[region] = true
+}
+
+// markRegionFailed 标记区域已知但无节点可用（不计入探测）。
+func markRegionFailed(modelID, region string) {
+	probe := getOrCreateProbeState(modelID)
+	probe.failedRegion = region
 }
 
 func getForceDisableThinking() bool {
@@ -2409,6 +2256,19 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	}
 	log := reqLogger(ctx)
 
+	// 查找模型的区域限制
+	requiredRegion := lookupModelRegion(modelID)
+	if requiredRegion != "" {
+		log.Info("model_region_restriction", "model", modelID, "region", requiredRegion)
+		// 检查是否有该区域的可用节点
+		if egress.NodesActive() {
+			n := proxyPool.pickForRegion(false, requiredRegion)
+			if n == nil {
+				return nil, http.StatusBadRequest, nil, fmt.Errorf("model %s requires region '%s' but no nodes available in that region", modelID, requiredRegion)
+			}
+		}
+	}
+
 	var lastErr error
 	var retryCount int
 	var lastBody []byte
@@ -2431,7 +2291,8 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		if err != nil {
 			return nil, 500, nil, err
 		}
-		client, nodeFp := getNodeClientSticky(auth, nodeSwitchPending, bodyMap)
+		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		client, nodeFp := egResult.Client, egResult.NodeFP
 		nodeSwitchPending = false
 		attemptStart := time.Now()
 		resp, err := client.Do(up)
@@ -2456,7 +2317,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			)
 			if canRetry {
 				client.CloseIdleConnections()
-				invalidateStickyProxy(auth, bodyMap)
+				egResult.Invalidate()
 				retryCount++
 				continue
 			}
@@ -2491,6 +2352,64 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+
+		// 检测区域限制错误（自动学习 + 区域探测）
+		if regionRestricted, detectedRegion := classifyRegionRestriction(resp.StatusCode, errBody); regionRestricted {
+			callLogEvent(ctx, "region_restriction", nodeFp, fmt.Sprintf("http %d region_detected:%s", resp.StatusCode, detectedRegion))
+			log.Warn("model_region_restriction_detected",
+				"model", modelID,
+				"detected_region", detectedRegion,
+				"status", resp.StatusCode,
+			)
+
+			// === 路径 1：从错误消息中提取到了具体区域 → 自动学习 ===
+			if detectedRegion != "" && lookupModelRegion(modelID) == "" {
+				configMu.Lock()
+				modelRegionMap[modelID] = detectedRegion
+				configMu.Unlock()
+				log.Info("model_region_auto_learned",
+					"model", modelID,
+					"region", detectedRegion,
+				)
+				go persistModelRegion(modelID, detectedRegion)
+				if egress.NodesActive() {
+					n := proxyPool.pickForRegion(false, detectedRegion)
+					if n != nil {
+						nodeSwitchPending = true
+						refreshOCSession()
+						continue
+					}
+				}
+			}
+
+			// === 路径 2：无法确定区域 → 探测所有可用区域 ===
+			if lookupModelRegion(modelID) == "" && egress.NodesActive() {
+				// 标记当前直连（区域未知）已失败
+				markRegionTried(modelID, "")
+				if nextRegion := nextUntriedRegion(modelID); nextRegion != "" {
+					log.Info("region_probe_try",
+						"model", modelID,
+						"probe_region", nextRegion,
+					)
+					// 临时设置区域以触发节点选择
+					configMu.Lock()
+					modelRegionMap[modelID] = nextRegion
+					configMu.Unlock()
+					nodeSwitchPending = true
+					refreshOCSession()
+					continue
+				}
+				// 所有区域都试过了，恢复 modelRegionMap 并返回错误
+				configMu.Lock()
+				delete(modelRegionMap, modelID)
+				configMu.Unlock()
+				log.Warn("region_probe_exhausted",
+					"model", modelID,
+					"tried_all_regions", true,
+				)
+			}
+		}
+
 		// 免费额度耗尽：标记当前节点 → 强制切下一个节点重试（预算内）
 		if quota, quotaReason := classifyQuota(resp.StatusCode, errBody); quota {
 			callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d quota_signal", resp.StatusCode))
@@ -2540,7 +2459,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 		// 免费层 429 按出口 IP 限流，5xx 也可能是出口问题：
 		// 重试前切断 sticky，让同一会话换到下一个出口。
-		invalidateStickyProxy(auth, bodyMap)
+		egResult.Invalidate()
 		client.CloseIdleConnections()
 		retryCount++
 	}
@@ -2570,6 +2489,19 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	}
 	log := reqLogger(ctx)
 
+	// 查找模型的区域限制
+	requiredRegion := lookupModelRegion(modelID)
+	if requiredRegion != "" {
+		log.Info("model_region_restriction", "model", modelID, "region", requiredRegion)
+		// 检查是否有该区域的可用节点
+		if egress.NodesActive() {
+			n := proxyPool.pickForRegion(false, requiredRegion)
+			if n == nil {
+				return nil, http.StatusBadRequest, nil, fmt.Errorf("model %s requires region '%s' but no nodes available in that region", modelID, requiredRegion)
+			}
+		}
+	}
+
 	var lastBody []byte
 	var lastStatus int
 	var lastHeader http.Header
@@ -2591,7 +2523,8 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		if err != nil {
 			return nil, 500, nil, err
 		}
-		client, nodeFp := getNodeClientSticky(auth, nodeSwitchPending, bodyMap)
+		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		client, nodeFp := egResult.Client, egResult.NodeFP
 		nodeSwitchPending = false
 		attemptStart := time.Now()
 		resp, err := client.Do(up)
@@ -2614,7 +2547,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			)
 			if canRetry {
 				client.CloseIdleConnections()
-				invalidateStickyProxy(auth, bodyMap)
+				egResult.Invalidate()
 				retryCount++
 				continue
 			}
@@ -2640,6 +2573,64 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+
+		// 检测区域限制错误（自动学习 + 区域探测）
+		if regionRestricted, detectedRegion := classifyRegionRestriction(resp.StatusCode, errBody); regionRestricted {
+			callLogEvent(ctx, "region_restriction", nodeFp, fmt.Sprintf("http %d region_detected:%s", resp.StatusCode, detectedRegion))
+			log.Warn("model_region_restriction_detected",
+				"model", modelID,
+				"detected_region", detectedRegion,
+				"status", resp.StatusCode,
+			)
+
+			// === 路径 1：从错误消息中提取到了具体区域 → 自动学习 ===
+			if detectedRegion != "" && lookupModelRegion(modelID) == "" {
+				configMu.Lock()
+				modelRegionMap[modelID] = detectedRegion
+				configMu.Unlock()
+				log.Info("model_region_auto_learned",
+					"model", modelID,
+					"region", detectedRegion,
+				)
+				go persistModelRegion(modelID, detectedRegion)
+				if egress.NodesActive() {
+					n := proxyPool.pickForRegion(false, detectedRegion)
+					if n != nil {
+						nodeSwitchPending = true
+						refreshOCSession()
+						continue
+					}
+				}
+			}
+
+			// === 路径 2：无法确定区域 → 探测所有可用区域 ===
+			if lookupModelRegion(modelID) == "" && egress.NodesActive() {
+				// 标记当前直连（区域未知）已失败
+				markRegionTried(modelID, "")
+				if nextRegion := nextUntriedRegion(modelID); nextRegion != "" {
+					log.Info("region_probe_try",
+						"model", modelID,
+						"probe_region", nextRegion,
+					)
+					// 临时设置区域以触发节点选择
+					configMu.Lock()
+					modelRegionMap[modelID] = nextRegion
+					configMu.Unlock()
+					nodeSwitchPending = true
+					refreshOCSession()
+					continue
+				}
+				// 所有区域都试过了，恢复 modelRegionMap 并返回错误
+				configMu.Lock()
+				delete(modelRegionMap, modelID)
+				configMu.Unlock()
+				log.Warn("region_probe_exhausted",
+					"model", modelID,
+					"tried_all_regions", true,
+				)
+			}
+		}
+
 		// 免费额度耗尽：标记当前节点 → 强制切下一个节点重试（头部阶段可安全重试）
 		if quota, quotaReason := classifyQuota(resp.StatusCode, errBody); quota {
 			callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d quota_signal", resp.StatusCode))
@@ -2687,7 +2678,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 		// 免费层 429 按出口 IP 限流，5xx 也可能是出口问题：
 		// 重试前切断 sticky，让同一会话换到下一个出口。
-		invalidateStickyProxy(auth, bodyMap)
+		egResult.Invalidate()
 		client.CloseIdleConnections()
 		retryCount++
 	}
@@ -6047,12 +6038,13 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		configMu.RLock()
 		cfg := AppConfig{ModelAlias: modelAlias, ReasoningEffortMap: reasoningEffortMap, ForceDisableThinking: forceDisableThinking}
+		if len(modelRegionMap) > 0 {
+			cfg.ModelRegionMap = modelRegionMap
+		}
 		configMu.RUnlock()
-		socks5Mu.RLock()
-		cfg.Socks5Proxies = socks5Proxies
-		cfg.ActiveSocks5 = activeSocks5
-		cfg.Socks5PaidDirect = socks5PaidDirect
-		socks5Mu.RUnlock()
+		if egress != nil {
+			cfg.Socks5Proxies, cfg.ActiveSocks5, cfg.Socks5PaidDirect = egress.GetSocks5Config()
+		}
 		merged := mergeAppConfig(loadConfig(configPath), cfg)
 		// 配额相关字段未配置时回显默认值，保证面板文本框直接可见生效值。
 		quotaResp := merged.QuotaErrorSignals
@@ -6080,6 +6072,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"hidden_free_aliases":           merged.HiddenFreeAliases,
 			"reasoning_effort_map":          merged.ReasoningEffortMap,
 			"force_disable_thinking":        merged.ForceDisableThinking,
+			"model_region_map":              merged.ModelRegionMap,
 			"socks5_proxies":                merged.Socks5Proxies,
 			"active_socks5":                 merged.ActiveSocks5,
 			"socks5_paid_direct":            merged.Socks5PaidDirect,
@@ -6150,6 +6143,7 @@ type configPatch struct {
 	HiddenFreeAliases          *[]string            `json:"hidden_free_aliases"`
 	ReasoningEffortMap         map[string]string    `json:"reasoning_effort_map"`
 	ForceDisableThinking       *bool                `json:"force_disable_thinking"`
+	ModelRegionMap             map[string]string    `json:"model_region_map"`
 	Socks5Proxies              []Socks5Proxy        `json:"socks5_proxies"`
 	ActiveSocks5               *string              `json:"active_socks5"`
 	Socks5PaidDirect           *bool                `json:"socks5_paid_direct"`
@@ -6181,6 +6175,9 @@ func mergeAppConfig(base, patch AppConfig) AppConfig {
 	}
 	if patch.ReasoningEffortMap != nil {
 		out.ReasoningEffortMap = patch.ReasoningEffortMap
+	}
+	if patch.ModelRegionMap != nil {
+		out.ModelRegionMap = patch.ModelRegionMap
 	}
 	if patch.Socks5Proxies != nil {
 		out.Socks5Proxies = patch.Socks5Proxies
@@ -6253,6 +6250,9 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	}
 	if patch.ReasoningEffortMap != nil {
 		out.ReasoningEffortMap = patch.ReasoningEffortMap
+	}
+	if patch.ModelRegionMap != nil {
+		out.ModelRegionMap = patch.ModelRegionMap
 	}
 	if patch.Socks5Proxies != nil {
 		out.Socks5Proxies = patch.Socks5Proxies
@@ -8259,6 +8259,15 @@ func main() {
 
 	cfg := loadConfig(configPath)
 	applyConfig(cfg)
+
+	// 初始化出口客户端模块
+	egress = NewEgressClient(httpClient)
+	sticky := true
+	if cfg.Socks5Sticky != nil {
+		sticky = *cfg.Socks5Sticky
+	}
+	egress.Configure(cfg.Socks5Proxies, cfg.ActiveSocks5, cfg.Socks5PaidDirect, sticky)
+
 	if err := saveConfig(configPath, cfg); err != nil {
 		slog.Warn("failed to save config", "path", configPath, "error", err)
 	}

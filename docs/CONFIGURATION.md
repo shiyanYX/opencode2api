@@ -40,6 +40,30 @@ cp config.example.json config.json
 
 设为 `true` 时，服务会尽量禁用 thinking/reasoning，并从返回中移除 reasoning 内容。
 
+### `model_region_map`
+
+模型区域限制。某些模型（如 `muse-spark-1.2-contributor`）仅允许特定区域的调用。配置后，匹配的模型只会路由到该区域的代理节点。
+
+- 键：上游模型 ID（支持 `*` 通配符，如 `muse-*` 匹配所有 muse 模型）
+- 值：所需区域标识（如 `us`、`eu`、`jp`、`hk`、`sg`、`tw`、`kr`、`au`、`ca`）
+
+**区域自动推断**：代理节点的区域会从节点名称自动推断（如 `US-38.153.152.244:9594` → `us`），也可在 `manual_nodes` 中显式指定 `region` 字段。
+
+```json
+{
+  "model_region_map": {
+    "muse-spark-1.2-contributor": "us",
+    "muse-*": "us",
+    "*": "us"
+  }
+}
+```
+
+当模型需要特定区域但没有该区域的可用节点时，请求会返回错误：
+```
+Model muse-spark-1.2-contributor requires region 'us' but no nodes available in that region
+```
+
 ### `socks5_proxies`
 
 SOCKS5 代理列表。
@@ -172,6 +196,7 @@ SOCKS5 代理列表。
 ```
 
 - 支持协议：`vless`（含 reality）、`ss`、`hysteria2`、`anytls`、`socks5`（`socks5://` URI 走账户限制，clash 配置按原样处理）。
+- 节点区域标签：`manual_nodes` 可指定 `region` 字段（如 `"us"`、`"eu"`、`"jp"`），用于 `model_region_map` 的区域路由。订阅节点会从名称自动推断区域（如 `US-38.153.152.244:9594` → `us`）。
 - 订阅内容支持：Clash YAML（只读 `proxies`）、整条 base64 包裹、每行一条 `vless://`/`ss://`/`hysteria2://`/`anytls://`/`socks5://` URI。
 - 订阅 URL 需要认证时：`url` 可直接附 query；base64 包裹的订阅会自动解码。
 - 免费额度耗尽自动切换：请求遇 `FreeUsageLimitError`/`insufficient_quota`/`credits_error`/`billing_error`（`error.type`）或 `free usage limit`/`quota`/`insufficient`/`limit exceeded`（`error.message`）时，标记当前节点为 **已耗尽**，透明切换下一个节点重试；单个请求最多切换 `max_quota_node_switches`（默认 5）次（配额预算与重试上限独立：循环上限 = 重试 3 次 + 配额预算 5 次，普通重试仍封顶 3 次）。**403 无签名视为耗尽、429 无签名不视为耗尽**。已耗尽节点在配额冷却到期后自动恢复（标记清除、重新参与路由）；健康探测失败标记的 **故障** 节点每分钟复探，探测成功即恢复；调度巡检只探测可用节点，不打扰已耗尽节点。

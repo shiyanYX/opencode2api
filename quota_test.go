@@ -87,6 +87,8 @@ func TestQuotaSwitchNodesNonStream(t *testing.T) {
 	n2 := &ProxyNode{Name: "n2", Protocol: "socks5", Address: "5.6.7.8", Port: 1080}
 	proxyPool = newProxyPool("")
 	proxyPool.setNodes([]*ProxyNode{n1, n2})
+	egress = NewEgressClient(httpClient)
+	egress.Configure(nil, "", false, false)
 
 	fake := &quotaFakeClient{
 		t: t,
@@ -154,6 +156,8 @@ func TestQuotaSwitchNodesStream(t *testing.T) {
 	n2 := &ProxyNode{Name: "n2", Protocol: "socks5", Address: "5.6.7.8", Port: 1080}
 	proxyPool = newProxyPool("")
 	proxyPool.setNodes([]*ProxyNode{n1, n2})
+	egress = NewEgressClient(httpClient)
+	egress.Configure(nil, "", false, false)
 
 	fake := &quotaFakeClient{
 		t: t,
@@ -395,6 +399,8 @@ func TestQuotaSwitchThenRetryCapped(t *testing.T) {
 	n2 := quotaNode("n2")
 	proxyPool = newProxyPool("")
 	proxyPool.setNodes([]*ProxyNode{n1, n2})
+	egress = NewEgressClient(httpClient)
+	egress.Configure(nil, "", false, false)
 	fake := &quotaFakeClient{
 		t: t,
 		responses: map[string][]fakeUpstreamResponse{

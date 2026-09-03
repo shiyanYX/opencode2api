@@ -161,7 +161,7 @@ func TestHealthProbeDefaults(t *testing.T) {
 		t.Fatalf("probe url = %q, want default", got)
 	}
 	if got := p.healthInterval(); got != defaultHealthInterval {
-		t.Fatalf("interval = %v, want default", got)
+		t.Fatalf("interval = %v, want default %v", got, defaultHealthInterval)
 	}
 }
 

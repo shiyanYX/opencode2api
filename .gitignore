@@ -2,14 +2,24 @@
 config.json
 stats.json
 proxy_state.json
+call_log.jsonl
 *.log
 *.log.gz
+
+# GeoIP database (downloaded at runtime)
+Country.mmdb
+
+# Subscription cache
+.subscriptions/
 
 # Build output
 dist/
 bin/
 opencode2api
 opencode2api.exe
+
+# Temp files
+.tmp-cc/
 
 # Editor and OS files
 .DS_Store

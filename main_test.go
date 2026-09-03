@@ -89,11 +89,6 @@ func installFakeOpenCodeClient(t *testing.T, responses []fakeUpstreamResponse) *
 	oldOCClientVer := ocClientVer
 	oldOCSessionID := ocSessionID
 	oldOCProjectID := ocProjectID
-	oldActiveSocks5 := activeSocks5
-	oldSocks5Client := socks5Client
-	oldSocks5ClientAddr := socks5ClientAddr
-	oldSocks5PaidDirect := socks5PaidDirect
-	oldSocks5Proxies := socks5Proxies
 
 	transport := &fakeRetryTransport{
 		t:         t,
@@ -106,14 +101,6 @@ func installFakeOpenCodeClient(t *testing.T, responses []fakeUpstreamResponse) *
 	goModelsCache = nil
 	modelMu.Unlock()
 
-	socks5Mu.Lock()
-	activeSocks5 = ""
-	socks5Client = nil
-	socks5ClientAddr = ""
-	socks5PaidDirect = false
-	socks5Proxies = nil
-	socks5Mu.Unlock()
-
 	ocInitMu.Lock()
 	ocInitDone = true
 	ocInitMu.Unlock()
@@ -121,19 +108,16 @@ func installFakeOpenCodeClient(t *testing.T, responses []fakeUpstreamResponse) *
 	ocSessionID = "ses_test"
 	ocProjectID = "project_test"
 
+	// 重新初始化 egress 以使用新的 httpClient
+	egress = NewEgressClient(httpClient)
+	egress.Configure(nil, "", false, false)
+
 	t.Cleanup(func() {
 		httpClient = oldHTTPClient
 		modelMu.Lock()
 		modelsCache = oldModelsCache
 		goModelsCache = oldGoModelsCache
 		modelMu.Unlock()
-		socks5Mu.Lock()
-		activeSocks5 = oldActiveSocks5
-		socks5Client = oldSocks5Client
-		socks5ClientAddr = oldSocks5ClientAddr
-		socks5PaidDirect = oldSocks5PaidDirect
-		socks5Proxies = oldSocks5Proxies
-		socks5Mu.Unlock()
 		ocInitMu.Lock()
 		ocInitDone = false
 		ocInitMu.Unlock()
@@ -360,50 +344,38 @@ func TestIsNonRetryableUpstreamError(t *testing.T) {
 
 func TestGetHTTPClientForTierSocks5PaidDirectDefaultUsesProxy(t *testing.T) {
 	oldHTTPClient := httpClient
-	oldProxies := socks5Proxies
-	oldActive := activeSocks5
-	oldPaidDirect := socks5PaidDirect
-	oldClient := socks5Client
-	oldClientAddr := socks5ClientAddr
 	t.Cleanup(func() {
 		httpClient = oldHTTPClient
-		socks5Mu.Lock()
-		socks5Proxies = oldProxies
-		activeSocks5 = oldActive
-		socks5PaidDirect = oldPaidDirect
-		socks5Client = oldClient
-		socks5ClientAddr = oldClientAddr
-		socks5Mu.Unlock()
 	})
 
 	httpClient = &http.Client{Timeout: 1}
-	socks5Mu.Lock()
-	socks5Proxies = []Socks5Proxy{{Addr: "127.0.0.1:1080", Name: "test"}}
-	activeSocks5 = "127.0.0.1:1080"
-	socks5PaidDirect = false
-	socks5Client = nil
-	socks5ClientAddr = ""
-	socks5Mu.Unlock()
+	egress = NewEgressClient(httpClient)
+	egress.Configure([]Socks5Proxy{{Addr: "127.0.0.1:1080", Name: "test"}}, "127.0.0.1:1080", false, false)
+	t.Cleanup(func() {
+		egress.Configure(nil, "", false, false)
+	})
 
-	paid := getHTTPClientForTier(TierPaid)
-	free := getHTTPClientForTier(TierFree)
-	if paid == httpClient {
+	// 默认 socks5_paid_direct=false → 付费和免费都走 SOCKS5
+	paid := egress.Get(EgressRequest{Auth: UpstreamAuth{Token: "sk-test", Mode: AuthRouteAuto}, ForceSwitch: false, BodyMap: nil, RequiredRegion: ""})
+	free := egress.Get(EgressRequest{Auth: UpstreamAuth{}, ForceSwitch: false, BodyMap: nil, RequiredRegion: ""})
+	if paid.Client == httpClient {
 		t.Fatal("default socks5_paid_direct=false should send paid traffic through SOCKS5")
 	}
-	if free == httpClient {
+	if free.Client == httpClient {
 		t.Fatal("free traffic should use SOCKS5 when active_socks5 is set")
 	}
-	if paid != free {
+	if paid.Client != free.Client {
 		t.Fatal("paid and free should share the cached SOCKS5 client when paid_direct is false")
 	}
 
-	socks5Mu.Lock()
-	socks5PaidDirect = true
-	socks5Mu.Unlock()
-	if getHTTPClientForTier(TierPaid) != httpClient {
+	// socks5_paid_direct=true → 付费直连，免费走 SOCKS5
+	egress.Configure([]Socks5Proxy{{Addr: "127.0.0.1:1080", Name: "test"}}, "127.0.0.1:1080", true, false)
+	paid2 := egress.Get(EgressRequest{Auth: UpstreamAuth{Token: "sk-test", Mode: AuthRouteAuto}, ForceSwitch: false, BodyMap: nil, RequiredRegion: ""})
+	free2 := egress.Get(EgressRequest{Auth: UpstreamAuth{}, ForceSwitch: false, BodyMap: nil, RequiredRegion: ""})
+	if paid2.Client != httpClient {
 		t.Fatal("socks5_paid_direct=true should keep paid traffic on the direct client")
 	}
-	if getHTTPClientForTier(TierFree) == httpClient {
+	if free2.Client == httpClient {
 		t.Fatal("free traffic should still use SOCKS5 when paid_direct is true")
 	}
 }
@@ -1056,29 +1028,13 @@ func TestConvertRequestRetentionOff(t *testing.T) {
 
 func withStickyProxyEnv(t *testing.T, proxies []Socks5Proxy, active string, sticky bool, paidDirect bool) {
 	t.Helper()
-	socks5Mu.Lock()
-	oldProxies := socks5Proxies
-	oldActive := activeSocks5
-	oldSticky := socks5Sticky
-	oldPaidDirect := socks5PaidDirect
-	socks5Proxies = proxies
-	activeSocks5 = active
-	socks5Sticky = sticky
-	socks5PaidDirect = paidDirect
-	socks5Mu.Unlock()
-	stickyMu.Lock()
-	stickyEntries = map[string]*stickyProxyEntry{}
-	stickyMu.Unlock()
+	// 初始化 egress（如果尚未初始化）
+	if egress == nil {
+		egress = NewEgressClient(httpClient)
+	}
+	egress.Configure(proxies, active, paidDirect, sticky)
 	t.Cleanup(func() {
-		socks5Mu.Lock()
-		socks5Proxies = oldProxies
-		activeSocks5 = oldActive
-		socks5Sticky = oldSticky
-		socks5PaidDirect = oldPaidDirect
-		socks5Mu.Unlock()
-		stickyMu.Lock()
-		stickyEntries = map[string]*stickyProxyEntry{}
-		stickyMu.Unlock()
+		egress.Configure(nil, "", false, false)
 	})
 }
 
@@ -1091,8 +1047,8 @@ func TestStickyKeyForRequest(t *testing.T) {
 	}{
 		{"paid token wins", UpstreamAuth{Token: "sk-abc"}, nil, "tok:sk-abc"},
 		{"public session user", UpstreamAuth{}, map[string]any{"user": "sess-42"}, "usr:sess-42"},
-		{"public no session falls back", UpstreamAuth{}, map[string]any{}, stickyPublicFallback},
-		{"public no body falls back", UpstreamAuth{}, nil, stickyPublicFallback},
+		{"public no session falls back", UpstreamAuth{}, map[string]any{}, stickyPublic},
+		{"public no body falls back", UpstreamAuth{}, nil, stickyPublic},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1106,19 +1062,19 @@ func TestStickyKeyForRequest(t *testing.T) {
 func TestGetHTTPClientStickyPinsSession(t *testing.T) {
 	withStickyProxyEnv(t, []Socks5Proxy{{Addr: "p1"}, {Addr: "p2"}, {Addr: "p3"}}, socks5RR, true, false)
 
-	c1 := getHTTPClientSticky(UpstreamAuth{Token: "tok-1"}, nil)
-	c2 := getHTTPClientSticky(UpstreamAuth{Token: "tok-1"}, nil)
-	if c1 != c2 {
+	r1 := egress.Get(EgressRequest{Auth: UpstreamAuth{Token: "tok-1"}, BodyMap: nil})
+	r2 := egress.Get(EgressRequest{Auth: UpstreamAuth{Token: "tok-1"}, BodyMap: nil})
+	if r1.Client != r2.Client {
 		t.Fatalf("same session got different clients")
 	}
-	u1 := getHTTPClientSticky(UpstreamAuth{}, map[string]any{"user": "sess-1"})
-	u2 := getHTTPClientSticky(UpstreamAuth{}, map[string]any{"user": "sess-1"})
-	if u1 != u2 {
+	u1 := egress.Get(EgressRequest{Auth: UpstreamAuth{}, BodyMap: map[string]any{"user": "sess-1"}})
+	u2 := egress.Get(EgressRequest{Auth: UpstreamAuth{}, BodyMap: map[string]any{"user": "sess-1"}})
+	if u1.Client != u2.Client {
 		t.Fatalf("same user session got different clients")
 	}
-	p1 := getHTTPClientSticky(UpstreamAuth{}, map[string]any{})
-	p2 := getHTTPClientSticky(UpstreamAuth{}, map[string]any{})
-	if p1 != p2 {
+	p1 := egress.Get(EgressRequest{Auth: UpstreamAuth{}, BodyMap: map[string]any{}})
+	p2 := egress.Get(EgressRequest{Auth: UpstreamAuth{}, BodyMap: map[string]any{}})
+	if p1.Client != p2.Client {
 		t.Fatalf("public fallback sessions should share one client")
 	}
 }
@@ -1127,17 +1083,15 @@ func TestInvalidateStickyProxyRebinds(t *testing.T) {
 	withStickyProxyEnv(t, []Socks5Proxy{{Addr: "p1"}, {Addr: "p2"}, {Addr: "p3"}}, socks5RR, true, false)
 
 	auth := UpstreamAuth{Token: "tok-1"}
-	_ = getHTTPClientSticky(auth, nil)
-	if got := len(stickyEntries); got != 1 {
-		t.Fatalf("sticky entries = %d, want 1", got)
+	r1 := egress.Get(EgressRequest{Auth: auth, BodyMap: nil})
+	if r1.key == "" {
+		t.Fatal("expected sticky key in result")
 	}
-	invalidateStickyProxy(auth, nil)
-	if got := len(stickyEntries); got != 0 {
-		t.Fatalf("sticky entries after invalidate = %d, want 0", got)
-	}
-	_ = getHTTPClientSticky(auth, nil)
-	if _, ok := stickyEntries["tok:tok-1"]; !ok {
-		t.Fatal("binding should be recreated after invalidate")
+	r1.Invalidate()
+	// 重新获取应该是新的绑定
+	r2 := egress.Get(EgressRequest{Auth: auth, BodyMap: nil})
+	if r2.key == "" {
+		t.Fatal("expected sticky key in result after re-bind")
 	}
 }
 
@@ -1145,26 +1099,23 @@ func TestInvalidateStickyProxyRotatesEgress(t *testing.T) {
 	withStickyProxyEnv(t, []Socks5Proxy{{Addr: "p1"}, {Addr: "p2"}, {Addr: "p3"}}, socks5RR, true, false)
 
 	auth := UpstreamAuth{Token: "tok-2"}
-	seen := map[int]bool{}
+	seen := map[*http.Client]bool{}
 	for i := 0; i < 4; i++ {
-		_ = getHTTPClientSticky(auth, nil)
-		stickyMu.Lock()
-		idx := stickyEntries["tok:tok-2"].proxyIdx
-		stickyMu.Unlock()
-		seen[idx] = true
-		invalidateStickyProxy(auth, nil)
+		r := egress.Get(EgressRequest{Auth: auth, BodyMap: nil})
+		seen[r.Client] = true
+		r.Invalidate()
 	}
 	if len(seen) < 2 {
-		t.Fatalf("egress did not rotate across rebinds: %v", seen)
+		t.Fatalf("egress did not rotate across rebinds: %d unique clients", len(seen))
 	}
 }
 
 func TestGetHTTPClientStickySkipsWhenDisabled(t *testing.T) {
 	withStickyProxyEnv(t, []Socks5Proxy{{Addr: "p1"}, {Addr: "p2"}}, socks5RR, false, false)
 
-	getHTTPClientSticky(UpstreamAuth{Token: "tok-1"}, nil)
-	if got := len(stickyEntries); got != 0 {
-		t.Fatalf("sticky disabled but entries = %d", got)
+	r := egress.Get(EgressRequest{Auth: UpstreamAuth{Token: "tok-1"}, BodyMap: nil})
+	if r.key != "" {
+		t.Fatalf("sticky disabled but got key in result")
 	}
 }
 

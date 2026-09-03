@@ -12,6 +12,7 @@ import (
 //   - exhausted 节点不参与探测（配额冷却到期由节点池清扫定时恢复）。
 //
 // 池为空时跳过。
+// probeInterval 设为 0 时禁用全部健康检查（包括 dead 节点复探）。
 func startNodeHealthCheck() {
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -20,7 +21,9 @@ func startNodeHealthCheck() {
 		for range ticker.C {
 			interval := proxyPool.healthInterval()
 			if interval <= 0 {
-				interval = defaultHealthInterval
+				// probeInterval 负数表示禁用健康检查
+				slog.Debug("node health check disabled")
+				continue
 			}
 			now := time.Now()
 

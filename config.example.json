@@ -2,6 +2,9 @@
   "model_alias": {
     "my-fast-model": "deepseek-v4-flash-free"
   },
+  "model_region_map": {
+    "muse-spark-1.2-contributor": "us"
+  },
   "reasoning_effort_map": {
     "minimal": "low",
     "medium": "medium",
