@@ -6,7 +6,6 @@
 
 ```bash
 make fmt
-make test
 make vet
 make build
 ```
@@ -20,7 +19,6 @@ make release-snapshot VERSION=v0.0.0-dev
 ## 开发原则
 
 - 优先保持现有 API 行为不变。
-- 对转换逻辑、配置逻辑和 release 脚本增加小而明确的测试或验证步骤。
 - 不要提交 `config.json`、`stats.json`、日志或 release 产物。
 - 文档和代码行为一起更新。
 
