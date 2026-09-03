@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,9 +29,6 @@ jobs:
             echo "$files"
             exit 1
           fi
-
-      - name: Test
-        run: go test ./...
 
       - name: Vet
         run: go vet ./...

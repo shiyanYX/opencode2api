@@ -129,7 +129,7 @@ rg 'promoted_reasoning=true' opencode2api.log
 ## 本地构建
 
 ```bash
-make test
+make fmt
 make vet
 make build
 ./bin/opencode2api -version
@@ -144,7 +144,7 @@ ls dist/
 
 ## 自动 Release
 
-推送 `v*` tag 后，GitHub Actions 会先运行一次格式、测试和 vet 检查，然后用 matrix 并发构建以下目标：
+推送 `v*` tag 后，GitHub Actions 会先运行一次格式和 vet 检查，然后用 matrix 并发构建以下目标：
 
 - `linux/amd64`
 - `linux/arm64`

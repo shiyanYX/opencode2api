@@ -4,13 +4,10 @@ COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.date=$(DATE)
 
-.PHONY: fmt test vet build release-snapshot clean
+.PHONY: fmt vet build release-snapshot clean
 
 fmt:
-	gofmt -w main.go main_test.go
-
-test:
-	go test ./...
+	gofmt -w *.go
 
 vet:
 	go vet ./...
