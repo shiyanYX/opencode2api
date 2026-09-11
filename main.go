@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,12 +38,14 @@ var httpClient = &http.Client{
 // mgmtClient 管理面专用 HTTP 客户端，使用系统默认 DNS 解析器，
 // 不受 mihomo ApplyConfig 的 DNS 劫持影响。
 // 用于 fetchModels / fetchModelsDevCatalog 等启动时管理请求。
+// 支持通过 HTTP_PROXY / HTTPS_PROXY 环境变量指定代理。
 var mgmtClient = &http.Client{
 	Timeout: 30 * time.Second,
 	Transport: &http.Transport{
 		MaxIdleConns:        10,
 		MaxIdleConnsPerHost: 5,
 		IdleConnTimeout:     30 * time.Second,
+		Proxy:               http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
 			KeepAlive: 15 * time.Second,
@@ -375,7 +378,23 @@ var (
 	modelsLoaded   bool
 	modelsDevMu    sync.RWMutex
 	modelsDevCache map[string]ModelLimit
+
+	// 免费模型文档缓存
+	freeModelDocsMu    sync.RWMutex
+	freeModelDocsCache map[string]bool
+	freeModelDocsTime  time.Time
+	freeModelsCacheFile = "free_models_cache.json"
 )
+
+// 默认免费模型列表（兜底用）
+var defaultFreeModels = map[string]bool{
+	"mimo-v2.5-free":                  true,
+	"ling-3.0-flash-fin-free":         true,
+	"nemotron-3-ultra-free":           true,
+	"nemotron-3.5-lightning-free":     true,
+	"big-pickle":                      true,
+	"muse-spark-1.3-contributor-free": true,
+}
 
 func fetchModels() ([]ModelInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
@@ -496,6 +515,157 @@ func refreshModelsDevCatalog(logOK bool) {
 	if logOK {
 		slog.Info("models.dev catalog loaded", "count", len(cat))
 	}
+}
+
+// ======================== 免费模型文档缓存 ========================
+
+// loadFreeModelsCache 从本地缓存加载免费模型列表
+func loadFreeModelsCache() map[string]bool {
+	data, err := os.ReadFile(freeModelsCacheFile)
+	if err != nil {
+		return nil
+	}
+	var models map[string]bool
+	if json.Unmarshal(data, &models) != nil {
+		return nil
+	}
+	return models
+}
+
+// saveFreeModelsCache 保存免费模型列表到本地缓存
+func saveFreeModelsCache(models map[string]bool) {
+	data, err := json.MarshalIndent(models, "", "  ")
+	if err != nil {
+		return
+	}
+	os.WriteFile(freeModelsCacheFile, data, 0644)
+}
+
+// fetchFreeModelsFromDocs 从 OpenCode Zen 文档抓取免费模型列表
+// 从定价表格中提取 Input 价格为 "Free" 的模型
+func fetchFreeModelsFromDocs() (map[string]bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET",
+		"https://docs.opencode.ai/docs/zen/", nil)
+	resp, err := mgmtClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	html := string(body)
+
+	models := make(map[string]bool)
+
+	// 从定价表格提取免费模型：格式 <tr><td>ModelName</td><td>Free</td>...
+	// 匹配 Input 列为 "Free" 的行
+	re := regexp.MustCompile(`<tr><td>([^<]+)</td><td>Free</td>`)
+	matches := re.FindAllStringSubmatch(html, -1)
+
+	for _, match := range matches {
+		if len(match) > 1 {
+			name := strings.TrimSpace(match[1])
+			modelID := modelNameToID(name)
+			if modelID != "" {
+				models[modelID] = true
+			}
+		}
+	}
+
+	if len(models) == 0 {
+		return nil, fmt.Errorf("no free models found in docs")
+	}
+
+	return models, nil
+}
+
+// modelNameToID 将文档模型名称转换为 API ID
+func modelNameToID(name string) string {
+	special := map[string]string{
+		"Big Pickle":                      "big-pickle",
+		"MiMo-V2.5 Free":                  "mimo-v2.5-free",
+		"Ling 3.0 Flash Fin Free":         "ling-3.0-flash-fin-free",
+		"Nemotron 3 Ultra Free":           "nemotron-3-ultra-free",
+		"Nemotron 3.5 Lightning Free":     "nemotron-3.5-lightning-free",
+		"Muse Spark 1.3 Contributor Free": "muse-spark-1.3-contributor-free",
+	}
+	if id, ok := special[name]; ok {
+		return id
+	}
+	return ""
+}
+
+// loadFallbackFreeModels 加载兜底免费模型列表
+// 优先级: 本地缓存 > 硬编码默认值
+func loadFallbackFreeModels() map[string]bool {
+	// 尝试读取本地缓存
+	if cache := loadFreeModelsCache(); cache != nil && len(cache) > 0 {
+		slog.Info("using cached free models", "count", len(cache))
+		return cache
+	}
+
+	// 使用硬编码默认值
+	slog.Info("using default free models", "count", len(defaultFreeModels))
+	return defaultFreeModels
+}
+
+// refreshFreeModelsDocs 刷新文档免费模型缓存（带重试）
+func refreshFreeModelsDocs() {
+	var models map[string]bool
+	var lastErr error
+
+	// 重试 3 次
+	for attempt := 0; attempt < 3; attempt++ {
+		fetched, err := fetchFreeModelsFromDocs()
+		if err == nil {
+			models = fetched
+			break
+		}
+		lastErr = err
+		slog.Warn("free models fetch failed", "attempt", attempt+1, "error", err)
+		time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
+	}
+
+	if models == nil {
+		// 全部失败，使用兜底策略
+		slog.Error("all fetch attempts failed, using fallback", "error", lastErr)
+		models = loadFallbackFreeModels()
+	} else {
+		// 成功，更新缓存
+		saveFreeModelsCache(models)
+	}
+
+	freeModelDocsMu.Lock()
+	freeModelDocsCache = models
+	freeModelDocsTime = time.Now()
+	freeModelDocsMu.Unlock()
+
+	slog.Info("free models loaded", "count", len(models))
+}
+
+// isFreeModelFromDocs 检查模型是否在文档免费列表中
+func isFreeModelFromDocs(modelID string) bool {
+	freeModelDocsMu.RLock()
+	defer freeModelDocsMu.RUnlock()
+
+	// 缓存为空或超过 1 小时，异步刷新
+	if freeModelDocsCache == nil || time.Since(freeModelDocsTime) > time.Hour {
+		go refreshFreeModelsDocs()
+	}
+
+	// 缓存为空时使用默认值
+	if freeModelDocsCache == nil {
+		return defaultFreeModels[modelID]
+	}
+
+	return freeModelDocsCache[modelID]
 }
 
 func containsModelWithID(models []ModelInfo, modelID string) bool {
@@ -622,6 +792,8 @@ var (
 	port                 string
 	configPath           = "config.json"
 	modelAlias           = map[string]string{}
+	editedFreeAliases    = map[string]string{} // 用户自定义的免费模型改名映射
+	hiddenFreeAliases    = map[string]bool{}   // 已禁用的免费模型（对外不暴露）
 	reasoningEffortMap   = map[string]string{}
 	forceDisableThinking bool
 	apiKey               string // 统一网关密钥（config.api_key），空 = 不启用
@@ -794,6 +966,7 @@ type ToolFunction struct {
 type AppConfig struct {
 	ModelAlias           map[string]string `json:"model_alias"`
 	HiddenFreeAliases    []string          `json:"hidden_free_aliases,omitempty"`
+	EditedFreeAliases    map[string]string `json:"edited_free_aliases,omitempty"`
 	ReasoningEffortMap   map[string]string `json:"reasoning_effort_map"`
 	ForceDisableThinking bool              `json:"force_disable_thinking"`
 	// ModelRegionMap 定义模型的区域限制：键是上游模型 ID（支持 "*" 通配），值是所需区域（如 "us"）。
@@ -999,6 +1172,13 @@ func applyConfig(cfg AppConfig) {
 	if cfg.ModelAlias != nil {
 		modelAlias = cfg.ModelAlias
 	}
+	if cfg.EditedFreeAliases != nil {
+		editedFreeAliases = cfg.EditedFreeAliases
+	}
+	hiddenFreeAliases = map[string]bool{}
+	for _, id := range cfg.HiddenFreeAliases {
+		hiddenFreeAliases[id] = true
+	}
 	if cfg.ModelRegionMap != nil {
 		modelRegionMap = cfg.ModelRegionMap
 	}
@@ -1081,9 +1261,27 @@ func resolveModel(model string) string {
 	m := strings.TrimSpace(model)
 	configMu.RLock()
 	alias, ok := modelAlias[m]
+	ef := editedFreeAliases
+	hfa := hiddenFreeAliases
 	configMu.RUnlock()
 	if ok {
 		return alias
+	}
+	// 检查用户自定义的免费模型改名：如果客户端发来的名字在 editedFree 的值中，反向映射回原始 ID
+	if ef != nil {
+		for originalID, editedName := range ef {
+			if editedName == m {
+				// 已禁用的模型不映射
+				if hfa[originalID] {
+					return m
+				}
+				return originalID
+			}
+		}
+	}
+	// 已禁用的模型不映射到 -free 版本
+	if hfa[m] {
+		return m
 	}
 	// Clients see free models without the "-free" suffix from /v1/models.
 	// Map the display name back to the upstream free ID whenever that free
@@ -2166,14 +2364,14 @@ func (auth UpstreamAuth) shouldUseGoEndpoint(modelID string) bool {
 	}
 }
 
-// isFreeModel 判断模型是否属于免费模型（以 -free 结尾）
+// isFreeModel 判断模型是否属于免费模型（从文档列表判断）
 func isFreeModel(modelID string) bool {
-	return strings.HasSuffix(modelID, "-free")
+	return isFreeModelFromDocs(modelID)
 }
 
 // publicFacingModelID strips the upstream "-free" suffix for client-visible catalogs.
 func publicFacingModelID(modelID string) string {
-	if isFreeModel(modelID) {
+	if strings.HasSuffix(modelID, "-free") {
 		return strings.TrimSuffix(modelID, "-free")
 	}
 	return modelID
@@ -3117,6 +3315,20 @@ func listModelsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	allModels := replaceModelIDsWithAliases(combinedModels, aliases)
 
+	// 过滤已禁用的免费模型
+	configMu.RLock()
+	hfa := hiddenFreeAliases
+	configMu.RUnlock()
+	if len(hfa) > 0 {
+		visible := make([]ModelInfo, 0, len(allModels))
+		for _, m := range allModels {
+			if !hfa[m.ID] {
+				visible = append(visible, m)
+			}
+		}
+		allModels = visible
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"object": "list",
@@ -3138,12 +3350,23 @@ func replaceModelIDsWithAliases(models []ModelInfo, aliases map[string]string) [
 		sort.Strings(aliasesByUpstream[upstream])
 	}
 
+	// 读取用户自定义的免费模型改名映射
+	configMu.RLock()
+	ef := editedFreeAliases
+	configMu.RUnlock()
+
 	result := make([]ModelInfo, 0, len(models))
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
 		visibleIDs := aliasesByUpstream[model.ID]
 		if len(visibleIDs) == 0 {
-			visibleIDs = []string{publicFacingModelID(model.ID)}
+			// 先检查用户改名映射
+			defaultID := publicFacingModelID(model.ID)
+			if editedName, ok := ef[defaultID]; ok && editedName != "" {
+				visibleIDs = []string{editedName}
+			} else {
+				visibleIDs = []string{defaultID}
+			}
 		}
 		for _, visibleID := range visibleIDs {
 			if _, exists := seen[visibleID]; exists {
@@ -3228,10 +3451,20 @@ func adminModelsHandler(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// 附带免费模型列表（从文档缓存），供前端生成完整自动映射
+	freeModelDocsMu.RLock()
+	freeIDs := make([]string, 0, len(freeModelDocsCache))
+	for id := range freeModelDocsCache {
+		freeIDs = append(freeIDs, id)
+	}
+	freeModelDocsMu.RUnlock()
+	sort.Strings(freeIDs)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"object": "list",
-		"data":   allModels,
+		"object":      "list",
+		"data":        allModels,
+		"free_models": freeIDs,
 	})
 }
 
@@ -6070,6 +6303,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"model_alias":                   merged.ModelAlias,
 			"hidden_free_aliases":           merged.HiddenFreeAliases,
+			"edited_free_aliases":           merged.EditedFreeAliases,
 			"reasoning_effort_map":          merged.ReasoningEffortMap,
 			"force_disable_thinking":        merged.ForceDisableThinking,
 			"model_region_map":              merged.ModelRegionMap,
@@ -6141,6 +6375,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 type configPatch struct {
 	ModelAlias                 map[string]string    `json:"model_alias"`
 	HiddenFreeAliases          *[]string            `json:"hidden_free_aliases"`
+	EditedFreeAliases          *map[string]string   `json:"edited_free_aliases"`
 	ReasoningEffortMap         map[string]string    `json:"reasoning_effort_map"`
 	ForceDisableThinking       *bool                `json:"force_disable_thinking"`
 	ModelRegionMap             map[string]string    `json:"model_region_map"`
@@ -6172,6 +6407,9 @@ func mergeAppConfig(base, patch AppConfig) AppConfig {
 	}
 	if patch.HiddenFreeAliases != nil {
 		out.HiddenFreeAliases = patch.HiddenFreeAliases
+	}
+	if patch.EditedFreeAliases != nil {
+		out.EditedFreeAliases = patch.EditedFreeAliases
 	}
 	if patch.ReasoningEffortMap != nil {
 		out.ReasoningEffortMap = patch.ReasoningEffortMap
@@ -6247,6 +6485,9 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	}
 	if patch.HiddenFreeAliases != nil {
 		out.HiddenFreeAliases = *patch.HiddenFreeAliases
+	}
+	if patch.EditedFreeAliases != nil {
+		out.EditedFreeAliases = *patch.EditedFreeAliases
 	}
 	if patch.ReasoningEffortMap != nil {
 		out.ReasoningEffortMap = patch.ReasoningEffortMap
@@ -7350,7 +7591,7 @@ input,select,textarea{font-family:inherit;color:inherit}
     <div class="card">
       <h2>模型映射</h2>
       <div style="overflow-x:auto"><table class="tbl" id="aliasTable"><thead><tr><th style="width:38%">别名（请求名）</th><th style="width:44%">实际模型（上游名）</th><th style="width:18%"></th></tr></thead><tbody></tbody></table></div>
-      <div style="font-size:12px;color:var(--text-sec);margin:8px 2px 0;line-height:1.6">以 <code style="font-family:var(--mono)">-free</code> 结尾的免费模型自动映射（请求名 → 上游名），跟随上游模型列表变动；点击「隐藏」可跳过已下线模型，「添加别名」可自定义映射并覆盖自动项。</div>
+      <div style="font-size:12px;color:var(--text-sec);margin:8px 2px 0;line-height:1.6">以 <code style="font-family:var(--mono)">-free</code> 结尾的免费模型自动映射（请求名 → 上游名），跟随上游模型列表变动；点击「设置」可自定义显示名称，「禁用」可跳过已下线模型，「添加别名」可自定义映射并覆盖自动项。</div>
       <div class="actions"><button class="btn btn-secondary" onclick="addAliasRow()">添加别名</button><button class="btn btn-primary" onclick="saveConfig()">保存全部</button></div>
     </div>
     <div class="card">
@@ -7459,7 +7700,7 @@ input,select,textarea{font-family:inherit;color:inherit}
    ============================================================ */
 const q=s=>document.querySelector(s);
 const qa=s=>document.querySelectorAll(s);
-let cfg={},nodeData=[],subData=[],wsData=[],wsInfo={},nodeEditors=[],modelList=[],filter='all';
+let cfg={},nodeData=[],subData=[],wsData=[],wsInfo={},nodeEditors=[],modelList=[],freeModelIDs=[],filter='all';
 let DEMO_MODE=false,demoLogTimer=null;
 let trendsData=[],trendRange='today',trendTimer=null;
 
@@ -7517,10 +7758,10 @@ async function loadStats(){
 }
 async function loadCaps(){
   if(DEMO_MODE){renderCaps(DEMO.caps);return}
-  try{const r=await fetch('/api/models');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();renderCaps((d.data||[]).filter(x=>(x.id||x).endsWith('-free')).map(x=>{if(typeof x==='string')return{id:x};return{id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities}}).filter(x=>x.id))}
+  try{const r=await fetch('/api/models');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();const freeSet=new Set(d.free_models||[]);renderCaps((d.data||[]).filter(x=>freeSet.has(x.id)).map(x=>{if(typeof x==='string')return{id:x};return{id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities}}).filter(x=>x.id))}
   catch(e){q('#capTable').innerHTML='<thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadCaps()">重试</button></td></tr></tbody>'}
 }
-async function fetchModelList(){if(DEMO_MODE){modelList=DEMO.models.slice().sort();return}try{let m=await fetch('/api/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort()}else if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}}catch(e){}}
+async function fetchModelList(){if(DEMO_MODE){modelList=DEMO.models.slice().sort();return}try{let m=await fetch('/api/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort();freeModelIDs=(d.free_models||[]).slice().sort()}else if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}}catch(e){}}
 function renderOverview(d){
   q('#ovTotal').textContent=d.nodes?d.nodes.length:0;
   q('#ovHealthy').textContent=d.healthy??0;
@@ -7540,7 +7781,7 @@ function renderCaps(rows){
   rows=(rows||[]).filter(x=>x&&x.id).sort((a,b)=>a.id.localeCompare(b.id));
   let h='';
   if(!rows.length){h='<tr><td colspan="4" class="empty-hint">暂无模型数据</td></tr>'}
-  else{for(const m of rows){const isFree=m.id.endsWith('-free');const label=isFree?esc(m.id.slice(0,-5)):esc(m.id);const badge=isFree?'<span class="auto-badge">免费</span>':'';h+='<tr'+(isFree?' class="row-auto"':'')+'><td class="mono">'+label+badge+'</td><td class="num">'+fmtTokens(m.cw)+'</td><td class="num">'+fmtTokens(m.mo)+'</td><td>'+fmtModalities(m.mod)+'</td></tr>'}}
+  else{for(const m of rows){const label=esc(m.id);const badge='<span class="auto-badge">免费</span>';h+='<tr class="row-auto"><td class="mono">'+label+badge+'</td><td class="num">'+fmtTokens(m.cw)+'</td><td class="num">'+fmtTokens(m.mo)+'</td><td>'+fmtModalities(m.mod)+'</td></tr>'}}
   q('#capTable').innerHTML='<thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody>'+h+'</tbody>';
 }
 
@@ -7894,18 +8135,44 @@ async function saveQuotaConfig(){
    配置编辑（代理与模型）
    ============================================================ */
 function modelSelectHtml(selected){let h='<select data-field="val" class="m-select"><option value="">-- 选择模型 --</option>';for(const m of modelList){h+='<option value="'+esc(m)+'"'+(selected===m?' selected':'')+'>'+esc(m)+'</option>'}h+='</select>';return h}
-function freeAutoAliases(){const out=[];for(const m of modelList){if(typeof m==='string'&&m.endsWith('-free'))out.push({alias:m.slice(0,-5),upstream:m})}out.sort((a,b)=>a.alias.localeCompare(b.alias));return out}
+function freeAutoAliases(){
+  const out=[];
+  // 用后端返回的 free_models 列表生成自动映射
+  for(const id of freeModelIDs){
+    if(id.endsWith('-free')){
+      // 以 -free 结尾：客户端看到去掉后缀的名字
+      out.push({alias:id.slice(0,-5), upstream:id});
+    }else{
+      // 不以 -free 结尾（如 big-pickle）：客户端直接使用原始 ID
+      out.push({alias:id, upstream:id});
+    }
+  }
+  // 兜底：如果 freeModelIDs 为空，回退到旧逻辑（从 modelList 过滤 -free）
+  if(!out.length){
+    for(const m of modelList){
+      if(typeof m==='string'&&m.endsWith('-free'))out.push({alias:m.slice(0,-5),upstream:m});
+    }
+  }
+  out.sort((a,b)=>a.alias.localeCompare(b.alias));
+  return out;
+}
 function renderAliasTable(){
   const tb=q('#aliasTable tbody');
   const manual=cfg.model_alias||{};
   const hidden=new Set(cfg.hidden_free_aliases||[]);
+  const editedAliases=cfg.edited_free_aliases||{};
   const auto=freeAutoAliases().filter(a=>!hidden.has(a.alias));
   const hiddenRows=freeAutoAliases().filter(a=>hidden.has(a.alias));
   const ks=Object.keys(manual);
   if(!auto.length&&!ks.length&&!hiddenRows.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置 · 免费模型自动映射，点「添加别名」可自定义</td></tr>';return}
   let h='';
-  for(const a of auto)h+='<tr data-auto="1" class="row-auto"><td><span class="auto-name">'+esc(a.alias)+'</span></td><td><span class="auto-up">'+esc(a.upstream)+'</span><span class="auto-badge">自动</span></td><td class="acts"><span class="auto-hide" onclick="hideAutoAlias(\''+esc(a.alias)+'\')" title="隐藏此自动映射">隐藏</span></td></tr>';
-  for(const a of hiddenRows)h+='<tr data-auto="1" class="row-auto" style="opacity:.45"><td><span class="auto-name">'+esc(a.alias)+'</span></td><td><span class="auto-up">'+esc(a.upstream)+'</span><span class="auto-badge" style="background:var(--bg-2);color:var(--text-ter)">已隐藏</span></td><td class="acts"><span class="auto-hide" onclick="unhideAutoAlias(\''+esc(a.alias)+'\')" title="取消隐藏">取消隐藏</span></td></tr>';
+  for(const a of auto){
+    const displayAlias=editedAliases[a.alias]||a.alias;
+    const isEdited=!!editedAliases[a.alias];
+    const editedBadge=isEdited?'<span class="auto-badge" style="background:var(--accent);color:#fff">已自定义</span>':'';
+    h+='<tr data-auto="1" class="row-auto"><td><span class="auto-name">'+esc(displayAlias)+'</span>'+editedBadge+'</td><td><span class="auto-up">'+esc(a.upstream)+'</span><span class="auto-badge">自动</span></td><td class="acts"><span class="auto-hide" onclick="renameAutoAlias(\''+esc(a.alias)+'\')" title="设置显示名称">设置</span><span class="auto-hide" onclick="hideAutoAlias(\''+esc(a.alias)+'\')" title="禁用此模型的对外暴露">禁用</span></td></tr>';
+  }
+  for(const a of hiddenRows)h+='<tr data-auto="1" class="row-auto" style="opacity:.45"><td><span class="auto-name">'+esc(a.alias)+'</span><span class="auto-badge" style="background:var(--bg-2);color:var(--text-ter)">已禁用</span></td><td><span class="auto-up">'+esc(a.upstream)+'</span></td><td class="acts"><span class="auto-hide" onclick="unhideAutoAlias(\''+esc(a.alias)+'\')" title="恢复此模型">启用</span></td></tr>';
   h+=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key" placeholder="例如: gpt-5.5"></td><td>'+modelSelectHtml(manual[k])+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>').join('');
   tb.innerHTML=h;
 }
@@ -7918,6 +8185,31 @@ function unhideAutoAlias(alias){
   cfg.hidden_free_aliases=(cfg.hidden_free_aliases||[]).filter(a=>a!==alias);
   saveConfig();
   renderAliasTable();
+}
+function renameAutoAlias(alias){
+  if(!cfg.edited_free_aliases)cfg.edited_free_aliases={};
+  const current=cfg.edited_free_aliases[alias]||alias;
+  // 创建自定义对话框
+  const overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML='<div style="background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:24px;width:360px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,.3)"><div style="font-size:16px;font-weight:600;margin-bottom:12px">设置模型显示名称</div><div style="font-size:13px;color:var(--text-sec);margin-bottom:4px">原始 ID: <code>'+esc(alias)+'</code></div><div style="font-size:13px;color:var(--text-sec);margin-bottom:12px">上游模型: <code>'+esc(alias)+'</code></div><input id="renameInput" value="'+esc(current)+'" style="width:100%;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg-2);color:var(--text);font-size:14px;box-sizing:border-box" placeholder="输入显示名称"><div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end"><button id="renameCancel" style="padding:6px 16px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);cursor:pointer;font-size:13px">取消</button><button id="renameReset" style="padding:6px 16px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text-sec);cursor:pointer;font-size:13px">恢复默认</button><button id="renameOk" style="padding:6px 16px;border:none;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer;font-size:13px">确定</button></div></div>';
+  document.body.appendChild(overlay);
+  const inp=overlay.querySelector('#renameInput');
+  inp.focus();inp.select();
+  const close=()=>overlay.remove();
+  overlay.querySelector('#renameCancel').onclick=close;
+  overlay.querySelector('#renameOk').onclick=()=>{
+    const v=inp.value.trim();
+    if(v&&v!==alias){cfg.edited_free_aliases[alias]=v}
+    else if(v===alias){delete cfg.edited_free_aliases[alias]}
+    saveConfig();renderAliasTable();close();
+  };
+  overlay.querySelector('#renameReset').onclick=()=>{
+    delete cfg.edited_free_aliases[alias];
+    saveConfig();renderAliasTable();close();
+  };
+  overlay.onclick=e=>{if(e.target===overlay)close()};
+  inp.onkeydown=e=>{if(e.key==='Enter')overlay.querySelector('#renameOk').click();if(e.key==='Escape')close()};
 }
 function addAliasRow(){const tb=q('#aliasTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: gpt-5.5" data-field="key"></td><td>'+modelSelectHtml('')+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>';tb.appendChild(tr)}
 function delAlias(b){b.closest('tr').remove()}
@@ -7934,7 +8226,7 @@ function collectSocks5(){const r=[];qa('#socks5Table tbody tr').forEach(tr=>{con
 function renderSocks5Select(){const sel=q('#activeSocks5');sel.innerHTML='<option value="">直连（不使用代理）</option>';(cfg.socks5_proxies||[]).forEach(p=>{if(p.addr){const opt=document.createElement('option');opt.value=p.addr;opt.textContent=p.name?p.name+' ('+p.addr+')':p.addr;sel.appendChild(opt)}});if((cfg.socks5_proxies||[]).length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cfg.active_socks5||'';q('#socks5_paid_direct').value=cfg.socks5_paid_direct?'1':'0'}
 async function saveConfig(){
   collectEfforts();collectAliases();collectSocks5();
-  const body={model_alias:cfg.model_alias,hidden_free_aliases:collectHidden(),reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:q('#force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:q('#activeSocks5').value,socks5_paid_direct:q('#socks5_paid_direct').value==='1',api_key:q('#apiKeyInput').value};
+  const body={model_alias:cfg.model_alias,hidden_free_aliases:collectHidden(),edited_free_aliases:cfg.edited_free_aliases||{},reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:q('#force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:q('#activeSocks5').value,socks5_paid_direct:q('#socks5_paid_direct').value==='1',api_key:q('#apiKeyInput').value};
   if(DEMO_MODE){cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存（演示）','success');return}
   try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}
 }
@@ -8282,6 +8574,11 @@ func main() {
 	loadTokenStats()
 	slog.Info("config loaded", "path", configPath)
 	initOCSession()
+
+	// 启动时先用默认值，异步刷新文档
+	freeModelDocsCache = defaultFreeModels
+	go refreshFreeModelsDocs()
+
 	models, err := fetchModels()
 	if err != nil {
 		slog.Warn("failed to fetch models on startup", "error", err)

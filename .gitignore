@@ -3,6 +3,7 @@ config.json
 stats.json
 proxy_state.json
 call_log.jsonl
+free_models_cache.json
 *.log
 *.log.gz
 
