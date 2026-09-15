@@ -2511,11 +2511,22 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				"duration_ms", durationMs,
 				"attempt_index", attempt,
 				"retry_reason", retryReason,
+				"node", nodeFp,
+				"node_name", proxyPool.nameOf(nodeFp),
 				"error", err.Error(),
 			)
+			// 连接错误（EOF 等）：标记节点为 dead，避免后续请求继续命中坏节点。
+			// 无论是否还有重试预算都要标记，否则最后一次失败会让坏节点长期留在池中。
+			if nodeFp != "" {
+				proxyPool.mark(nodeFp, NodeDead, "connect_error:"+err.Error())
+			}
 			if canRetry {
+				if nodeFp != "" {
+					callLogEvent(ctx, "switch", nodeFp, "connect_error:"+err.Error())
+				}
 				client.CloseIdleConnections()
 				egResult.Invalidate()
+				nodeSwitchPending = true
 				retryCount++
 				continue
 			}
@@ -2741,11 +2752,22 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				"duration_ms", durationMs,
 				"attempt_index", attempt,
 				"retry_reason", retryReason,
+				"node", nodeFp,
+				"node_name", proxyPool.nameOf(nodeFp),
 				"error", err.Error(),
 			)
+			// 连接错误（EOF 等）：标记节点为 dead，避免后续请求继续命中坏节点。
+			// 无论是否还有重试预算都要标记，否则最后一次失败会让坏节点长期留在池中。
+			if nodeFp != "" {
+				proxyPool.mark(nodeFp, NodeDead, "connect_error:"+err.Error())
+			}
 			if canRetry {
+				if nodeFp != "" {
+					callLogEvent(ctx, "switch", nodeFp, "connect_error:"+err.Error())
+				}
 				client.CloseIdleConnections()
 				egResult.Invalidate()
+				nodeSwitchPending = true
 				retryCount++
 				continue
 			}
@@ -8351,7 +8373,7 @@ function clVisible(){
   return callLogData.filter(r=>{
     if(only&&!clHasIssue(r))return false;
     if(date&&(r.ts||'').slice(0,10)!==date)return false;
-    if(kw){const hay=[r.model||'',r.path||'',r.err_msg||'',r.req_id||''].join(' ').toLowerCase();if(!hay.includes(kw))return false}
+    if(kw){const hay=[r.model||'',r.path||'',r.err_msg||'',r.req_id||'',(r.node_names||[]).join(' '),(r.nodes||[]).join(' ')].join(' ').toLowerCase();if(!hay.includes(kw))return false}
     return true;
   });
 }
@@ -8378,18 +8400,27 @@ function clSetView(v){
   for(const id of ['clViewList','clViewHour','clViewNode']){const el=q('#'+id);el.className='btn btn-sm'+(id==='clView'+v.charAt(0).toUpperCase()+v.slice(1)?'':' btn-ghost')}
   clRefreshView();
 }
+function clNodeChain(r){
+  const fps=r.nodes||[],names=r.node_names||[];
+  return fps.map((fp,i)=>names[i]||fp).join(' → ');
+}
+function clNodeLabel(ev){
+  const name=ev.node_name||'',fp=ev.node||'';
+  if(!name&&!fp)return '';
+  return '<span class="cl-ev-node" title="'+esc(fp)+'">'+esc(name||fp)+'</span> ';
+}
 function clRenderList(visible){
   const el=q('#clList');
   if(!visible.length){el.innerHTML='<div class="cl-empty">'+(callLogData.length?'没有匹配的日志':'暂无调用日志 · 发起一次 /v1 请求后在此查看结构化调用记录')+'</div>';return}
   el.innerHTML=visible.map(r=>{
     const issue=clHasIssue(r),exp=callLogExpanded[r.req_id];
-    const nodes=(r.nodes||[]).join(' → ');
+    const nodes=clNodeChain(r);
     const badge=r.status==='ok'?'<span class="cl-badge ok">【成功】</span>':'<span class="cl-badge fail">【失败】</span>';
     const tag=issue?'<span class="cl-issue-tag">'+clIssueLabel(r)+'</span>':'';
     const chev=issue?(exp?'▾':'▸'):'';
     let body='';
     if(issue&&exp){
-      const evs=(r.events||[]).map(ev=>'<div class="cl-ev"><span class="cl-ev-time">'+clFmtTime(ev.at)+'</span><span class="cl-ev-tag '+(ev.type||'').replace(/\./g,'_')+'">'+esc(ev.type)+'</span><span>'+(ev.node?'<span class="cl-ev-node">'+esc(ev.node)+'</span> ':'')+(ev.detail?'<span class="cl-ev-detail">'+esc(ev.detail)+'</span>':'')+'</span></div>').join('');
+      const evs=(r.events||[]).map(ev=>'<div class="cl-ev"><span class="cl-ev-time">'+clFmtTime(ev.at)+'</span><span class="cl-ev-tag '+(ev.type||'').replace(/\./g,'_')+'">'+esc(ev.type)+'</span><span>'+clNodeLabel(ev)+(ev.detail?'<span class="cl-ev-detail">'+esc(ev.detail)+'</span>':'')+'</span></div>').join('');
       body='<div class="cl-body"><div class="cl-meta">req_id: '+esc(r.req_id||'-')+' · '+esc(r.path||'/v1/chat/completions')+' · stream: '+(r.stream?'是':'否')+' · 路由: '+esc(r.route_mode||'-')+(r.err_msg?'<span class="err"> · 错误: '+esc(r.err_msg)+'</span>':'')+'</div><div class="cl-meta">token: 输入 '+(r.prompt_tokens||0)+' / 输出 '+(r.completion_tokens||0)+' · 耗时 '+clFmtDur(r.duration_ms)+'</div><div class="cl-events">'+(evs||'<span style="color:var(--text-ter)">无事件明细</span>')+'</div></div>';
     }
     return '<div class="cl-item'+(issue?' issue':'')+'"><button class="cl-head" '+(issue?'onclick="clToggle(\''+r.req_id+'\')"':'')+'><span class="cl-badge '+(r.status==='ok'?'ok':'fail')+'">'+(r.status==='ok'?'【成功】':'【失败】')+'</span>'+tag+'<span class="cl-time">'+clFmtTime(r.ts)+'</span><span class="cl-model">'+esc(r.model||'-')+'</span>'+(nodes?'<span class="cl-nodes">'+esc(nodes)+'</span>':'')+'<span class="cl-dur">'+clFmtDur(r.duration_ms)+'</span><span style="flex:none;color:var(--text-ter)">'+chev+'</span></button>'+body+'</div>';
@@ -8414,7 +8445,8 @@ function clRenderNode(visible){
   const el=q('#clNode');
   const m=new Map();
   for(const r of visible){
-    const node=(r.nodes&&r.nodes.length?r.nodes[r.nodes.length-1]:null)||'未知';
+    const last=r.nodes&&r.nodes.length?r.nodes.length-1:-1;
+    const node=last>=0?((r.node_names&&r.node_names[last])||r.nodes[last]):'未知';
     let s=m.get(node);if(!s){s={node,req:0,ok:0,totalMs:0,issue:0};m.set(node,s)}
     s.req++;if(r.status==='ok')s.ok++;s.totalMs+=r.duration_ms||0;s.issue+=(r.events||[]).filter(e=>CL_ISSUE_TYPES.includes(e.type)).length;
   }
