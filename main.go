@@ -380,9 +380,9 @@ var (
 	modelsDevCache map[string]ModelLimit
 
 	// 免费模型文档缓存
-	freeModelDocsMu    sync.RWMutex
-	freeModelDocsCache map[string]bool
-	freeModelDocsTime  time.Time
+	freeModelDocsMu     sync.RWMutex
+	freeModelDocsCache  map[string]bool
+	freeModelDocsTime   time.Time
 	freeModelsCacheFile = "free_models_cache.json"
 )
 
