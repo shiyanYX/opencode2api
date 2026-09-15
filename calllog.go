@@ -17,10 +17,11 @@ import (
 )
 
 type CallEvent struct {
-	Type   string `json:"type"`
-	Node   string `json:"node,omitempty"`
-	Detail string `json:"detail,omitempty"`
-	At     string `json:"at,omitempty"`
+	Type     string `json:"type"`
+	Node     string `json:"node,omitempty"`      // 节点指纹（精确定位）
+	NodeName string `json:"node_name,omitempty"` // 节点显示名（快速定位）
+	Detail   string `json:"detail,omitempty"`
+	At       string `json:"at,omitempty"`
 }
 
 type CallRecord struct {
@@ -30,7 +31,8 @@ type CallRecord struct {
 	Model            string      `json:"model,omitempty"`
 	Stream           bool        `json:"stream,omitempty"`
 	RouteMode        string      `json:"route_mode,omitempty"`
-	Nodes            []string    `json:"nodes,omitempty"`
+	Nodes            []string    `json:"nodes,omitempty"`      // 节点指纹链（按首次使用顺序）
+	NodeNames        []string    `json:"node_names,omitempty"` // 与 Nodes 对应的显示名链
 	Events           []CallEvent `json:"events,omitempty"`
 	Status           string      `json:"status,omitempty"`
 	PromptTokens     int64       `json:"prompt_tokens,omitempty"`
@@ -216,16 +218,20 @@ func (cr *callRecorder) event(typ, node, detail string) {
 	if cr == nil {
 		return
 	}
+	// 指纹 → 可读节点名：外部（面板/日志消费方）无需再查节点池即可定位问题节点。
+	name := proxyPool.nameOf(node)
 	cr.mu.Lock()
 	if node != "" && !cr.seenNodes[node] {
 		cr.seenNodes[node] = true
 		cr.rec.Nodes = append(cr.rec.Nodes, node)
+		cr.rec.NodeNames = append(cr.rec.NodeNames, name)
 	}
 	cr.rec.Events = append(cr.rec.Events, CallEvent{
-		Type:   typ,
-		Node:   node,
-		Detail: detail,
-		At:     time.Now().Format("2006-01-02T15:04:05.000Z07:00"),
+		Type:     typ,
+		Node:     node,
+		NodeName: name,
+		Detail:   detail,
+		At:       time.Now().Format("2006-01-02T15:04:05.000Z07:00"),
 	})
 	cr.mu.Unlock()
 }

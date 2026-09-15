@@ -670,6 +670,20 @@ func (p *nodePool) currentFp() string {
 	return p.activeID
 }
 
+// nameOf 返回节点指纹对应的显示名（未命中返回空串）。
+// 供调用日志等把指纹翻译成可读节点名，便于外部快速定位问题节点。
+func (p *nodePool) nameOf(fp string) string {
+	if fp == "" {
+		return ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if n := p.byID[fp]; n != nil {
+		return n.Name
+	}
+	return ""
+}
+
 // testNodeClient 测试钩子：非 nil 时优先构造节点客户端（供集成测试注入 fake）。
 var testNodeClient func(n *ProxyNode) *http.Client
 
