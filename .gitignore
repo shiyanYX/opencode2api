@@ -28,5 +28,7 @@ opencode2api.exe
 .vscode/
 *.swp
 .env
+# 本地部署配置（含真实凭据）；仓库只保留 docker-compose.example.yml 模板
+docker-compose.yml
 .gocache/
 .gotmp/

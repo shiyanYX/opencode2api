@@ -1,0 +1,31 @@
+# opencode2api 部署模板 —— 不含任何真实凭据，可安全提交到仓库。
+#
+# 用法：
+#   1. cp docker-compose.example.yml docker-compose.yml
+#   2. 在同目录创建 .env（已被 .gitignore 忽略），至少写入：
+#        OPENCODE2API_PASSWORD=<你的强密码>
+#   3. docker compose up -d
+#
+# docker compose 会自动读取同目录下的 .env 做变量插值；
+# 变量未设置时会回退到下面给出的默认值（OPENCODE2API_PASSWORD 除外，必须显式设置）。
+
+services:
+  opencode2api:
+    image: ${OPENCODE2API_IMAGE:-ghcr.io/shiyanyx/opencode2api:latest}
+    container_name: ${OPENCODE2API_CONTAINER_NAME:-opencode2api}
+    restart: unless-stopped
+    ports:
+      - "${OPENCODE2API_HTTP_PORT:-8000}:8000"
+    volumes:
+      - opencode2api-data:/data
+    environment:
+      OPENCODE2API_PORT: "8000"
+      OPENCODE2API_CONFIG: /data/config.json
+      # 必须通过 .env 或环境变量提供，模板中不写任何默认密码。
+      OPENCODE2API_PASSWORD: ${OPENCODE2API_PASSWORD:?请在 .env 中设置 OPENCODE2API_PASSWORD}
+      TZ: ${TZ:-Asia/Shanghai}
+
+volumes:
+  opencode2api-data:
+    external: true
+    name: ${OPENCODE2API_DATA_VOLUME:-compose_opencode2api-data}
