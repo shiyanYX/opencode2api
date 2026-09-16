@@ -4,16 +4,22 @@ import (
 	"embed"
 )
 
-//go:embed static/admin-login.html
+//go:embed static/admin-login.html static/admin.html
 var staticFS embed.FS
 
-// loginPageHTML contains the embedded login page content.
-var loginPageHTML []byte
+var (
+	loginPageHTML []byte
+	adminPageHTML []byte
+)
 
 func init() {
-	data, err := staticFS.ReadFile("static/admin-login.html")
+	var err error
+	loginPageHTML, err = staticFS.ReadFile("static/admin-login.html")
 	if err != nil {
 		panic("failed to read embedded admin-login.html: " + err.Error())
 	}
-	loginPageHTML = data
+	adminPageHTML, err = staticFS.ReadFile("static/admin.html")
+	if err != nil {
+		panic("failed to read embedded admin.html: " + err.Error())
+	}
 }
