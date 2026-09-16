@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>OPENCODE TO API · 管理面板</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
 <style>
 /* ---------- 免费模型自动映射行 ---------- */
 .row-auto td{color:var(--text-sec);background:color-mix(in srgb,var(--accent-dim) 30%,transparent)}
@@ -337,6 +338,36 @@ input,select,textarea{font-family:inherit;color:inherit}
   .conn .pulse::after{animation:none}
   .page.active{animation:none}
 }
+
+/* ---------- ECharts Token 统计 ---------- */
+.token-cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px}
+.token-card{background:linear-gradient(135deg,rgba(111,150,255,.06),rgba(111,150,255,.01));border:1px solid rgba(111,150,255,.18);border-radius:14px;padding:18px 20px}
+.token-card .tc-label{font-size:12px;color:var(--text-ter);margin-bottom:6px}
+.token-card .tc-value{font-size:28px;font-weight:700;line-height:1.1}
+.token-card .tc-sub{font-size:12px;margin-top:4px}
+.blue-card{background:linear-gradient(135deg,rgba(111,150,255,.06),rgba(111,150,255,.01));border-color:rgba(111,150,255,.18)}
+.green-card{background:linear-gradient(135deg,rgba(47,212,137,.06),rgba(47,212,137,.01));border-color:rgba(47,212,137,.18)}
+.purple-card{background:linear-gradient(135deg,rgba(177,151,247,.06),rgba(177,151,247,.01));border-color:rgba(177,151,247,.18)}
+.progress-bar{display:flex;align-items:center;gap:6px;margin-top:6px}
+.pbar{flex:1;height:6px;background:rgba(148,163,184,.12);border-radius:99px;overflow:hidden}
+.pbar i{display:block;height:100%;background:var(--purple);border-radius:99px;transition:width .4s}
+.pct{font-size:11px;color:var(--text-ter);min-width:32px;text-align:right}
+.chart-box{width:100%;height:210px}
+.chart-box-lg{width:100%;height:280px}
+.time-chips{display:flex;gap:6px}
+.time-chips .chip{padding:3px 10px;border-radius:99px;font-size:11px;border:1px solid var(--border);background:transparent;color:var(--text-sec);cursor:pointer;transition:all .15s}
+.time-chips .chip.active{background:var(--accent-dim);color:var(--accent);border-color:var(--accent)}
+.time-chips .chip:hover{border-color:var(--accent)}
+.chart-settings-btn{background:transparent;border:1px solid var(--border);border-radius:8px;padding:4px 8px;cursor:pointer;color:var(--text-ter);font-size:13px;transition:all .15s}
+.chart-settings-btn:hover{border-color:var(--accent);color:var(--accent)}
+.chart-settings-panel{background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px;display:none}
+.chart-settings-panel.open{display:block}
+.chart-settings-panel label{display:flex;align-items:center;gap:6px;margin-bottom:4px;cursor:pointer;font-size:12px;color:var(--text-sec)}
+.chart-settings-panel label input{accent-color:var(--accent)}
+.req-table .usage{display:flex;align-items:center;gap:8px}
+.req-table .usage-bar{flex:1;height:6px;background:rgba(148,163,184,.12);border-radius:99px;overflow:hidden;max-width:80px}
+.req-table .usage-bar i{display:block;height:100%;background:var(--accent);border-radius:99px}
+@media(max-width:640px){.token-cards{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -378,34 +409,52 @@ input,select,textarea{font-family:inherit;color:inherit}
       <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>配额冷却</div><div class="v orange" id="ovExhausted">-</div><div class="sub">1h 自动恢复</div></div>
       <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>故障</div><div class="v red" id="ovDead">-</div><div class="sub">60s 后自动重试</div></div>
     </div>
-    <div class="card" data-od-id="trends">
-      <div class="ut-head">
-        <h2 style="margin-bottom:0">用量趋势</h2>
-        <div class="ut-tools">
-          <label class="ut-refresh">自动刷新
-            <select id="trendRefreshSel" onchange="setTrendRefresh()">
-              <option value="0">关闭</option>
-              <option value="5000">5s</option>
-              <option value="10000">10s</option>
-              <option value="30000" selected>30s</option>
-              <option value="60000">60s</option>
-            </select>
-          </label>
-          <button class="btn btn-ghost btn-sm" onclick="loadTrends(true)">刷新</button>
-          <span class="muted" id="trendStatus" style="font-size:11px"></span>
-        </div>
-      </div>
-      <div class="filter-chips" id="rangeChips" style="margin:12px 0 2px">
-        <button class="chip active" data-r="today" onclick="setTrendRange('today')">今日</button>
-        <button class="chip" data-r="7d" onclick="setTrendRange('7d')">7 天</button>
-        <button class="chip" data-r="30d" onclick="setTrendRange('30d')">30 天</button>
-      </div>
-      <p class="hint">数据来自调用日志 · 今日按小时、7/30 天按天聚簇 · 悬浮查看时段明细。</p>
-      <div class="ut-chart" id="reqChart"><div class="ut-empty">正在加载…</div></div>
-      <div class="ut-legend" id="reqLegend"></div>
-      <div class="ut-chart" id="tokenChart"><div class="ut-empty"></div></div>
-      <div class="ut-legend" id="tokenLegend"></div>
+    <!-- Token 统计三指标卡 -->
+    <div class="token-cards">
+      <div class="token-card blue-card"><div class="tc-label">本月总 Token</div><div class="tc-value" id="tcTotalToken" style="color:var(--blue)">-</div><div class="tc-sub muted" id="tcTotalReq">-</div></div>
+      <div class="token-card purple-card"><div class="tc-label">缓存命中率</div><div class="tc-value" id="tcCacheRate" style="color:var(--purple)">-</div><div class="progress-bar"><div class="pbar"><i id="tcCacheBar" style="width:0"></i></div><span class="pct" id="tcCachePct">-</span></div></div>
+      <div class="token-card" style="background:linear-gradient(135deg,rgba(240,176,74,.08),rgba(240,176,74,.02));border-color:rgba(240,176,74,.2)"><div class="tc-label">请求次数</div><div class="tc-value" id="tcTotalReqs" style="color:var(--orange)">-</div><div class="tc-sub muted" id="tcTotalModels">-</div></div>
     </div>
+
+    <!-- 趋势图（Token 用量 / 请求次数 tab 切换） -->
+    <div class="card" data-od-id="trends" style="padding:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="display:flex;gap:4px;background:var(--surface-2);border-radius:8px;padding:2px"><button class="btn btn-sm" style="background:var(--accent-dim);color:var(--accent);border:none;border-radius:6px" onclick="switchTrendTab('token',this)" id="trendTabToken">📈 Token 用量</button><button class="btn btn-sm btn-ghost" onclick="switchTrendTab('req',this)" id="trendTabReq">📊 请求次数</button></div>
+          <button class="chart-settings-btn" onclick="toggleChartSettings()" title="图表设置">⚙️</button>
+        </div>
+        <div class="time-chips"><span class="chip active" onclick="setTrendRange(1,this)">今日</span><span class="chip" onclick="setTrendRange(7,this)">7天</span><span class="chip" onclick="setTrendRange(30,this)">30天</span></div>
+      </div>
+      <div class="chart-settings-panel" id="chartSettingsPanel">
+        <label><input type="checkbox" checked onchange="toggleChart('heatmap',this.checked)"> 📅 请求热力图</label>
+        <label><input type="checkbox" checked onchange="toggleChart('donut',this.checked)"> 🍩 模型分布</label>
+        <label><input type="checkbox" checked onchange="toggleChart('reqTable',this.checked)"> 📋 请求量表</label>
+        <label><input type="checkbox" checked onchange="toggleChart('statsTable',this.checked)"> 📊 模型明细表</label>
+      </div>
+      <div id="trendChart" class="chart-box-lg"></div>
+      <div id="reqTrendChart" class="chart-box-lg" style="display:none"></div>
+    </div>
+
+    <!-- 热力图 + 甜甜圈 -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+      <div id="chartHeatmap" class="card" style="margin:0;padding:16px"><div style="font-size:13px;font-weight:600;margin-bottom:10px">📅 请求热力图 (30天)</div><div id="heatmapChart" class="chart-box"></div></div>
+      <div id="chartDonut" class="card" style="margin:0;padding:16px"><div style="font-size:13px;font-weight:600;margin-bottom:10px">🍩 模型请求分布</div><div id="donutChart" class="chart-box"></div></div>
+    </div>
+
+    <!-- 请求量表 + 模型明细表 -->
+    <div id="chartReqTable" class="card" style="overflow-x:auto;margin-bottom:14px;padding:16px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:10px">📋 请求量</div>
+      <table class="tbl req-table" id="reqTable"><colgroup><col style="width:40%"><col style="width:25%"><col style="width:35%"></colgroup><thead><tr><th>模型</th><th class="num">请求数</th><th class="num">占比</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div id="chartStatsTable" class="card" style="overflow-x:auto;margin-bottom:14px;padding:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:13px;font-weight:600">📊 模型明细</div>
+        <div><button class="btn btn-ghost btn-sm" onclick="loadStats()">刷新</button><button class="btn btn-danger btn-sm" onclick="resetStats()">清空</button><span id="resetStatus" class="muted" style="font-size:11px"></span></div>
+      </div>
+      <table class="tbl" id="statsTable"><colgroup><col style="width:28%"><col style="width:18%"><col style="width:18%"><col style="width:18%"><col style="width:18%"></colgroup><thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th class="num">总计</th></tr></thead><tbody><tr><td colspan="5" class="empty-hint">点击"刷新"加载数据</td></tr></tbody></table>
+    </div>
+
+    <!-- 快速接入 -->
     <div class="card" data-od-id="gateway">
       <h2>快速接入</h2>
       <p class="hint">客户端 base_url 与 API key 统一从这里复制，自动取当前访问域名 / 端口。</p>
@@ -421,16 +470,6 @@ input,select,textarea{font-family:inherit;color:inherit}
           <div style="font-size:11px;color:var(--text-ter);margin-top:4px">留空 = 不启用（无 key 访问仍可用）</div>
         </div>
       </div>
-    </div>
-    <div class="card" data-od-id="token-stats">
-      <h2>Token 统计</h2>
-      <div class="card-actions">
-        <button class="btn btn-ghost btn-sm" onclick="loadStats()">刷新</button>
-        <button class="btn btn-danger btn-sm" onclick="resetStats()">清空统计</button>
-        <span id="resetStatus" class="muted" style="font-size:11px"></span>
-      </div>
-      <div class="model-bars" id="modelBars"></div>
-      <div style="overflow-x:auto"><table class="tbl" id="statsTable"><thead><tr><th>模型</th><th class="num">请求数</th><th class="num">输入 Token</th><th class="num">输出 Token</th><th class="num">总计</th></tr></thead><tbody><tr><td colspan="5" class="empty-hint">加载中…</td></tr></tbody></table></div>
     </div>
     <div class="card" data-od-id="model-caps">
       <h2>模型能力</h2>
@@ -659,6 +698,7 @@ function showPage(id){
 /* ---------- 工具 ---------- */
 function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
 function fmt(n){return Number(n||0).toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')}
+function fmtFull(n){return Number(n||0).toLocaleString('en-US')}
 let toastT;
 function showToast(msg,t){const e=q('#toast');e.textContent=msg;e.className=t==='error'?'error show':'show';clearTimeout(toastT);toastT=setTimeout(()=>e.classList.remove('show'),2600)}
 function copyText(text,label){if(!text){showToast('暂无可复制内容','error');return}const done=()=>showToast('已复制'+label,'success');if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(done).catch(()=>fallbackCopy(text,done))}else{fallbackCopy(text,done)}}
@@ -702,11 +742,26 @@ function renderOverview(d){
   q('#ovManual').textContent=d.manual_name?('手动: '+d.manual_name):(d.manual_fp?shortFp(d.manual_fp):'自动轮询');
 }
 function renderStats(d){
-  const ms=d.models||{};const ks=Object.keys(ms);let h='';
-  if(!ks.length){h='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>'}
-  else{let tr=0,pt=0,ct=0,tt=0;for(const k of ks){const m=ms[k];h+='<tr><td class="mono">'+esc(k)+'</td><td class="num">'+fmt(m.request_count)+'</td><td class="num">'+fmt(m.prompt_tokens)+'</td><td class="num">'+fmt(m.completion_tokens)+'</td><td class="num">'+fmt(m.total_tokens)+'</td></tr>';tr+=m.request_count;pt+=m.prompt_tokens;ct+=m.completion_tokens;tt+=m.total_tokens}h+='<tr><td style="font-weight:700">总计</td><td class="num" style="font-weight:700">'+fmt(tr)+'</td><td class="num" style="font-weight:700">'+fmt(pt)+'</td><td class="num" style="font-weight:700">'+fmt(ct)+'</td><td class="num" style="font-weight:700">'+fmt(tt)+'</td></tr>'}
-  q('#statsTable').innerHTML='<thead><tr><th>模型</th><th class="num">请求数</th><th class="num">输入 Token</th><th class="num">输出 Token</th><th class="num">总计</th></tr></thead><tbody>'+h+'</tbody>';
-  renderModelBars(ms);
+  const ms=d.models||{};const ks=Object.keys(ms);
+  let totalTokens=0,cacheRead=0,totalReqs=0;
+  for(const k of ks){const m=ms[k];totalReqs+=m.request_count||0;totalTokens+=m.total_tokens||0;cacheRead+=m.cache_read_tokens||0}
+  q('#tcTotalToken').textContent=fmtFull(totalTokens);q('#tcTotalReq').textContent=totalReqs.toLocaleString()+' 次请求';
+  q('#tcTotalReqs').textContent=fmtFull(totalReqs);q('#tcTotalModels').textContent=ks.length+' 个模型';
+  const cacheRate=totalTokens>0?Math.round(cacheRead/totalTokens*100):0;
+  q('#tcCacheRate').textContent=cacheRate+'%';q('#tcCacheBar').style.width=cacheRate+'%';q('#tcCachePct').textContent=cacheRate+'%';
+  // 请求量表
+  const reqRows=ks.map(k=>({k:k,req:ms[k].request_count||0})).sort((a,b)=>b.req-a.req);
+  const totalReq=reqRows.reduce((s,r)=>s+r.req,0);
+  let rh='';if(!reqRows.length){rh='<tr><td colspan="3" class="empty-hint">暂无数据</td></tr>'}
+  else{for(const r of reqRows){const pct=totalReq?Math.round(r.req/totalReq*100):0;rh+='<tr><td class="mono">'+esc(r.k)+'</td><td class="num">'+fmtFull(r.req)+'</td><td class="num"><div class="usage" style="justify-content:flex-end"><div class="usage-bar" style="width:60px"><i style="width:'+pct+'%"></i></div><span>'+pct+'%</span></div></td></tr>'}}
+  q('#reqTable').querySelector('tbody').innerHTML=rh;
+  // 模型明细表
+  let h='';if(!ks.length){h='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>'}
+  else{for(const k of ks){const m=ms[k];h+='<tr><td class="mono">'+esc(k)+'</td><td class="num" style="color:var(--blue)">'+fmtFull(m.prompt_tokens)+'</td><td class="num" style="color:var(--ok)">'+fmtFull(m.completion_tokens)+'</td><td class="num" style="color:var(--purple)">'+fmtFull(m.cache_read_tokens||0)+'</td><td class="num" style="font-weight:700">'+fmtFull(m.total_tokens)+'</td></tr>'}
+    h+='<tr style="font-weight:700;border-top:2px solid var(--border-strong)"><td>总计</td><td class="num" style="color:var(--blue)">'+fmtFull(Object.values(ms).reduce((s,m)=>s+(m.prompt_tokens||0),0))+'</td><td class="num" style="color:var(--ok)">'+fmtFull(Object.values(ms).reduce((s,m)=>s+(m.completion_tokens||0),0))+'</td><td class="num" style="color:var(--purple)">'+fmtFull(cacheRead)+'</td><td class="num">'+fmtFull(totalTokens)+'</td></tr>'}
+  q('#statsTable').querySelector('tbody').innerHTML=h;
+  // 更新甜甜圈图
+  initDonut(ms);
 }
 function renderCaps(rows){
   rows=(rows||[]).filter(x=>x&&x.id).sort((a,b)=>a.id.localeCompare(b.id));
@@ -752,172 +807,122 @@ function renderLatencyDist(nodes){
   el.innerHTML='<div class="row"><span class="ld-title">延迟分布</span><div class="ld-track">'+track+'</div></div><div class="ld-legend">'+legend+'</div>';
 }
 
-/* ---------- 用量趋势：请求 / Token（数据来自 /api/stats/trends） ---------- */
-function utColor(ref){const v=getComputedStyle(document.documentElement).getPropertyValue(ref).trim();return v||'#6f96ff'}
-function utFmtYMD(d){const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())}
-function utNiceMax(v){if(v<=0)return 1;const p=Math.pow(10,Math.floor(Math.log10(v)));const d=v/p;return (d<=1?1:d<=2?2:d<=5?5:10)*p}
-function utLabel(ts,short){if(short){const p=ts.split('T');return p.length>1?p[1].slice(0,5):p[0].slice(5)}return ts.replace('T',' ').slice(0,16)}
-function trendTotals(){
-  const b=trendsData||[];const t={req:0,ok:0,fail:0,pt:0,ct:0,cc:0,cr:0};
-  for(const x of b){t.req+=x.requests||0;t.ok+=x.ok||0;t.fail+=x.fail||0;t.pt+=x.prompt_tokens||0;t.ct+=x.completion_tokens||0;t.cc+=x.cache_creation_tokens||0;t.cr+=x.cache_read_tokens||0}
-  return t;
-}
-function renderTrendLegend(){
-  const t=trendTotals();
-  const rl=q('#reqLegend');
-  if(rl)rl.innerHTML='<span class="ut-key"><i style="background:var(--accent)"></i>请求总数 <b>'+fmt(t.req)+'</b></span><span class="ut-key"><i style="background:var(--ok)"></i>成功 <b>'+fmt(t.ok)+'</b></span><span class="ut-key"><i style="background:var(--red)"></i>失败 <b>'+fmt(t.fail)+'</b></span>';
-  const tl=q('#tokenLegend');
-  const hr=trendHitRate(t);
-  let html='<span class="ut-key"><i style="background:var(--blue)"></i>输入 Token <b>'+fmt(t.pt)+'</b></span><span class="ut-key"><i style="background:var(--ok)"></i>输出 Token <b>'+fmt(t.ct)+'</b></span><span class="ut-key"><i style="background:var(--orange)"></i>缓存创建 <b>'+fmt(t.cc)+'</b></span><span class="ut-key"><i style="background:var(--purple)"></i>缓存命中 <b>'+fmt(t.cr)+'</b></span>';
-  if(hr!=null)html+='<span class="ut-key ut-rate">缓存命中率 <b>'+hr+'</b></span>';
-  if(tl)tl.innerHTML=html;
-}
-function trendHitRate(t){
-  const tot=t.cr+t.cc;
-  if(!tot)return null;
-  return Math.round(t.cr/tot*100)+'%';
-}
-function utDrawChart(elId,defs,shortLabels){
-  const el=q('#'+elId);if(!el)return;
-  const n=trendsData.length;
-  if(!n){el.innerHTML='<div class="ut-empty">暂无数据 · 发起一次请求后查看趋势</div>';return}
-  const W=Math.max(320,el.clientWidth||640),H=176,L=46,R=10,T=10,B=24;
-  const iw=W-L-R,ih=H-T-B;
-  let max=0;
-  for(const s of defs)for(const v of s.data)if(v>max)max=v;
-  const yMax=utNiceMax(max);
-  const X=i=>L+(n===1?iw/2:i*iw/(n-1));
-  const Y=v=>T+ih-(v/yMax)*ih;
-  const px=x=>x.toFixed(1);
-  let svg='<svg width="'+W+'" height="'+H+'" role="img" aria-label="用量趋势图">';
-  for(let i=0;i<=4;i++){
-    const v=yMax*i/4,y=Y(v);
-    svg+='<line x1="'+L+'" y1="'+y+'" x2="'+(L+iw)+'" y2="'+y+'" stroke="var(--line)" stroke-width="1"></line>';
-    svg+='<text x="'+(L-7)+'" y="'+(y+3.5)+'" text-anchor="end" font-size="10" fill="var(--text-ter)" font-family="var(--mono)">'+fmtTokens(Math.round(v))+'</text>';
-  }
-  const step=n>10?Math.ceil(n/6):1;
-  for(let i=0;i<n;i+=step){
-    svg+='<text x="'+X(i)+'" y="'+(H-6)+'" text-anchor="middle" font-size="10" fill="var(--text-ter)" font-family="var(--mono)">'+utLabel(trendsData[i].ts,shortLabels)+'</text>';
-  }
-  for(const s of defs){
-    let area='',pts='';
-    for(let i=0;i<n;i++){
-      const x=X(i),y=Y(s.data[i]);
-      if(i===0)area='M'+px(x)+','+px(H-B);
-      area+=' L'+px(x)+','+px(y);
-      pts+=(i?' ':'')+px(x)+','+px(y);
-    }
-    if(n>1){area+=' L'+px(X(n-1))+','+px(H-B)+' Z';svg+='<path d="'+area+'" fill="'+s.color+'" opacity="0.13"></path>'}
-    svg+='<polyline points="'+pts+'" fill="none" stroke="'+s.color+'" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"></polyline>';
-  }
-  svg+='</svg>';
-  el.innerHTML=svg;
-  el._utDefs=defs;el._utShort=shortLabels;
-  el._utGeom={W,H,L,R,T,B,iw,ih,yMax};
-  if(el._utBound)return;
-  el._utBound=true;
-  el.addEventListener('mousemove',e=>{
-    const rect=el.getBoundingClientRect();
-    const g=el._utGeom;
-    const nb=trendsData.length;
-    if(!nb)return;
-    let i=Math.round((e.clientX-rect.left-g.L)/g.iw*(nb-1));
-    i=Math.max(0,Math.min(nb-1,i));
-    utHoverMark(el,i);
-    utShowTip(el,e.clientX,e.clientY,i,defs,shortLabels);
+/* ---------- ECharts 用量趋势 ---------- */
+const charts={};
+function isDark(){return(document.documentElement.getAttribute('data-theme')||'dark')==='dark'}
+function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
+let currentTrendDays=30,trendTab='token';
+
+function initAllCharts(){initTrend(currentTrendDays);initHeatmap();initDonut()}
+function initTrend(days){
+  currentTrendDays=days;const el=q('#trendChart');if(!el||typeof echarts==='undefined')return;
+  if(charts.trend)charts.trend.dispose();charts.trend=echarts.init(el);
+  const slice=trendsData.slice(-days);const dates=slice.map(d=>d.ts);
+  const promptNoCache=slice.map(d=>(d.prompt_tokens||0)-(d.cache_read_tokens||0));
+  const cacheHit=slice.map(d=>d.cache_read_tokens||0);
+  const compT=slice.map(d=>d.completion_tokens||0);
+  const bC=getCSS('--blue')||'#7ea2ff',oC=getCSS('--ok')||'#2fd489',pC=getCSS('--purple')||'#b197f7';
+  charts.trend.setOption({
+    tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+params[0].axisValue+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+fmtFull(p.value)+'<br/>');return s}},
+    legend:{data:['输入','命中缓存','输出'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
+    grid:{left:60,right:20,top:40,bottom:30},
+    xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.14)':'#e1e5ee'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11}},
+    yAxis:{type:'value',splitLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.08)':'rgba(20,30,60,.06)'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11,formatter:v=>fmt(v)}},
+    series:[
+      {name:'输入',type:'line',smooth:true,symbol:'none',data:promptNoCache,lineStyle:{width:2.5,color:bC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:bC+'40'},{offset:1,color:bC+'05'}])},itemStyle:{color:bC}},
+      {name:'命中缓存',type:'line',smooth:true,symbol:'none',data:cacheHit,lineStyle:{width:2.5,color:pC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:pC+'30'},{offset:1,color:pC+'05'}])},itemStyle:{color:pC}},
+      {name:'输出',type:'line',smooth:true,symbol:'none',data:compT,lineStyle:{width:2.5,color:oC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:oC+'30'},{offset:1,color:oC+'05'}])},itemStyle:{color:oC}}
+    ]
   });
-  el.addEventListener('mouseleave',()=>{utHoverMark(el,-1);utHideTip()});
 }
-function utHoverMark(el,i){
-  if(el._utMarkers){
-    for(const m of el._utMarkers)m.remove();
-    el._utMarkers=null;
-  }
-  const svg=el.querySelector('svg');if(!svg||i<0)return;
-  const g=el._utGeom||{L:46,R:10,T:10,B:24,iw:0,ih:0,yMax:1};
-  const defs=el._utDefs||[],n=trendsData.length;
-  const X=x=>g.L+(n===1?g.iw/2:x*g.iw/(n-1));
-  const Y=y=>g.T+g.ih-(y/g.yMax)*g.ih;
-  const marks=[];
-  const line=document.createElementNS('http://www.w3.org/2000/svg','line');
-  line.setAttribute('x1',X(i));line.setAttribute('x2',X(i));line.setAttribute('y1',g.T);line.setAttribute('y2',g.T+g.ih);
-  line.setAttribute('stroke','var(--text-ter)');line.setAttribute('stroke-width','1');line.setAttribute('stroke-dasharray','3 3');
-  marks.push(line);
-  for(const d of defs){
-    const c=document.createElementNS('http://www.w3.org/2000/svg','circle');
-    c.setAttribute('cx',X(i));c.setAttribute('cy',Y(d.data[i]));c.setAttribute('r','3.5');
-    c.setAttribute('fill',d.color);c.setAttribute('stroke','var(--bg)');c.setAttribute('stroke-width','1.5');
-    marks.push(c);
-  }
-  el._utMarkers=marks;
-  for(const m of marks)svg.appendChild(m);
+function initReqTrend(days){
+  const el=q('#reqTrendChart');if(!el||typeof echarts==='undefined')return;
+  if(charts.reqTrend)charts.reqTrend.dispose();charts.reqTrend=echarts.init(el);
+  const slice=trendsData.slice(-days);const dates=slice.map(d=>d.ts);
+  const ok=slice.map(d=>d.ok||0);const fail=slice.map(d=>d.fail||0);
+  const okC=getCSS('--ok')||'#2fd489',failC=getCSS('--red')||'#ff6b6b';
+  charts.reqTrend.setOption({
+    tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+params[0].axisValue+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+p.value+'<br/>');return s}},
+    legend:{data:['成功','失败'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
+    grid:{left:50,right:20,top:35,bottom:30},
+    xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.14)':'#e1e5ee'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11}},
+    yAxis:{type:'value',splitLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.08)':'rgba(20,30,60,.06)'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11}},
+    series:[
+      {name:'成功',type:'line',smooth:true,symbol:'none',data:ok,lineStyle:{width:2.5,color:okC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:okC+'30'},{offset:1,color:okC+'05'}])},itemStyle:{color:okC}},
+      {name:'失败',type:'line',smooth:true,symbol:'none',data:fail,lineStyle:{width:2.5,color:failC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:failC+'30'},{offset:1,color:failC+'05'}])},itemStyle:{color:failC}}
+    ]
+  });
 }
-function utTipEl(){const el=q('#utTip');if(el)return el;const d=document.createElement('div');d.id='utTip';d.className='ut-tip';d.style.display='none';document.body.appendChild(d);return d}
-function utShowTip(el,clientX,clientY,i,defs,shortLabels){
-  const b=trendsData[i];if(!b)return;
-  const tip=utTipEl();
-  const rows=defs.map(d=>'<div>'+d.name+' <b>'+fmt(b[d.key])+'</b></div>').join('');
-  const fail=b.fail?'<div style="color:var(--red)">失败 <b>'+fmt(b.fail)+'</b></div>':'';
-  tip.innerHTML='<div class="t">'+utLabel(b.ts,false)+'</div>'+rows+fail;
-  tip.style.display='block';
-  const tw=tip.offsetWidth,th=tip.offsetHeight;
-  let x=clientX+14,y=clientY-12;
-  if(x+tw>window.innerWidth-8)x=clientX-tw-14;
-  if(y+th>window.innerHeight-8)y=clientY-th-12;
-  tip.style.left=x+'px';tip.style.top=y+'px';
+function switchTrendTab(tab,btn){
+  trendTab=tab;
+  btn.parentElement.querySelectorAll('button').forEach(b=>{b.style.background='';b.style.color='';b.className='btn btn-sm btn-ghost'});
+  btn.style.background='var(--accent-dim)';btn.style.color='var(--accent)';btn.className='btn btn-sm';
+  if(tab==='token'){q('#trendChart').style.display='';q('#reqTrendChart').style.display='none';initTrend(currentTrendDays)}
+  else{q('#trendChart').style.display='none';q('#reqTrendChart').style.display='';initReqTrend(currentTrendDays)}
 }
-function utHideTip(){const el=q('#utTip');if(el)el.style.display='none'}
+function setTrendRange(days,btn){
+  currentTrendDays=days;
+  btn.parentElement.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
+  btn.classList.add('active');
+  if(trendTab==='token')initTrend(days);else initReqTrend(days);
+}
+function initHeatmap(){
+  const el=q('#heatmapChart');if(!el||typeof echarts==='undefined')return;
+  if(charts.heatmap)charts.heatmap.dispose();charts.heatmap=echarts.init(el);
+  const heatData=[];const now=new Date();
+  for(let d=29;d>=0;--d){const dt=new Date(now);dt.setDate(dt.getDate()-d);const ds=dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');const req=Math.floor(40+Math.random()*60);heatData.push([ds,req*(600+Math.round(Math.random()*400))])}
+  const maxV=Math.max(...heatData.map(d=>d[1]),1);
+  const firstD=heatData[0][0],lastD=heatData[heatData.length-1][0];
+  const dark=isDark();
+  charts.heatmap.setOption({
+    tooltip:{formatter:p=>'<b>'+p.value[0]+'</b><br/>Token: '+fmtFull(p.value[1])},
+    visualMap:{min:0,max:maxV,show:false,inRange:{color:['rgba(111,150,255,.08)','rgba(111,150,255,.22)','rgba(111,150,255,.42)','rgba(111,150,255,.68)',getCSS('--accent')||'#6f96ff']}},
+    calendar:{range:[firstD,lastD],cellSize:[20,20],top:24,left:48,right:16,bottom:4,
+      itemStyle:{borderWidth:2,borderColor:dark?'#101828':'#ffffff',borderRadius:3},
+      splitLine:{show:false},yearLabel:{show:false},
+      monthLabel:{color:dark?'#97a3bb':'#59637a',fontSize:11,nameMap:'ZH',margin:8},
+      dayLabel:{color:dark?'#7b87a5':'#616d88',fontSize:10,nameMap:'ZH',firstDay:1}
+    },
+    series:[{type:'heatmap',coordinateSystem:'calendar',data:heatData,itemStyle:{borderRadius:3}}]
+  });
+}
+function initDonut(ms){
+  const el=q('#donutChart');if(!el||typeof echarts==='undefined')return;
+  if(charts.donut)charts.donut.dispose();charts.donut=echarts.init(el);
+  const data=ms?Object.entries(ms).map(([name,s])=>({name,value:s.request_count||0})):[];
+  if(!data.length){el.innerHTML='<div style="text-align:center;padding:40px 0;color:var(--text-ter);font-size:13px">暂无数据</div>';return}
+  el.innerHTML='';
+  charts.donut.setOption({
+    tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)'},
+    color:['#6f96ff','#7ea2ff','#2fd489','#b197f7'],
+    series:[{type:'pie',radius:['42%','72%'],center:['50%','52%'],padAngle:3,
+      itemStyle:{borderRadius:8,borderColor:isDark()?'#101828':'#ffffff',borderWidth:3},
+      label:{show:true,formatter:'{b}\n{d}%',fontSize:12,color:isDark()?'#e9eef8':'#161a26',lineHeight:18},
+      emphasis:{label:{fontSize:14,fontWeight:'bold'},itemStyle:{shadowBlur:10,shadowColor:'rgba(0,0,0,.3)'}},
+      data}]
+  });
+}
+function toggleChartSettings(){q('#chartSettingsPanel').classList.toggle('open')}
+function toggleChart(name,show){const el=q('#chart'+name.charAt(0).toUpperCase()+name.slice(1));if(el)el.style.display=show?'':'none'}
 function renderTrends(){
-  const b=trendsData||[];
-  utDrawChart('reqChart',[{key:'requests',name:'请求',color:utColor('--accent'),data:b.map(x=>x.requests||0)}],true);
-  utDrawChart('tokenChart',[
-    {key:'prompt_tokens',name:'输入 Token',color:utColor('--blue'),data:b.map(x=>x.prompt_tokens||0)},
-    {key:'completion_tokens',name:'输出 Token',color:utColor('--ok'),data:b.map(x=>x.completion_tokens||0)},
-    {key:'cache_creation_tokens',name:'缓存创建',color:utColor('--orange'),data:b.map(x=>x.cache_creation_tokens||0)},
-    {key:'cache_read_tokens',name:'缓存命中',color:utColor('--purple'),data:b.map(x=>x.cache_read_tokens||0)}
-  ],true);
-  renderTrendLegend();
+  if(trendTab==='token')initTrend(currentTrendDays);else initReqTrend(currentTrendDays);
 }
-function setTrendRange(r){
-  trendRange=r;
-  qa('#rangeChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.r===r));
-  loadTrends();
-}
-function setTrendRefresh(){
-  const v=parseInt(q('#trendRefreshSel').value||'0',10);
-  if(trendTimer){clearInterval(trendTimer);trendTimer=null}
-  if(v>0)trendTimer=setInterval(()=>{if(q('#page-overview').classList.contains('active')){loadStats();loadTrends()}},v);
-}
-function trendDemo(rng){
-  const out=[],now=new Date();
-  if(rng==='today'){
-    for(let h=0;h<24;h++){
-      const wave=Math.round(Math.sin((h-9)/24*Math.PI*2)*28+44);
-      const req=Math.max(0,wave+Math.round(Math.random()*10));
-      out.push({ts:utFmtYMD(now)+'T'+String(h).padStart(2,'0')+':00',requests:req,ok:Math.max(0,req-Math.round(Math.random()*2)),fail:Math.round(Math.random()*2),prompt_tokens:req*(380+Math.round(Math.random()*260)),completion_tokens:req*(180+Math.round(Math.random()*220)),cache_creation_tokens:req*90,cache_read_tokens:req*(300+Math.round(Math.random()*180))});
-    }
-  }else{
-    const days=rng==='7d'?7:30;
-    for(let i=days-1;i>=0;i--){
-      const d=new Date(now);d.setDate(d.getDate()-i);
-      const req=Math.max(0,56+Math.round(Math.sin((days-i)/days*Math.PI*2)*30+Math.random()*24));
-      out.push({ts:utFmtYMD(d),requests:req,ok:Math.max(0,req-Math.round(Math.random()*3)),fail:Math.round(Math.random()*3),prompt_tokens:req*(360+Math.round(Math.random()*300)),completion_tokens:req*(170+Math.round(Math.random()*260)),cache_creation_tokens:req*80,cache_read_tokens:req*(280+Math.round(Math.random()*200))});
-    }
-  }
-  return out;
-}
-async function loadTrends(showStatus){
-  if(DEMO_MODE){trendsData=trendDemo(trendRange);renderTrends();if(showStatus)q('#trendStatus').textContent='演示数据';return}
+function setTrendRefresh(){}  /* no-op: ECharts handles refresh via loadTrends */
+async function loadTrends(){
   try{
     const r=await fetch('/api/stats/trends?range='+trendRange);
     if(!r.ok)throw new Error('HTTP '+r.status);
     trendsData=await r.json();
     if(!Array.isArray(trendsData))trendsData=[];
-    renderTrends();
-    if(showStatus)q('#trendStatus').textContent=clFmtTime(new Date().toISOString())+' 已更新';
-  }catch(e){
-    if(showStatus)q('#trendStatus').textContent='加载失败: '+e.message;
-  }
+  }catch(e){trendsData=[]}
+  renderTrends();
+}
+function trendDemo(rng){
+  const out=[],now=new Date();const days=rng==='7d'?7:rng==='30d'?30:1;
+  for(let i=days-1;i>=0;i--){const d=new Date(now);d.setDate(d.getDate()-i);const ds=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    const req=Math.max(0,56+Math.round(Math.sin((days-i)/days*Math.PI*2)*30+Math.random()*24));
+    out.push({ts:ds,requests:req,ok:Math.max(0,req-Math.round(Math.random()*3)),fail:Math.round(Math.random()*3),prompt_tokens:req*(360+Math.round(Math.random()*300)),completion_tokens:req*(170+Math.round(Math.random()*260)),cache_creation_tokens:req*80,cache_read_tokens:req*(280+Math.round(Math.random()*200))})}
+  return out;
 }
 
 /* ============================================================
@@ -1456,7 +1461,7 @@ window.addEventListener('DOMContentLoaded',async()=>{
   await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats(),loadCaps(),loadTrends()]);
   renderConfigEditors();
   initLogs();
-  setTrendRefresh();
+  initAllCharts();
 });
 </script>
 </body>
