@@ -899,11 +899,14 @@ function initHeatmap(){
   const start=new Date(today);
   start.setDate(start.getDate()-((heatmapData&&heatmapData.length>1?heatmapData.length:180)-1));
   start.setDate(start.getDate()-((start.getDay()+6)%7)); // 回退到周一，保证每列同一天
-  const cells=[];const monthAt={};let n=0;
+  const cells=[];const cellDates=[];const monthAt={};let n=0;
   for(const d=new Date(start);d<=today;d.setDate(d.getDate()+1)){
     const ds=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
     const wk=Math.floor(n/7);
-    cells.push([wk,n%7,byDay[ds]||0,ds]);
+    // 数据项必须严格是 [x, y, value]：多塞一个日期进去 ECharts 会静默不画格子。
+    // 日期另存并行数组，tooltip 用 dataIndex 取。
+    cells.push([wk,n%7,byDay[ds]||0]);
+    cellDates.push(ds);
     if(d.getDate()===1)monthAt[wk]=(d.getMonth()+1)+'月';
     n++;
   }
@@ -918,7 +921,7 @@ function initHeatmap(){
   const base=dark?'#1b2434':'#ebedf0';
   charts.heatmap=echarts.init(el);
   charts.heatmap.setOption({
-    tooltip:{formatter:p=>'<b>'+p.value[3]+'</b><br/>Token: '+fmtFull(p.value[2])},
+    tooltip:{formatter:p=>'<b>'+(cellDates[p.dataIndex]||'')+'</b><br/>Token: '+fmtFull(p.value[2])},
     grid:{left:6,right:6,top:6,bottom:24},
     xAxis:{type:'category',data:xLabels,axisLine:{show:false},axisTick:{show:false},
       splitArea:{show:false},axisLabel:{color:dark?'#7b87a5':'#616d88',fontSize:11,interval:0,margin:7}},
