@@ -6788,7 +6788,7 @@ func adminTrendsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rng := r.URL.Query().Get("range")
-	if rng != "7d" && rng != "30d" {
+	if rng != "7d" && rng != "30d" && rng != "180d" {
 		rng = "today"
 	}
 	pts := trendsFromCallLog(rng)

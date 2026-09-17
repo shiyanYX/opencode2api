@@ -399,7 +399,7 @@ input,select,textarea{font-family:inherit;color:inherit}
     <div class="token-cards">
       <div class="token-card blue-card"><div class="tc-label">累计总 Token</div><div class="tc-value" id="tcTotalToken" style="color:var(--blue)">-</div><div class="tc-sub muted" id="tcTotalReq">-</div></div>
       <div class="token-card purple-card"><div class="tc-label">缓存命中率</div><div class="tc-value" id="tcCacheRate" style="color:var(--purple)">-</div><div class="progress-bar"><div class="pbar"><i id="tcCacheBar" style="width:0"></i></div><span class="pct" id="tcCachePct">-</span></div></div>
-      <div class="token-card" style="background:linear-gradient(135deg,rgba(240,176,74,.08),rgba(240,176,74,.02));border-color:rgba(240,176,74,.2)"><div class="tc-label">请求次数</div><div class="tc-value" id="tcTotalReqs" style="color:var(--orange)">-</div><div class="tc-sub muted" id="tcTotalModels">-</div></div>
+      <div class="token-card" style="background:linear-gradient(135deg,rgba(240,176,74,.08),rgba(240,176,74,.02));border-color:rgba(240,176,74,.2)"><div class="tc-label">平均 tps</div><div class="tc-value" id="tcAvgTps" style="color:var(--orange)">-</div><div class="tc-sub muted" id="tcTpsSamples">-</div></div>
     </div>
 
     <!-- 趋势图（Token 用量 / 请求次数 tab 切换） -->
@@ -423,7 +423,7 @@ input,select,textarea{font-family:inherit;color:inherit}
 
     <!-- 热力图 + 甜甜圈 -->
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
-      <div id="chartHeatmap" class="card" style="margin:0;padding:16px"><div style="font-size:13px;font-weight:600;margin-bottom:10px">📅 请求热力图 (30天)</div><div id="heatmapChart" class="chart-box"></div></div>
+      <div id="chartHeatmap" class="card" style="margin:0;padding:16px"><div style="font-size:13px;font-weight:600;margin-bottom:10px">📅 请求热力图 (近半年)</div><div id="heatmapChart" class="chart-box"></div></div>
       <div id="chartDonut" class="card" style="margin:0;padding:16px"><div style="font-size:13px;font-weight:600;margin-bottom:10px">🍩 模型请求分布</div><div id="donutChart" class="chart-box"></div></div>
     </div>
 
@@ -658,7 +658,7 @@ const q=s=>document.querySelector(s);
 const qa=s=>document.querySelectorAll(s);
 let cfg={},nodeData=[],subData=[],wsData=[],wsInfo={},nodeEditors=[],modelList=[],freeModelIDs=[],filter='all';
 let DEMO_MODE=false,demoLogTimer=null;
-let trendsData=[],trendRange='30d',trendTimer=null;
+let trendsData=[],trendRange='30d',trendTimer=null,heatmapData=[];
 
 /* ---------- 主题：默认深色 ---------- */
 function applyTheme(){
@@ -710,23 +710,46 @@ async function loadNodes(){
   try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=(d.subscriptions||[]).filter(s=>s.url!=='webshare API');applyWsSnapshot(d.subscriptions||[]);renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable()}catch(e){q('#nodeTable tbody').innerHTML='<tr><td colspan="7" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>'}
 }
 async function loadStats(){
-  if(DEMO_MODE){renderStats(DEMO.stats);loadCacheRate();return}
+  if(DEMO_MODE){renderStats(DEMO.stats);loadHeatmap();loadTps();return}
   try{const r=await fetch('/api/stats');const d=await r.json();renderStats(d)}catch(e){const tb=q('#statsTable tbody');if(tb)tb.innerHTML='<tr><td colspan="7" class="empty-hint">加载失败 <button class="btn btn-sm btn-ghost" onclick="loadStats()">重试</button></td></tr>'}
-  loadCacheRate();
+  loadHeatmap();loadTps();
+}
+// 一次拉 180 天日桶，同时喂热力图和「最近 30 天」缓存命中率，省一次全量扫描。
+async function loadHeatmap(){
+  try{
+    const r=await fetch('/api/stats/trends?range=180d');
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    heatmapData=Array.isArray(d)?d:[];
+  }catch(e){heatmapData=[]}
+  initHeatmap();updateCacheRate();
 }
 // 缓存命中率按「最近 30 天」口径：累计计数里的历史 cache_read 因旧版把
 // read/created 写反而缺失且无法回填，趋势接口按天给出真实值，直接聚合。
-async function loadCacheRate(){
+function updateCacheRate(){
   const el=q('#tcCacheRate');if(!el)return;
+  let cr=0,pt=0;
+  for(const b of heatmapData.slice(-30)){cr+=b.cache_read_tokens||0;pt+=b.prompt_tokens||0}
+  const rate=pt>0?Math.round(cr/pt*100):0;
+  el.textContent=rate+'%';q('#tcCacheBar').style.width=rate+'%';q('#tcCachePct').textContent=rate+'%';
+}
+// 平均 tps：取调用日志里最近 24h 的流式请求，对 output_speed 求均值。
+async function loadTps(){
+  const el=q('#tcAvgTps');if(!el)return;
   try{
-    const r=await fetch('/api/stats/trends?range=30d');
+    const r=await fetch('/api/call-log?limit=1000');
     if(!r.ok)throw new Error('HTTP '+r.status);
     const d=await r.json();
-    let cr=0,pt=0;
-    for(const b of (Array.isArray(d)?d:[])){cr+=b.cache_read_tokens||0;pt+=b.prompt_tokens||0}
-    const rate=pt>0?Math.round(cr/pt*100):0;
-    el.textContent=rate+'%';q('#tcCacheBar').style.width=rate+'%';q('#tcCachePct').textContent=rate+'%';
-  }catch(e){}
+    const cutoff=Date.now()-24*3600*1000;
+    let sum=0,n=0;
+    for(const rec of (Array.isArray(d)?d:[])){
+      if(!(Date.parse(rec.ts||'')>=cutoff))continue;
+      const sp=rec.output_speed||0;
+      if(sp>0){sum+=sp;n++}
+    }
+    el.textContent=n?Math.round(sum/n)+' t/s':'—';
+    const sub=q('#tcTpsSamples');if(sub)sub.textContent=n?n+' 次流式采样':'近 24h 无流式请求';
+  }catch(e){el.textContent='—'}
 }
 async function loadCaps(){
   if(DEMO_MODE){renderCaps(DEMO.caps);return}
@@ -747,9 +770,8 @@ function renderStats(d){
   let totalTokens=0,cacheRead=0,totalReqs=0;
   for(const k of ks){const m=ms[k];totalReqs+=m.request_count||0;totalTokens+=m.total_tokens||0;cacheRead+=m.cache_read_tokens||0}
   q('#tcTotalToken').textContent=fmtFull(totalTokens);q('#tcTotalReq').textContent=totalReqs.toLocaleString()+' 次请求';
-  q('#tcTotalReqs').textContent=fmtFull(totalReqs);q('#tcTotalModels').textContent=ks.length+' 个模型';
-  // 缓存命中率不在这里算：累计计数的历史 cache_read 缺失，改由 loadCacheRate()
-  // 按最近 30 天口径填充。
+  // 缓存在 updateCacheRate() 里按最近 30 天算，平均 tps 在 loadTps() 里算，
+  // 都不走累计计数（历史 cache_read 缺失且无法回填）。
   // 请求量表
   const reqRows=ks.map(k=>({k:k,req:ms[k].request_count||0})).sort((a,b)=>b.req-a.req);
   const totalReq=reqRows.reduce((s,r)=>s+r.req,0);
@@ -866,41 +888,59 @@ function setTrendRange(days,btn){
   btn.classList.add('active');
   loadTrends();
 }
+// 请求热力图：GitHub 贡献图样式 —— 7 行（周一→周日）× N 列（周）。
+// 某列只有在包含「某月 1 日」时才打月份标签，于是月份自然落在坐标轴下方。
 function initHeatmap(){
   const el=q('#heatmapChart');if(!el||typeof echarts==='undefined')return;
-  if(charts.heatmap)charts.heatmap.dispose();charts.heatmap=echarts.init(el);
-  // Use real trends data if available, otherwise empty
-  const heatData=[];
-  const now=new Date();
-  for(let d=29;d>=0;--d){
-    const dt=new Date(now);dt.setDate(dt.getDate()-d);
-    const ds=dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
-    // Find matching trend entry
-    const match=(trendsData||[]).find(t=>t.ts&&t.ts.startsWith(ds));
-    const tokens=match?((match.prompt_tokens||0)+(match.completion_tokens||0)):0;
-    heatData.push([ds,tokens]);
+  if(charts.heatmap){charts.heatmap.dispose();charts.heatmap=null}
+  const byDay={};
+  for(const b of (heatmapData||[])){const k=(b.ts||'').slice(0,10);if(k)byDay[k]=(b.prompt_tokens||0)+(b.completion_tokens||0)}
+  const today=new Date();today.setHours(0,0,0,0);
+  const start=new Date(today);
+  start.setDate(start.getDate()-((heatmapData&&heatmapData.length>1?heatmapData.length:180)-1));
+  start.setDate(start.getDate()-((start.getDay()+6)%7)); // 回退到周一，保证每列同一天
+  const cells=[];const monthAt={};let n=0;
+  for(const d=new Date(start);d<=today;d.setDate(d.getDate()+1)){
+    const ds=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    const wk=Math.floor(n/7);
+    cells.push([wk,n%7,byDay[ds]||0,ds]);
+    if(d.getDate()===1)monthAt[wk]=(d.getMonth()+1)+'月';
+    n++;
   }
-  const maxV=Math.max(...heatData.map(d=>d[1]),1);
-  const firstD=heatData[0][0],lastD=heatData[heatData.length-1][0];
+  const xLabels=[];for(let w=0;w<Math.ceil(n/7);w++)xLabels.push(monthAt[w]||'');
+  // 让格子接近正方形（随容器宽度自适应），否则 7 行会被 210px 拉成长条。
+  const nWeeks=xLabels.length||1;
+  const avail=Math.max(180,(el.clientWidth||460)-12);
+  const cell=Math.max(8,Math.min(20,Math.floor(avail/nWeeks)));
+  el.style.height=(cell*7+34)+'px';
+  const maxV=Math.max(1,...cells.map(c=>c[2]));
   const dark=isDark();
+  const base=dark?'#1b2434':'#ebedf0';
+  charts.heatmap=echarts.init(el);
   charts.heatmap.setOption({
-    tooltip:{formatter:p=>'<b>'+p.value[0]+'</b><br/>Token: '+fmtFull(p.value[1])},
-    visualMap:{min:0,max:maxV,show:false,inRange:{color:['rgba(111,150,255,.06)','rgba(111,150,255,.15)','rgba(111,150,255,.3)','rgba(111,150,255,.55)',getCSS('--accent')||'#6f96ff']}},
-    calendar:{range:[firstD,lastD],cellSize:[18,18],top:20,left:44,right:12,bottom:4,
-      itemStyle:{borderWidth:1.5,borderColor:dark?'#0d1420':'#f8f9fa',borderRadius:3},
-      splitLine:{show:false},yearLabel:{show:false},
-      monthLabel:{color:dark?'#7b87a5':'#616d88',fontSize:10,nameMap:'ZH',margin:6},
-      dayLabel:{color:dark?'#5a6a85':'#8896aa',fontSize:9,nameMap:['日','一','二','三','四','五','六'],firstDay:1}
-    },
-    series:[{type:'heatmap',coordinateSystem:'calendar',data:heatData,itemStyle:{borderRadius:3}}]
+    tooltip:{formatter:p=>'<b>'+p.value[3]+'</b><br/>Token: '+fmtFull(p.value[2])},
+    grid:{left:6,right:6,top:6,bottom:24},
+    xAxis:{type:'category',data:xLabels,axisLine:{show:false},axisTick:{show:false},
+      splitArea:{show:false},axisLabel:{color:dark?'#7b87a5':'#616d88',fontSize:11,interval:0,margin:7}},
+    yAxis:{type:'category',data:['一','二','三','四','五','六','日'],axisLine:{show:false},
+      axisTick:{show:false},splitArea:{show:false},axisLabel:{show:false}},
+    visualMap:{min:0,max:maxV,show:false,
+      inRange:{color:[base,'#cfe0ff','#a8c7ff','#7aa5ff','#4a7dff','#2b5fd9']}},
+    series:[{type:'heatmap',data:cells,progressive:0,
+      itemStyle:{borderRadius:3,borderWidth:2,borderColor:getCSS('--surface')||'#101828'},
+      emphasis:{itemStyle:{borderColor:dark?'#e9eef8':'#161a26'}}}]
   });
 }
 function initDonut(ms){
   const el=q('#donutChart');if(!el||typeof echarts==='undefined')return;
-  if(charts.donut)charts.donut.dispose();charts.donut=echarts.init(el);
   const data=ms?Object.entries(ms).map(([name,s])=>({name,value:s.request_count||0})).filter(d=>d.value>0):[];
-  if(!data.length){el.innerHTML='<div style="text-align:center;padding:40px 0;color:var(--text-ter);font-size:13px">暂无数据</div>';return}
+  // 顺序很关键：必须先把容器清空、再 echarts.init。原先是 init 之后才
+  // el.innerHTML=''，把 echarts 刚插进去的 canvas 一起删掉了，实例绑在空壳上，
+  // 饼图永远不显示。
+  if(charts.donut){charts.donut.dispose();charts.donut=null}
   el.innerHTML='';
+  if(!data.length){el.innerHTML='<div style="text-align:center;padding:40px 0;color:var(--text-ter);font-size:13px">暂无数据</div>';return}
+  charts.donut=echarts.init(el);
   charts.donut.setOption({
     tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)'},
     color:['#6f96ff','#7ea2ff','#2fd489','#b197f7'],
@@ -915,7 +955,6 @@ function toggleChartSettings(){q('#chartSettingsPanel').classList.toggle('open')
 function toggleChart(name,show){const el=q('#chart'+name.charAt(0).toUpperCase()+name.slice(1));if(el)el.style.display=show?'':'none'}
 function renderTrends(){
   if(trendTab==='token')initTrend(currentTrendDays);else initReqTrend(currentTrendDays);
-  initHeatmap();  // re-render heatmap with loaded data
 }
 function setTrendRefresh(){}  /* no-op: ECharts handles refresh via loadTrends */
 async function loadTrends(){

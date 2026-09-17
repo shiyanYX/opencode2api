@@ -376,7 +376,7 @@ type TrendsPoint struct {
 }
 
 // trendsFromCallLog 扫描 call_log.jsonl 全量历史，按 range 聚簇返回时间序列。
-// range: today（24 个整点小时桶）/ 7d / 30d（逐日桶，含零数据时段保证连线连续）。
+// range: today（24 个整点小时桶）/ 7d / 30d / 180d（逐日桶，含零数据时段保证连线连续）。
 // 路径未初始化或文件缺失时返回空数组。
 func trendsFromCallLog(rng string) []TrendsPoint {
 	callLog.mu.Lock()
@@ -396,17 +396,11 @@ func trendsFromCallLog(rng string) []TrendsPoint {
 		return int(dayStart.Sub(start) / (24 * time.Hour))
 	}
 	switch rng {
-	case "7d":
-		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -6)
-		buckets = make([]TrendsPoint, 7)
-		for i := 0; i < 7; i++ {
-			buckets[i] = TrendsPoint{TS: start.AddDate(0, 0, i).Format("2006-01-02")}
-		}
-		bidx = func(t time.Time) int { return dayIdx(t, start) }
-	case "30d":
-		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -29)
-		buckets = make([]TrendsPoint, 30)
-		for i := 0; i < 30; i++ {
+	case "7d", "30d", "180d":
+		n := map[string]int{"7d": 7, "30d": 30, "180d": 180}[rng]
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -(n - 1))
+		buckets = make([]TrendsPoint, n)
+		for i := 0; i < n; i++ {
 			buckets[i] = TrendsPoint{TS: start.AddDate(0, 0, i).Format("2006-01-02")}
 		}
 		bidx = func(t time.Time) int { return dayIdx(t, start) }
