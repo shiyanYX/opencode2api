@@ -397,7 +397,7 @@ input,select,textarea{font-family:inherit;color:inherit}
     </div>
     <!-- Token 统计三指标卡 -->
     <div class="token-cards">
-      <div class="token-card blue-card"><div class="tc-label">本月总 Token</div><div class="tc-value" id="tcTotalToken" style="color:var(--blue)">-</div><div class="tc-sub muted" id="tcTotalReq">-</div></div>
+      <div class="token-card blue-card"><div class="tc-label">累计总 Token</div><div class="tc-value" id="tcTotalToken" style="color:var(--blue)">-</div><div class="tc-sub muted" id="tcTotalReq">-</div></div>
       <div class="token-card purple-card"><div class="tc-label">缓存命中率</div><div class="tc-value" id="tcCacheRate" style="color:var(--purple)">-</div><div class="progress-bar"><div class="pbar"><i id="tcCacheBar" style="width:0"></i></div><span class="pct" id="tcCachePct">-</span></div></div>
       <div class="token-card" style="background:linear-gradient(135deg,rgba(240,176,74,.08),rgba(240,176,74,.02));border-color:rgba(240,176,74,.2)"><div class="tc-label">请求次数</div><div class="tc-value" id="tcTotalReqs" style="color:var(--orange)">-</div><div class="tc-sub muted" id="tcTotalModels">-</div></div>
     </div>
@@ -409,7 +409,7 @@ input,select,textarea{font-family:inherit;color:inherit}
           <div style="display:flex;gap:4px;background:var(--surface-2);border-radius:8px;padding:2px"><button class="btn btn-sm" style="background:var(--accent-dim);color:var(--accent);border:none;border-radius:6px" onclick="switchTrendTab('token',this)" id="trendTabToken">📈 Token 用量</button><button class="btn btn-sm btn-ghost" onclick="switchTrendTab('req',this)" id="trendTabReq">📊 请求次数</button></div>
           <button class="chart-settings-btn" onclick="toggleChartSettings()" title="图表设置">⚙️</button>
         </div>
-        <div class="time-chips"><span class="chip active" onclick="setTrendRange(1,this)">今日</span><span class="chip" onclick="setTrendRange(7,this)">7天</span><span class="chip" onclick="setTrendRange(30,this)">30天</span></div>
+        <div class="time-chips"><span class="chip" onclick="setTrendRange(1,this)">今日</span><span class="chip" onclick="setTrendRange(7,this)">7天</span><span class="chip active" onclick="setTrendRange(30,this)">30天</span></div>
       </div>
       <div class="chart-settings-panel" id="chartSettingsPanel">
         <label><input type="checkbox" checked onchange="toggleChart('heatmap',this.checked)"> 📅 请求热力图</label>
@@ -658,7 +658,7 @@ const q=s=>document.querySelector(s);
 const qa=s=>document.querySelectorAll(s);
 let cfg={},nodeData=[],subData=[],wsData=[],wsInfo={},nodeEditors=[],modelList=[],freeModelIDs=[],filter='all';
 let DEMO_MODE=false,demoLogTimer=null;
-let trendsData=[],trendRange='today',trendTimer=null;
+let trendsData=[],trendRange='30d',trendTimer=null;
 
 /* ---------- 主题：默认深色 ---------- */
 function applyTheme(){
@@ -789,7 +789,8 @@ function initAllCharts(){initTrend(currentTrendDays);initHeatmap()}
 function initTrend(days){
   currentTrendDays=days;const el=q('#trendChart');if(!el||typeof echarts==='undefined')return;
   if(charts.trend)charts.trend.dispose();charts.trend=echarts.init(el);
-  const slice=trendsData.slice(-days);const dates=slice.map(d=>d.ts);
+  const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
+  const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
   const promptNoCache=slice.map(d=>(d.prompt_tokens||0)-(d.cache_read_tokens||0));
   const cacheHit=slice.map(d=>d.cache_read_tokens||0);
   const compT=slice.map(d=>d.completion_tokens||0);
@@ -810,7 +811,8 @@ function initTrend(days){
 function initReqTrend(days){
   const el=q('#reqTrendChart');if(!el||typeof echarts==='undefined')return;
   if(charts.reqTrend)charts.reqTrend.dispose();charts.reqTrend=echarts.init(el);
-  const slice=trendsData.slice(-days);const dates=slice.map(d=>d.ts);
+  const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
+  const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
   const ok=slice.map(d=>d.ok||0);const fail=slice.map(d=>d.fail||0);
   const okC=getCSS('--ok')||'#2fd489',failC=getCSS('--red')||'#ff6b6b';
   charts.reqTrend.setOption({
@@ -834,9 +836,10 @@ function switchTrendTab(tab,btn){
 }
 function setTrendRange(days,btn){
   currentTrendDays=days;
+  trendRange=days===1?'today':days===7?'7d':'30d';
   btn.parentElement.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
   btn.classList.add('active');
-  if(trendTab==='token')initTrend(days);else initReqTrend(days);
+  loadTrends();
 }
 function initHeatmap(){
   const el=q('#heatmapChart');if(!el||typeof echarts==='undefined')return;
