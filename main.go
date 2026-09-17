@@ -2181,6 +2181,9 @@ func promoteMisplacedReasoning(fields map[string]any, keepReasoning bool) bool {
 }
 
 func cleanStreamDelta(delta map[string]any, keepReasoning bool) {
+	// 兜底：注入的占位工具调用绝不能到达客户端（tool_choice:"none" 理应
+	// 已阻止模型调用它）。见 agent_shape.go。
+	stripPlaceholderToolCalls(delta)
 	_ = promoteMisplacedReasoning(delta, keepReasoning)
 	if v, ok := delta["content"]; ok && v == nil {
 		delete(delta, "content")
@@ -2503,6 +2506,9 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	if err := json.Unmarshal(upstreamBody, &bodyMap); err != nil {
 		return nil, 500, nil, fmt.Errorf("invalid request body")
 	}
+	// 上游免费层要求 tools 非空 + stream=true；本函数服务非流式客户端，
+	// 因此把上游 SSE 聚合回单个 chat.completion。见 agent_shape.go。
+	ensureAgentUpstreamShape(bodyMap)
 	useGoEndpoint := auth.shouldUseGoEndpoint(modelID)
 	surface := "zen"
 	if useGoEndpoint {
@@ -2595,6 +2601,9 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			if readErr != nil {
 				return nil, http.StatusBadGateway, nil, readErr
 			}
+			// 上游现在恒为 stream=true（agent 形态要求），非流式客户端需要把
+			// SSE 聚合回单个 chat.completion；非 SSE 响应原样透传。
+			b = aggregateUpstreamSSE(b, modelID)
 			if isAnthropicFormat(b) {
 				b = convertAnthropicToOpenAI(b, modelID)
 			}
@@ -2747,6 +2756,8 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	if err := json.Unmarshal(upstreamBody, &bodyMap); err != nil {
 		return nil, 500, nil, fmt.Errorf("invalid request body")
 	}
+	// 上游免费层要求 tools 非空 + stream=true。见 agent_shape.go。
+	ensureAgentUpstreamShape(bodyMap)
 	useGoEndpoint := auth.shouldUseGoEndpoint(modelID)
 	surface := "zen"
 	if useGoEndpoint {
@@ -4532,6 +4543,8 @@ func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io
 		choice, _ := choices[0].(map[string]any)
 		delta, _ := choice["delta"].(map[string]any)
 		finishReason, _ := choice["finish_reason"].(string)
+		// 兜底：剔除注入的占位工具调用。见 agent_shape.go。
+		stripPlaceholderToolCalls(delta)
 		stats.noteChunk()
 
 		ensureMessageStart()
@@ -5838,6 +5851,8 @@ func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.R
 		choice, _ := choices[0].(map[string]any)
 		delta, _ := choice["delta"].(map[string]any)
 		finishReason, _ := choice["finish_reason"].(string)
+		// 兜底：剔除注入的占位工具调用。见 agent_shape.go。
+		stripPlaceholderToolCalls(delta)
 		if finishReason != "" {
 			stats.finishReason = finishReason
 			stats.sawFinish = true
