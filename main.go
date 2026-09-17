@@ -930,12 +930,15 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 // ======================== Token 统计 ========================
 
 type ModelStats struct {
-	RequestCount       int64 `json:"request_count"`
-	PromptTokens       int64 `json:"prompt_tokens"`
-	CompletionTokens   int64 `json:"completion_tokens"`
-	TotalTokens        int64 `json:"total_tokens"`
-	CacheReadTokens    int64 `json:"cache_read_tokens,omitempty"`
-	CacheCreatedTokens int64 `json:"cache_created_tokens,omitempty"`
+	RequestCount       int64   `json:"request_count"`
+	PromptTokens       int64   `json:"prompt_tokens"`
+	CompletionTokens   int64   `json:"completion_tokens"`
+	TotalTokens        int64   `json:"total_tokens"`
+	CacheReadTokens    int64   `json:"cache_read_tokens,omitempty"`
+	CacheCreatedTokens int64   `json:"cache_created_tokens,omitempty"`
+	AvgTTFTMs          float64 `json:"avg_ttft_ms,omitempty"`      // 平均首 token 延迟
+	AvgOutputSpeed     float64 `json:"avg_output_speed,omitempty"` // 平均输出速度 tokens/s
+	StreamReqCount     int64   `json:"stream_req_count,omitempty"` // 流式请求数
 }
 
 type TokenStatsData struct {
@@ -1554,6 +1557,26 @@ func recordTokenUsageWithCache(model string, promptTokens, completionTokens, tot
 	if cacheRead > 0 {
 		ms.CacheReadTokens += cacheRead
 	}
+	tokenStatsMu.Unlock()
+	go saveTokenStats()
+}
+
+// recordModelSpeed 在请求结束时累计模型输出速度和首 token 延迟（仅流式）。
+func recordModelSpeed(model string, ttftMs int64, outputSpeed float64) {
+	if model == "" || outputSpeed <= 0 {
+		return
+	}
+	tokenStatsMu.Lock()
+	ms, ok := tokenStats.Models[model]
+	if !ok {
+		ms = &ModelStats{}
+		tokenStats.Models[model] = ms
+	}
+	ms.StreamReqCount++
+	// 增量平均：newAvg = oldAvg + (newVal - oldAvg) / count
+	n := float64(ms.StreamReqCount)
+	ms.AvgTTFTMs += (float64(ttftMs) - ms.AvgTTFTMs) / n
+	ms.AvgOutputSpeed += (outputSpeed - ms.AvgOutputSpeed) / n
 	tokenStatsMu.Unlock()
 	go saveTokenStats()
 }
@@ -3084,6 +3107,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 
 				if strings.HasPrefix(line, "data: ") {
+					callLogFirstToken(clCtx) // 记录首 token 时间
 					var raw map[string]any
 					if json.Unmarshal([]byte(line[6:]), &raw) == nil {
 						if v, ok := raw["id"].(string); ok && v != "" {
@@ -4517,6 +4541,7 @@ func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
+		callLogFirstToken(ctx) // 记录首 token 时间
 
 		var chunk map[string]any
 		if err := json.Unmarshal([]byte(line[6:]), &chunk); err != nil {
@@ -5806,6 +5831,7 @@ func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.R
 		if !strings.HasPrefix(line, "data: ") {
 			continue
 		}
+		callLogFirstToken(ctx) // 记录首 token 时间
 
 		var chunk map[string]any
 		if err := json.Unmarshal([]byte(line[6:]), &chunk); err != nil {

@@ -437,7 +437,7 @@ input,select,textarea{font-family:inherit;color:inherit}
         <div style="font-size:13px;font-weight:600">📊 模型明细</div>
         <div><button class="btn btn-ghost btn-sm" onclick="loadStats()">刷新</button><button class="btn btn-danger btn-sm" onclick="resetStats()">清空</button><span id="resetStatus" class="muted" style="font-size:11px"></span></div>
       </div>
-      <table class="tbl" id="statsTable"><colgroup><col style="width:28%"><col style="width:18%"><col style="width:18%"><col style="width:18%"><col style="width:18%"></colgroup><thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th class="num">总计</th></tr></thead><tbody><tr><td colspan="5" class="empty-hint">点击"刷新"加载数据</td></tr></tbody></table>
+      <table class="tbl" id="statsTable"><colgroup><col style="width:22%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:11%"><col style="width:11%"></colgroup><thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th class="num">总计</th><th class="num">TTFT</th><th class="num">速度</th></tr></thead><tbody><tr><td colspan="7" class="empty-hint">点击"刷新"加载数据</td></tr></tbody></table>
     </div>
 
     <!-- 快速接入 -->
@@ -711,7 +711,7 @@ async function loadNodes(){
 }
 async function loadStats(){
   if(DEMO_MODE){renderStats(DEMO.stats);return}
-  try{const r=await fetch('/api/stats');const d=await r.json();renderStats(d)}catch(e){const tb=q('#statsTable tbody');if(tb)tb.innerHTML='<tr><td colspan="5" class="empty-hint">加载失败 <button class="btn btn-sm btn-ghost" onclick="loadStats()">重试</button></td></tr>'}
+  try{const r=await fetch('/api/stats');const d=await r.json();renderStats(d)}catch(e){const tb=q('#statsTable tbody');if(tb)tb.innerHTML='<tr><td colspan="7" class="empty-hint">加载失败 <button class="btn btn-sm btn-ghost" onclick="loadStats()">重试</button></td></tr>'}
 }
 async function loadCaps(){
   if(DEMO_MODE){renderCaps(DEMO.caps);return}
@@ -742,9 +742,9 @@ function renderStats(d){
   else{for(const r of reqRows){const pct=totalReq?Math.round(r.req/totalReq*100):0;rh+='<tr><td class="mono">'+esc(r.k)+'</td><td class="num">'+fmtFull(r.req)+'</td><td class="num"><div class="usage" style="justify-content:flex-end"><div class="usage-bar" style="width:60px"><i style="width:'+pct+'%"></i></div><span>'+pct+'%</span></div></td></tr>'}}
   q('#reqTable').querySelector('tbody').innerHTML=rh;
   // 模型明细表
-  let h='';if(!ks.length){h='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>'}
-  else{for(const k of ks){const m=ms[k];h+='<tr><td class="mono">'+esc(k)+'</td><td class="num" style="color:var(--blue)">'+fmtFull(m.prompt_tokens)+'</td><td class="num" style="color:var(--ok)">'+fmtFull(m.completion_tokens)+'</td><td class="num" style="color:var(--purple)">'+fmtFull(m.cache_read_tokens||0)+'</td><td class="num" style="font-weight:700">'+fmtFull(m.total_tokens)+'</td></tr>'}
-    h+='<tr style="font-weight:700;border-top:2px solid var(--border-strong)"><td>总计</td><td class="num" style="color:var(--blue)">'+fmtFull(Object.values(ms).reduce((s,m)=>s+(m.prompt_tokens||0),0))+'</td><td class="num" style="color:var(--ok)">'+fmtFull(Object.values(ms).reduce((s,m)=>s+(m.completion_tokens||0),0))+'</td><td class="num" style="color:var(--purple)">'+fmtFull(cacheRead)+'</td><td class="num">'+fmtFull(totalTokens)+'</td></tr>'}
+  let h='';if(!ks.length){h='<tr><td colspan="7" class="empty-hint">暂无数据</td></tr>'}
+  else{for(const k of ks){const m=ms[k];const ttft=m.avg_ttft_ms?Math.round(m.avg_ttft_ms)+'ms':'—';const spd=m.avg_output_speed?m.avg_output_speed.toFixed(1)+' t/s':'—';h+='<tr><td class="mono">'+esc(k)+'</td><td class="num" style="color:var(--blue)">'+fmtFull(m.prompt_tokens)+'</td><td class="num" style="color:var(--ok)">'+fmtFull(m.completion_tokens)+'</td><td class="num" style="color:var(--purple)">'+fmtFull(m.cache_read_tokens||0)+'</td><td class="num" style="font-weight:700">'+fmtFull(m.total_tokens)+'</td><td class="num" style="color:var(--orange)">'+ttft+'</td><td class="num" style="color:var(--ok)">'+spd+'</td></tr>'}
+    h+='<tr style="font-weight:700;border-top:2px solid var(--border-strong)"><td>总计</td><td class="num" style="color:var(--blue)">'+fmtFull(Object.values(ms).reduce((s,m)=>s+(m.prompt_tokens||0),0))+'</td><td class="num" style="color:var(--ok)">'+fmtFull(Object.values(ms).reduce((s,m)=>s+(m.completion_tokens||0),0))+'</td><td class="num" style="color:var(--purple)">'+fmtFull(cacheRead)+'</td><td class="num">'+fmtFull(totalTokens)+'</td><td></td><td></td></tr>'}
   q('#statsTable').querySelector('tbody').innerHTML=h;
   // 更新甜甜圈图
   initDonut(ms);
@@ -1155,8 +1155,8 @@ async function reloadConfig(){
 async function resetStats(){
   if(!confirm('确认清空所有 Token 统计？此操作不可撤销。'))return;
   const s=q('#resetStatus');s.textContent='清空中…';
-  if(DEMO_MODE){q('#statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000);return}
-  try{const r=await fetch('/api/stats',{method:'DELETE'});if(!r.ok)throw new Error(await r.text());q('#statsTable').innerHTML='<tr><td colspan="5" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000)}catch(e){s.textContent='失败: '+e.message}
+  if(DEMO_MODE){q('#statsTable').innerHTML='<tr><td colspan="7" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000);return}
+  try{const r=await fetch('/api/stats',{method:'DELETE'});if(!r.ok)throw new Error(await r.text());q('#statsTable').innerHTML='<tr><td colspan="7" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000)}catch(e){s.textContent='失败: '+e.message}
 }
 function renderConfigEditors(){
   subData=(cfg.subscriptions||[]).map(s=>({...s}));
