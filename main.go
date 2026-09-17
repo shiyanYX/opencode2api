@@ -321,6 +321,39 @@ func fetchOCVersionDirect() string {
 // noSessionRefresh 测试桩：置真时 refreshOCSession 不做网络请求。
 var noSessionRefresh bool
 
+// ======================== 按节点绑定 Session ID ========================
+
+// nodeSessionPool 按代理节点指纹绑定 session ID，模拟正常用户行为。
+// 同一节点的所有请求共享同一个 session ID，不同节点使用不同的 session ID。
+var (
+	nodeSessionPool   = make(map[string]string)
+	nodeSessionPoolMu sync.RWMutex
+)
+
+// getOrCreateSessionByNode 获取或创建按节点指纹绑定的 session ID。
+// 如果该节点已有 session ID，则返回已有的；否则创建新的。
+func getOrCreateSessionByNode(nodeFP string) string {
+	if nodeFP == "" {
+		nodeFP = "direct"
+	}
+	nodeSessionPoolMu.RLock()
+	session, exists := nodeSessionPool[nodeFP]
+	nodeSessionPoolMu.RUnlock()
+	if exists {
+		return session
+	}
+	nodeSessionPoolMu.Lock()
+	defer nodeSessionPoolMu.Unlock()
+	// 双重检查，避免并发创建
+	if session, exists = nodeSessionPool[nodeFP]; exists {
+		return session
+	}
+	session = "ses_" + randomString(24)
+	nodeSessionPool[nodeFP] = session
+	slog.Debug("created session for node", "node_fp", nodeFP, "session_id", session)
+	return session
+}
+
 func initOCSession() {
 	ocInitMu.Lock()
 	defer ocInitMu.Unlock()
@@ -1029,7 +1062,7 @@ type QuotaSignalsConfig struct {
 }
 
 func defaultQuotaErrorTypes() []string {
-	return []string{"FreeUsageLimitError", "insufficient_quota", "credits_error", "billing_error"}
+	return []string{"FreeUsageLimitError", "FreeTierError", "insufficient_quota", "credits_error", "billing_error"}
 }
 
 func defaultQuotaMessageKeywords() []string {
@@ -2383,11 +2416,11 @@ func modelExistsInCaches(modelID string) bool {
 	return containsModelWithID(modelsCache, modelID) || containsModelWithID(goModelsCache, modelID)
 }
 
-func buildOCRequest(modelID string, bodyMap map[string]any, auth UpstreamAuth) (*http.Request, error) {
-	return buildOCRequestWithEndpoint(modelID, bodyMap, auth, auth.shouldUseGoEndpoint(modelID))
+func buildOCRequest(modelID string, bodyMap map[string]any, auth UpstreamAuth, nodeFP string) (*http.Request, error) {
+	return buildOCRequestWithEndpoint(modelID, bodyMap, auth, auth.shouldUseGoEndpoint(modelID), nodeFP)
 }
 
-func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth UpstreamAuth, useGoEndpoint bool) (*http.Request, error) {
+func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth UpstreamAuth, useGoEndpoint bool, nodeFP string) (*http.Request, error) {
 	bodyMap["model"] = modelID
 	tryBody, err := json.Marshal(bodyMap)
 	if err != nil {
@@ -2408,7 +2441,7 @@ func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth Ups
 	req.Header.Set("User-Agent", fmt.Sprintf("opencode/%s", ocClientVer))
 	req.Header.Set("x-opencode-client", "cli")
 	req.Header.Set("x-opencode-project", ocProjectID)
-	req.Header.Set("x-opencode-session", ocSessionID)
+	req.Header.Set("x-opencode-session", getOrCreateSessionByNode(nodeFP))
 	req.Header.Set("x-opencode-request", "req_"+randomString(24))
 	req.Header.Set("Accept", "application/json")
 	return req, nil
@@ -2485,12 +2518,12 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	loopBudget := maxAttempts + maxQuotaSwitches
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
-		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint)
+		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		client, nodeFp := egResult.Client, egResult.NodeFP
+		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp)
 		if err != nil {
 			return nil, 500, nil, err
 		}
-		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
-		client, nodeFp := egResult.Client, egResult.NodeFP
 		nodeSwitchPending = false
 		attemptStart := time.Now()
 		resp, err := client.Do(up)
@@ -2728,12 +2761,12 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	loopBudget := maxAttempts + maxQuotaSwitches
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
-		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint)
+		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		client, nodeFp := egResult.Client, egResult.NodeFP
+		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp)
 		if err != nil {
 			return nil, 500, nil, err
 		}
-		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
-		client, nodeFp := egResult.Client, egResult.NodeFP
 		nodeSwitchPending = false
 		attemptStart := time.Now()
 		resp, err := client.Do(up)
