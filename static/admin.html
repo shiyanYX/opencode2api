@@ -729,11 +729,11 @@ function renderOverview(d){
 }
 function renderStats(d){
   const ms=d.models||{};const ks=Object.keys(ms);
-  let totalTokens=0,cacheRead=0,totalReqs=0;
-  for(const k of ks){const m=ms[k];totalReqs+=m.request_count||0;totalTokens+=m.total_tokens||0;cacheRead+=m.cache_read_tokens||0}
+  let totalTokens=0,cacheRead=0,totalReqs=0,totalPrompt=0;
+  for(const k of ks){const m=ms[k];totalReqs+=m.request_count||0;totalTokens+=m.total_tokens||0;cacheRead+=m.cache_read_tokens||0;totalPrompt+=m.prompt_tokens||0}
   q('#tcTotalToken').textContent=fmtFull(totalTokens);q('#tcTotalReq').textContent=totalReqs.toLocaleString()+' 次请求';
   q('#tcTotalReqs').textContent=fmtFull(totalReqs);q('#tcTotalModels').textContent=ks.length+' 个模型';
-  const cacheRate=totalTokens>0?Math.round(cacheRead/totalTokens*100):0;
+  const cacheRate=totalPrompt>0?Math.round(cacheRead/totalPrompt*100):0;
   q('#tcCacheRate').textContent=cacheRate+'%';q('#tcCacheBar').style.width=cacheRate+'%';q('#tcCachePct').textContent=cacheRate+'%';
   // 请求量表
   const reqRows=ks.map(k=>({k:k,req:ms[k].request_count||0})).sort((a,b)=>b.req-a.req);
@@ -785,7 +785,7 @@ function isDark(){return(document.documentElement.getAttribute('data-theme')||'d
 function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
 let currentTrendDays=30,trendTab='token';
 
-function initAllCharts(){initTrend(currentTrendDays);initHeatmap();initDonut()}
+function initAllCharts(){initTrend(currentTrendDays);initHeatmap()}
 function initTrend(days){
   currentTrendDays=days;const el=q('#trendChart');if(!el||typeof echarts==='undefined')return;
   if(charts.trend)charts.trend.dispose();charts.trend=echarts.init(el);
@@ -841,19 +841,28 @@ function setTrendRange(days,btn){
 function initHeatmap(){
   const el=q('#heatmapChart');if(!el||typeof echarts==='undefined')return;
   if(charts.heatmap)charts.heatmap.dispose();charts.heatmap=echarts.init(el);
-  const heatData=[];const now=new Date();
-  for(let d=29;d>=0;--d){const dt=new Date(now);dt.setDate(dt.getDate()-d);const ds=dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');const req=Math.floor(40+Math.random()*60);heatData.push([ds,req*(600+Math.round(Math.random()*400))])}
+  // Use real trends data if available, otherwise empty
+  const heatData=[];
+  const now=new Date();
+  for(let d=29;d>=0;--d){
+    const dt=new Date(now);dt.setDate(dt.getDate()-d);
+    const ds=dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
+    // Find matching trend entry
+    const match=(trendsData||[]).find(t=>t.ts&&t.ts.startsWith(ds));
+    const tokens=match?((match.prompt_tokens||0)+(match.completion_tokens||0)):0;
+    heatData.push([ds,tokens]);
+  }
   const maxV=Math.max(...heatData.map(d=>d[1]),1);
   const firstD=heatData[0][0],lastD=heatData[heatData.length-1][0];
   const dark=isDark();
   charts.heatmap.setOption({
     tooltip:{formatter:p=>'<b>'+p.value[0]+'</b><br/>Token: '+fmtFull(p.value[1])},
-    visualMap:{min:0,max:maxV,show:false,inRange:{color:['rgba(111,150,255,.08)','rgba(111,150,255,.22)','rgba(111,150,255,.42)','rgba(111,150,255,.68)',getCSS('--accent')||'#6f96ff']}},
-    calendar:{range:[firstD,lastD],cellSize:[20,20],top:24,left:48,right:16,bottom:4,
-      itemStyle:{borderWidth:2,borderColor:dark?'#101828':'#ffffff',borderRadius:3},
+    visualMap:{min:0,max:maxV,show:false,inRange:{color:['rgba(111,150,255,.06)','rgba(111,150,255,.15)','rgba(111,150,255,.3)','rgba(111,150,255,.55)',getCSS('--accent')||'#6f96ff']}},
+    calendar:{range:[firstD,lastD],cellSize:[18,18],top:20,left:44,right:12,bottom:4,
+      itemStyle:{borderWidth:1.5,borderColor:dark?'#0d1420':'#f8f9fa',borderRadius:3},
       splitLine:{show:false},yearLabel:{show:false},
-      monthLabel:{color:dark?'#97a3bb':'#59637a',fontSize:11,nameMap:'ZH',margin:8},
-      dayLabel:{color:dark?'#7b87a5':'#616d88',fontSize:10,nameMap:'ZH',firstDay:1}
+      monthLabel:{color:dark?'#7b87a5':'#616d88',fontSize:10,nameMap:'ZH',margin:6},
+      dayLabel:{color:dark?'#5a6a85':'#8896aa',fontSize:9,nameMap:['日','一','二','三','四','五','六'],firstDay:1}
     },
     series:[{type:'heatmap',coordinateSystem:'calendar',data:heatData,itemStyle:{borderRadius:3}}]
   });
@@ -861,7 +870,7 @@ function initHeatmap(){
 function initDonut(ms){
   const el=q('#donutChart');if(!el||typeof echarts==='undefined')return;
   if(charts.donut)charts.donut.dispose();charts.donut=echarts.init(el);
-  const data=ms?Object.entries(ms).map(([name,s])=>({name,value:s.request_count||0})):[];
+  const data=ms?Object.entries(ms).map(([name,s])=>({name,value:s.request_count||0})).filter(d=>d.value>0):[];
   if(!data.length){el.innerHTML='<div style="text-align:center;padding:40px 0;color:var(--text-ter);font-size:13px">暂无数据</div>';return}
   el.innerHTML='';
   charts.donut.setOption({
@@ -878,6 +887,7 @@ function toggleChartSettings(){q('#chartSettingsPanel').classList.toggle('open')
 function toggleChart(name,show){const el=q('#chart'+name.charAt(0).toUpperCase()+name.slice(1));if(el)el.style.display=show?'':'none'}
 function renderTrends(){
   if(trendTab==='token')initTrend(currentTrendDays);else initReqTrend(currentTrendDays);
+  initHeatmap();  // re-render heatmap with loaded data
 }
 function setTrendRefresh(){}  /* no-op: ECharts handles refresh via loadTrends */
 async function loadTrends(){
