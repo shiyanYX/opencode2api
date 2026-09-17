@@ -786,6 +786,13 @@ function getCSS(v){return getComputedStyle(document.documentElement).getProperty
 let currentTrendDays=30,trendTab='token';
 
 function initAllCharts(){initTrend(currentTrendDays);initHeatmap()}
+// fmtAxisTs 把后端桶时间戳格式化成紧凑轴标签：
+//   小时桶 "2026-09-17T14:00" → "14:00"；日桶 "2026-09-17" → "09-17"。
+function fmtAxisTs(ts,hourly){
+  if(!ts)return'';
+  if(hourly){const i=ts.indexOf('T');return i>=0?ts.slice(i+1,i+6):ts}
+  return ts.length>=10?ts.slice(5,10):ts;
+}
 function initTrend(days){
   currentTrendDays=days;const el=q('#trendChart');if(!el||typeof echarts==='undefined')return;
   if(charts.trend)charts.trend.dispose();charts.trend=echarts.init(el);
@@ -799,7 +806,7 @@ function initTrend(days){
     tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+params[0].axisValue+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+fmtFull(p.value)+'<br/>');return s}},
     legend:{data:['输入','命中缓存','输出'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
     grid:{left:60,right:20,top:40,bottom:30},
-    xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.14)':'#e1e5ee'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11}},
+    xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.14)':'#e1e5ee'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11,interval:'auto',formatter:(v)=>fmtAxisTs(v,trendRange==='today')}},
     yAxis:{type:'value',splitLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.08)':'rgba(20,30,60,.06)'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11,formatter:v=>fmt(v)}},
     series:[
       {name:'输入',type:'line',smooth:true,symbol:'none',data:promptNoCache,lineStyle:{width:2.5,color:bC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:bC+'40'},{offset:1,color:bC+'05'}])},itemStyle:{color:bC}},
@@ -819,7 +826,7 @@ function initReqTrend(days){
     tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+params[0].axisValue+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+p.value+'<br/>');return s}},
     legend:{data:['成功','失败'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
     grid:{left:50,right:20,top:35,bottom:30},
-    xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.14)':'#e1e5ee'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11}},
+    xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.14)':'#e1e5ee'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11,interval:'auto',formatter:(v)=>fmtAxisTs(v,trendRange==='today')}},
     yAxis:{type:'value',splitLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.08)':'rgba(20,30,60,.06)'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11}},
     series:[
       {name:'成功',type:'line',smooth:true,symbol:'none',data:ok,lineStyle:{width:2.5,color:okC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:okC+'30'},{offset:1,color:okC+'05'}])},itemStyle:{color:okC}},
