@@ -793,6 +793,9 @@ function fmtAxisTs(ts,hourly){
   if(hourly){const i=ts.indexOf('T');return i>=0?ts.slice(i+1,i+6):ts}
   return ts.length>=10?ts.slice(5,10):ts;
 }
+// trendTooltipTitle 悬浮标题：今日档只给时间（后端桶是 "2026-09-17T14:00"），
+// 7天/30天档给完整日期。
+function trendTooltipTitle(ts){return trendRange==='today'?fmtAxisTs(ts,true):ts}
 function initTrend(days){
   currentTrendDays=days;const el=q('#trendChart');if(!el||typeof echarts==='undefined')return;
   if(charts.trend)charts.trend.dispose();charts.trend=echarts.init(el);
@@ -803,7 +806,7 @@ function initTrend(days){
   const compT=slice.map(d=>d.completion_tokens||0);
   const bC=getCSS('--blue')||'#7ea2ff',oC=getCSS('--ok')||'#2fd489',pC=getCSS('--purple')||'#b197f7';
   charts.trend.setOption({
-    tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+params[0].axisValue+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+fmtFull(p.value)+'<br/>');return s}},
+    tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+trendTooltipTitle(params[0].axisValue)+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+fmtFull(p.value)+'<br/>');return s}},
     legend:{data:['输入','命中缓存','输出'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
     grid:{left:60,right:20,top:40,bottom:30},
     xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.14)':'#e1e5ee'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11,interval:'auto',formatter:(v)=>fmtAxisTs(v,trendRange==='today')}},
@@ -823,7 +826,7 @@ function initReqTrend(days){
   const ok=slice.map(d=>d.ok||0);const fail=slice.map(d=>d.fail||0);
   const okC=getCSS('--ok')||'#2fd489',failC=getCSS('--red')||'#ff6b6b';
   charts.reqTrend.setOption({
-    tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+params[0].axisValue+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+p.value+'<br/>');return s}},
+    tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+trendTooltipTitle(params[0].axisValue)+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+p.value+'<br/>');return s}},
     legend:{data:['成功','失败'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
     grid:{left:50,right:20,top:35,bottom:30},
     xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.14)':'#e1e5ee'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11,interval:'auto',formatter:(v)=>fmtAxisTs(v,trendRange==='today')}},
