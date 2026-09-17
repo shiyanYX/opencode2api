@@ -348,7 +348,7 @@ func getOrCreateSessionByNode(nodeFP string) string {
 	if session, exists = nodeSessionPool[nodeFP]; exists {
 		return session
 	}
-	session = "ses_" + randomString(24)
+	session = newSessionID()
 	nodeSessionPool[nodeFP] = session
 	slog.Debug("created session for node", "node_fp", nodeFP, "session_id", session)
 	return session
@@ -361,7 +361,7 @@ func initOCSession() {
 		return
 	}
 	ocClientVer = fetchOCVersion()
-	ocSessionID = "ses_" + randomString(24)
+	ocSessionID = newSessionID()
 	ocProjectID = randomHex(40)
 	slog.Info("opencode version", "version", ocClientVer)
 	slog.Info("session initialized", "session_id", ocSessionID)
@@ -373,13 +373,13 @@ func refreshOCSession() {
 	ocInitMu.Lock()
 	defer ocInitMu.Unlock()
 	if noSessionRefresh { // 测试桩：只本地轮换，不访问网络
-		ocSessionID = "ses_" + randomString(24)
+		ocSessionID = newSessionID()
 		ocProjectID = randomHex(40)
 		ocInitDone = false
 		return
 	}
 	ocClientVer = fetchOCVersionDirect()
-	ocSessionID = "ses_" + randomString(24)
+	ocSessionID = newSessionID()
 	ocProjectID = randomHex(40)
 	slog.Info("session refreshed", "version", ocClientVer, "session_id", ocSessionID)
 	// 恢复未初始化状态，后续 initOCSession 重新初始化
@@ -1062,7 +1062,11 @@ type QuotaSignalsConfig struct {
 }
 
 func defaultQuotaErrorTypes() []string {
-	return []string{"FreeUsageLimitError", "FreeTierError", "insufficient_quota", "credits_error", "billing_error"}
+	// 注意：不要加入 FreeTierError。它表示"上游拒绝我们的客户端身份"
+	// （x-opencode-session 形态不合规等），换节点无法修复，
+	// 归类为配额信号只会白白消耗节点切换预算并掩盖真实原因。
+	// 修复见 opencode_id.go。
+	return []string{"FreeUsageLimitError", "insufficient_quota", "credits_error", "billing_error"}
 }
 
 func defaultQuotaMessageKeywords() []string {
@@ -2442,7 +2446,7 @@ func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth Ups
 	req.Header.Set("x-opencode-client", "cli")
 	req.Header.Set("x-opencode-project", ocProjectID)
 	req.Header.Set("x-opencode-session", getOrCreateSessionByNode(nodeFP))
-	req.Header.Set("x-opencode-request", "req_"+randomString(24))
+	req.Header.Set("x-opencode-request", newOpenCodeID("msg"))
 	req.Header.Set("Accept", "application/json")
 	return req, nil
 }

@@ -23,6 +23,15 @@ func rewriteUpstreamError(body []byte) []byte {
 
 	// 提取错误信息：兼容 Anthropic 和 OpenAI 两种格式
 	errType, msg := extractErrorFields(obj)
+
+	// FreeTierError 表示上游拒绝我们的客户端身份（例如 x-opencode-session
+	// 形态不合规），属于网关侧问题，不是"免费模型已下线"。它的 message
+	// 里包含 "free tier" 子串，若继续改写会被误报成模型下线，掩盖真实原因，
+	// 因此这里直接透传原始错误，保留可诊断性。
+	if strings.EqualFold(errType, "FreeTierError") {
+		return body
+	}
+
 	msgL := strings.ToLower(msg)
 
 	// 已知的"免费模型已下线"特征关键词
