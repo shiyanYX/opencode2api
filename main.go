@@ -1581,23 +1581,19 @@ func recordModelSpeed(model string, ttftMs int64, outputSpeed float64) {
 	go saveTokenStats()
 }
 
-// parseCacheUsage 从上游 usage 提取（缓存读取, 缓存写入）。canonical Anthropic
-// 字段优先，DeepSeek/cached_tokens 兜底互斥，避免多种 usage 形态同时出现时重复计数。
-func parseCacheUsage(usage map[string]any) (int64, int64) {
-	var read, created int64
-	if v, ok := usageIntField(usage, "cache_read_input_tokens"); ok {
-		read = int64(v)
-	} else if v, ok := usageIntField(usage, "prompt_cache_hit_tokens"); ok {
-		read = int64(v)
-	} else if details, ok := usageMapField(usage, "prompt_tokens_details"); ok {
-		if v, ok := usageIntField(details, "cached_tokens"); ok {
-			read = int64(v)
-		}
+// recordUsageStats 把一份上游 usage 记账到 token 统计，并返回解析出的
+// (输入, 输出, 缓存写入, 缓存读取) 供调用方复用于调用日志。
+//
+// 必须统一经 usageFromMap 解析：其返回序第三/四项就是「缓存写入」「缓存读取」。
+// 历史上各调用点另外调 parseCacheUsage（返回序恰为 read, created）并当成
+// (created, read) 使用，于是 cache_read 被写进 cache_created，面板缓存命中率
+// 恒为 0%。统一走这里可避免再次写反。
+func recordUsageStats(model string, u map[string]any) (pt, ct, cc, cr int64) {
+	pt, ct, cc, cr = usageFromMap(u)
+	if tt, _ := u["total_tokens"].(float64); tt > 0 {
+		recordTokenUsageWithCache(model, pt, ct, int64(tt), cc, cr)
 	}
-	if v, ok := usageIntField(usage, "cache_creation_input_tokens"); ok {
-		created = int64(v)
-	}
-	return read, created
+	return pt, ct, cc, cr
 }
 
 // ======================== Thinking/Reasoning 判断 ========================
@@ -3138,11 +3134,8 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 				if out == "" {
 					// 空choices chunk，但可能有 usage
 					if usage != nil {
-						pt, ct, cc, cr := usageFromMap(usage)
-						_, pcr := parseCacheUsage(usage)
-						tt, _ := usage["total_tokens"].(float64)
-						if tt > 0 {
-							recordTokenUsageWithCache(req.Model, pt, ct, int64(tt), cc, pcr)
+						pt, ct, cc, cr := recordUsageStats(req.Model, usage)
+						if tt, _ := usage["total_tokens"].(float64); tt > 0 {
 							lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
 						} else if pt > 0 {
 							lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
@@ -3153,11 +3146,8 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 				// 提取 usage（已在 convertStreamChunkWithUsage 中解析）
 				if usage != nil && !doneSeen {
-					pt, ct, cc, cr := usageFromMap(usage)
-					_, pcr := parseCacheUsage(usage)
-					tt, _ := usage["total_tokens"].(float64)
-					if tt > 0 {
-						recordTokenUsageWithCache(req.Model, pt, ct, int64(tt), cc, pcr)
+					pt, ct, cc, cr := recordUsageStats(req.Model, usage)
+					if tt, _ := usage["total_tokens"].(float64); tt > 0 {
 						lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
 					} else if pt > 0 {
 						lastPt, lastCt, lastCc, lastCr = pt, ct, cc, cr
@@ -3305,13 +3295,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	var usageResp map[string]any
 	if json.Unmarshal(respBody, &usageResp) == nil {
 		if u, ok := usageResp["usage"].(map[string]any); ok {
-			pt, _ := u["prompt_tokens"].(float64)
-			ct, _ := u["completion_tokens"].(float64)
-			tt, _ := u["total_tokens"].(float64)
-			cc, cr := parseCacheUsage(u)
-			if tt > 0 {
-				recordTokenUsageWithCache(req.Model, int64(pt), int64(ct), int64(tt), cc, cr)
-			}
+			recordUsageStats(req.Model, u)
 		}
 	}
 	clPt, clCt, clCc, clCr := usageFromOpenAIBody(respBody)
@@ -4349,16 +4333,9 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	var usageResp map[string]any
 	if json.Unmarshal(respBody, &usageResp) == nil {
 		if u, ok := usageResp["usage"].(map[string]any); ok {
-			pt, _ := u["prompt_tokens"].(float64)
-			ct, _ := u["completion_tokens"].(float64)
-			tt, _ := u["total_tokens"].(float64)
-			cc, cr := parseCacheUsage(u)
-			if tt > 0 {
-				recordTokenUsageWithCache(claudeReq.Model, int64(pt), int64(ct), int64(tt), cc, cr)
-			}
+			recordUsageStats(claudeReq.Model, u)
 		}
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	maybeLogBodySummary(r.Context(), "claude response body", claudeRespBody)
@@ -4396,12 +4373,7 @@ func claudeStreamHandler(ctx context.Context, w http.ResponseWriter, respBody io
 	// block if the stream never produces content/tool_use (#37635).
 	reasoningFallback := strings.Builder{}
 	defer func() {
-		lpt, lct, lcc, lcr := usageFromMap(fullUsage)
-		lpcc, lpcr := parseCacheUsage(fullUsage)
-		tt, _ := fullUsage["total_tokens"].(float64)
-		if tt > 0 {
-			recordTokenUsageWithCache(model, lpt, lct, int64(tt), lpcc, lpcr)
-		}
+		lpt, lct, lcc, lcr := recordUsageStats(model, fullUsage)
 		pt, ct, cc, cr = lpt, lct, lcc, lcr
 		stats.toolCallCount = len(toolCallOrder)
 		stats.log(ctx, "claude")
@@ -5603,13 +5575,7 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	var usageResp map[string]any
 	if json.Unmarshal(respBody, &usageResp) == nil {
 		if u, ok := usageResp["usage"].(map[string]any); ok {
-			pt, _ := u["prompt_tokens"].(float64)
-			ct, _ := u["completion_tokens"].(float64)
-			tt, _ := u["total_tokens"].(float64)
-			cc, cr := parseCacheUsage(u)
-			if tt > 0 {
-				recordTokenUsageWithCache(chatReq.Model, int64(pt), int64(ct), int64(tt), cc, cr)
-			}
+			recordUsageStats(chatReq.Model, u)
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -6166,12 +6132,7 @@ func responsesStreamHandler(w http.ResponseWriter, r *http.Request, resp *http.R
 	}
 
 	if totalUsage != nil {
-		lpt, lct, lcc, lcr := usageFromMap(totalUsage)
-		lpcc, lpcr := parseCacheUsage(totalUsage)
-		tt, _ := totalUsage["total_tokens"].(float64)
-		if tt > 0 {
-			recordTokenUsageWithCache(model, lpt, lct, int64(tt), lpcc, lpcr)
-		}
+		lpt, lct, lcc, lcr := recordUsageStats(model, totalUsage)
 		pt, ct, cc, cr = lpt, lct, lcc, lcr
 	}
 
