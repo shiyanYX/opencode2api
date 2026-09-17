@@ -40,6 +40,8 @@ type CallRecord struct {
 	CacheCreation    int64       `json:"cache_creation_tokens,omitempty"`
 	CacheRead        int64       `json:"cache_read_tokens,omitempty"`
 	DurationMS       int64       `json:"duration_ms,omitempty"`
+	TTFTMs           int64       `json:"ttft_ms,omitempty"`      // 首 token 延迟（仅流式）
+	OutputSpeed      float64     `json:"output_speed,omitempty"` // 输出速度 tokens/s（仅流式）
 	ErrMsg           string      `json:"err_msg,omitempty"`
 }
 
@@ -184,6 +186,7 @@ type callRecorder struct {
 	mu            sync.Mutex
 	rec           CallRecord
 	start         time.Time
+	firstTokenAt  time.Time // 流式首 token 到达时间
 	seenNodes     map[string]bool
 	promptTok     int64
 	completionTok int64
@@ -236,6 +239,18 @@ func (cr *callRecorder) event(typ, node, detail string) {
 	cr.mu.Unlock()
 }
 
+// observeFirstToken 记录流式首 token 到达时间（仅首次调用生效）。
+func (cr *callRecorder) observeFirstToken() {
+	if cr == nil {
+		return
+	}
+	cr.mu.Lock()
+	if cr.firstTokenAt.IsZero() {
+		cr.firstTokenAt = time.Now()
+	}
+	cr.mu.Unlock()
+}
+
 func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionTok, cacheCreation, cacheRead int64) {
 	if cr == nil {
 		return
@@ -271,6 +286,15 @@ func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionT
 	if !cr.start.IsZero() {
 		cr.rec.DurationMS = time.Since(cr.start).Milliseconds()
 	}
+	// 计算首 token 延迟和输出速度（仅流式且有输出时）
+	if cr.rec.Stream && !cr.firstTokenAt.IsZero() && cr.completionTok > 0 {
+		cr.rec.TTFTMs = cr.firstTokenAt.Sub(cr.start).Milliseconds()
+		genSec := time.Since(cr.firstTokenAt).Seconds()
+		if genSec > 0 {
+			cr.rec.OutputSpeed = float64(cr.completionTok) / genSec
+			recordModelSpeed(cr.rec.Model, cr.rec.TTFTMs, cr.rec.OutputSpeed)
+		}
+	}
 	rec := cr.rec
 	cr.mu.Unlock()
 	callLog.append(rec)
@@ -280,6 +304,10 @@ func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionT
 
 func callLogEvent(ctx context.Context, typ, node, detail string) {
 	callRecorderFrom(ctx).event(typ, node, detail)
+}
+
+func callLogFirstToken(ctx context.Context) {
+	callRecorderFrom(ctx).observeFirstToken()
 }
 
 func callLogFinish(ctx context.Context, status int, errMsg string, promptTok, completionTok, cacheCreation, cacheRead int64) {
