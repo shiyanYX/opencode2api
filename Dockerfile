@@ -17,6 +17,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY *.go ./
+COPY static/ static/
 
 RUN set -eux; \
     if [ "$TARGETARCH" = "arm" ]; then export GOARM="${TARGETVARIANT#v}"; fi; \
