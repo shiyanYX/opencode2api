@@ -14,6 +14,7 @@
 - 订阅/手配节点池（vless/reality、ss、hysteria2、anytls、socks5）：进程内直连，无需 mihomo 子进程
 - Webshare 代理池：API key 自动拉取 webshare.io 代理列表并入节点池（SOCKS5，分页全量、失效自动排除）
 - 免费额度耗尽自动切换节点（FreeUsageLimitError 等，单请求预算 5 次，与重试上限独立）；耗尽节点 1h 冷却到期自动恢复，故障节点每分钟复探、成功即恢复
+- 上游客户端形态适配：复刻官方 opencode 客户端的 session ID 形态、强制上游流式（非流式客户端本地聚合）、工具名规范化与回映射，应对 Zen 免费层按「请求像不像官方客户端」鉴权（**对下游 agent 零改动**，见 [docs/UPSTREAM-COMPAT.md](docs/UPSTREAM-COMPAT.md)）
 - SOCKS5 直连、指定代理和轮换代理
 - Web 管理面板：配置、统计、刷新上游会话、节点池管理（切换/解除标记/重新加载订阅）
 - GitHub Actions 自动构建 Linux、macOS、Windows、FreeBSD 多平台 release
@@ -125,6 +126,21 @@ rg 'promoted_reasoning=true' opencode2api.log
 - `OPENCODE2API_LOG_FILE`
 - `OPENCODE2API_LOG_LEVEL`
 - `OPENCODE2API_LOG_STDOUT`
+
+### 免费模型 403 `FreeTierError`
+
+免费模型报 `403 FreeTierError: OpenCode's free tier can only be used from within OpenCode` 时，
+几乎都是**上游收紧了「客户端形态」校验**，而不是你的 key、账号或出口 IP 有问题——换 IP、换 key、
+降级版本都无效。本项目已对齐截至 2026-09-18 实测的四道条件：
+
+1. `x-opencode-session` 必须符合官方 ID 形态（`ses_` + 12 位小写十六进制 + 14 位 base62）；
+2. `User-Agent` 必须是 `opencode/<semver>` 且不低于 1.17.0；
+3. 上游请求 `stream` 必须为 `true`（非流式客户端由网关本地聚合）；
+4. 上游 `tools` 必须含官方小写工具名 `bash`/`glob`/`grep`/`read`（网关自动规范化并回映射）。
+
+排查与「上游再次变更时如何重新定位」的完整流程见 [docs/UPSTREAM-COMPAT.md](docs/UPSTREAM-COMPAT.md)。
+注意区分两个错误：`FreeTierError`（403，客户端形态被拒，换节点无用）与 `FreeUsageLimitError`
+（429，免费额度按出口 IP 限流，靠切换节点缓解）。
 
 ## 本地构建
 
