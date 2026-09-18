@@ -717,14 +717,14 @@ func (p *nodePool) getClient(fp string) *http.Client {
 		return nil
 	}
 	client := &http.Client{
-		Timeout: 300 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				return dialNode(ctx, n, network, addr)
 			},
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     90 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   20,
+			IdleConnTimeout:       90 * time.Second,
 		},
 	}
 	p.clients[fp] = client
