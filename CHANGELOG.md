@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **适配 OpenCode Zen 免费层的客户端形态校验（三轮，`FreeTierError` 403）**：免费层不按账号而按「请求像不像官方 opencode 客户端」鉴权，上游在 2026-09-17～09-18 的 36 小时内连续收紧三轮，每轮都使代理全线 403。现在四道条件全部满足，且**对下游 agent 零改动**（工具名、schema、`tool_choice` 契约不变）。完整实测矩阵与「上游再变时如何重新定位」的流程见新文档 `docs/UPSTREAM-COMPAT.md`，决策记录见 `docs/adr/0002-zen-free-tier-client-fingerprint.md`。
+  - **session 形态**：新增 `opencode_id.go`，按官方 `packages/opencode/src/id/id.ts` 的 `Identifier.create` 布局生成 `<prefix>_<6 字节时间戳的 12 位小写十六进制><14 位 base62>`（前缀后固定 26 字符，同毫秒用自增计数器保证单调不重复），替换原先的 `"ses_" + randomString(24)`；用于 `x-opencode-session`（含按节点绑定的会话池与全局会话）与 `x-opencode-request`。实测只有前 12 位必须为小写十六进制、前缀后长度必须恰为 26，且不校验时间分量时效。
+  - **stream 形态**：上游免费层要求 `body.stream` 恒为 `true`（`stream:false` 或缺失均 403）。`ensureAgentUpstreamShape` 据此强制置真并补 `stream_options.include_usage` 以取用量；非流式客户端由新增的 `aggregateUpstreamSSE` 把上游 SSE 聚合回单个 `chat.completion`（内容/推理/工具调用参数分片/`finish_reason`/`usage` 全部还原，非 SSE 输入原样透传），三种协议的 6 个调用点因此无需改动。
+  - **工具形态**：上游免费层要求 `body.tools` 必须包含官方小写工具名 `bash`、`glob`、`grep`、`read`（实测 `edit`/`write` 不要求；大小写敏感；同名重复返回 400；额外工具数量不限；schema 无关）。新增 `shapeToolsForUpstream`：客户端工具名忽略大小写命中官方名时改写为官方小写名并**沿用客户端自己的 schema**，大小写无关去重，再补齐仍缺失的必需工具（空壳 + 不可用描述）；仅在客户端完全无工具时设 `tool_choice:"none"`，客户端自带工具时绝不覆盖其 `tool_choice`（指向被改名工具时同步改名）。响应侧按 `上游名 -> 客户端原名` 回映射并丢弃空壳调用：流式由新增的 `toolNameRewriter` 包装上游 SSE 逐行改写（保持分帧与 `[DONE]` 不变，Chat/Anthropic/Responses 三面共用），非流式在聚合器内完成。
+  - **顺带修正两处诊断噪声**：`FreeTierError` 不再是配额信号（它表示客户端身份被拒，切换节点无法修复，只会空烧节点切换预算）；`rewrite_error` 不再把它按 `"free tier"` 子串误改写为「该免费模型已停止服务」，原样透传以免掩盖真因。
+  - 测试：新增 `tool_shape_test.go`（10 例：必需工具补齐、大小写规范化与回映射、去重、未知工具保留、`tool_choice` 同步改名、流式改写器分帧、空壳调用丢弃）与 `opencode_id_test.go`（4 例）、`rewrite_error_test.go`（2 例）、`agent_shape_test.go`（2 例，聚合还原），全仓 20 例通过。
+  - 验证：部署前用本地实例直连上游实测（此前上述场景全部 403）——chat 非流式 + Claude Code 风格大写工具 → 200 且 `tool_call` 名回映射为 `Bash`；chat 流式 → 200 且工具名为 `Bash`、无空壳名泄漏；chat 非流式无工具 → 200 无泄漏；`/v1/messages` 非流式与流式 → 200 且 `tool_use` 名为 `Bash`。
 - 跟进上游 6Kmfi6HP/opencode2api v0.4.5–v0.5.0（手工移植，适配单体结构）：
   - **Claude usage 缓存语义修复**：DeepSeek 风格 `prompt_cache_hit_tokens` 现映射为 `cache_read_input_tokens`；`input_tokens` 扣除缓存命中部分（Anthropic 语义中 input/read/creation 互斥），客户端不再对命中 token 重复计费。`prompt_cache_miss_tokens` 是普通未命中输入，不再计入 `cache_creation_input_tokens`；stats.json 新增 `cache_read_tokens`/`cache_created_tokens` 聚合，canonical Anthropic 字段优先、多种 usage 形态不重复计数。
   - **`POST /v1/messages/count_tokens`**：本地启发式估算输入 token（~4 字符/token + 每消息/system/工具结构开销，图片 1600 / 文档 3000 固定估算），不调上游不产生用量；Claude Code 用它做上下文管理和自动压缩，此前 404。
