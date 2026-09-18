@@ -525,7 +525,7 @@ input,select,textarea{font-family:inherit;color:inherit}
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px">
         <div class="field"><label>健康检查间隔（分钟，0=默认15）</label><input id="q_health_interval" type="number" min="1" max="1440" value="15"></div>
-        <div class="field"><label>健康检查探针 URL</label><input id="q_health_url" placeholder="https://www.gstatic.com/generate_204"></div>
+        <div class="field"><label>健康检查探针 URL</label><input id="q_health_url" placeholder="https://opencode.ai/zen/v1/models"></div>
       </div>
       <div class="muted" style="font-size:11.5px;margin-top:8px">403 且无上述签名视为耗尽；429 无签名不视为耗尽。耗尽冷却到期自动恢复（标记清除）；故障节点每分钟复探，探测成功即恢复。</div>
     </div>
@@ -1471,7 +1471,7 @@ const DEMO={
     api_key:'sk-demo-xxxxxxxxxxxxxxxx',
     quota_error_signals:{error_types:['FreeUsageLimitError','insufficient_quota'],message_keywords:['free usage limit','quota','limit exceeded']},
     max_quota_node_switches:5,node_cooldown_exhausted_hours:1,node_cooldown_dead_minutes:1,
-    node_health_interval_minutes:15,node_health_probe_url:'https://www.gstatic.com/generate_204',
+    node_health_interval_minutes:15,node_health_probe_url:'https://opencode.ai/zen/v1/models',
     log_level:'info'
   },
   nodes:[

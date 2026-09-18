@@ -216,9 +216,10 @@ type nodePool struct {
 }
 
 // 健康检查默认值（Clash url-test 语义：真实连接 + HTTP 2xx 判定可用）。
+// 默认探测目标改为实际上游域名（opencode.ai），避免 gstatic.com 可达但上游不可达的假性正常。
 const (
 	defaultHealthInterval = 15 * time.Minute
-	defaultProbeURL       = "https://www.gstatic.com/generate_204"
+	defaultProbeURL       = "https://opencode.ai/zen/v1/models"
 	probeTimeout          = 20 * time.Second
 )
 
@@ -499,6 +500,9 @@ func (p *nodePool) healthInterval() time.Duration {
 
 // probeNode 经节点真实探测目标 URL：完整协议握手 + HTTP 请求，
 // 2xx 判定可用，返回毫秒延迟（含握手与 HTTP 往返，Clash url-test 语义）。
+//
+// 当探测目标为 opencode.ai 时，自动注入 Authorization 与 x-opencode-session 头，
+// 模拟真实请求以验证代理对上游域名的可达性（而非仅验证通用互联网连通性）。
 func (p *nodePool) probeNode(ctx context.Context, n *ProxyNode, probeURL string) (int64, error) {
 	client := p.getClient(n.Fingerprint)
 	if client == nil {
@@ -507,6 +511,13 @@ func (p *nodePool) probeNode(ctx context.Context, n *ProxyNode, probeURL string)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
 	if err != nil {
 		return 0, err
+	}
+	// 上游 opencode.ai 需要认证头；探测时使用公共身份 + 有效 session 格式。
+	if strings.Contains(probeURL, "opencode.ai") {
+		req.Header.Set("Authorization", "Bearer public")
+		if sid := getOrCreateSessionByNode(n.Fingerprint); sid != "" {
+			req.Header.Set("x-opencode-session", sid)
+		}
 	}
 	start := time.Now()
 	resp, err := client.Do(req)
