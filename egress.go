@@ -300,14 +300,16 @@ func stickyKeyForRequest(auth UpstreamAuth, bodyMap map[string]any) string {
 }
 
 // buildProxyClient 为指定代理构建带 SOCKS5 dial 的 HTTP 客户端。
+// 不设 Client.Timeout——流式 SSE 响应可持续数分钟，全局超时会误杀正常流。
+// 改用 ResponseHeaderTimeout 保护头部阶段，Body 读取阶段不受限。
 func buildProxyClient(proxy Socks5Proxy) *http.Client {
 	return &http.Client{
-		Timeout: 300 * time.Second,
 		Transport: &http.Transport{
-			DialContext:         socks5Dial(proxy),
-			MaxIdleConns:        100,
-			MaxIdleConnsPerHost: 20,
-			IdleConnTimeout:     90 * time.Second,
+			DialContext:           socks5Dial(proxy),
+			ResponseHeaderTimeout: 60 * time.Second,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   20,
+			IdleConnTimeout:       90 * time.Second,
 		},
 	}
 }

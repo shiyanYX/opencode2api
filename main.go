@@ -26,12 +26,20 @@ import (
 	"time"
 )
 
+// httpClient 用于流式 API 调用。不设 Client.Timeout——流式 SSE 响应可持续数分钟，
+// 全局超时会误杀正常流（context deadline exceeded while reading body）。
+// 改用 Transport 级超时：DialContext 保护连接阶段，ResponseHeaderTimeout 保护头部阶段，
+// Body 读取阶段不设超时，由上游关闭连接自然结束。
 var httpClient = &http.Client{
-	Timeout: 300 * time.Second,
 	Transport: &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ResponseHeaderTimeout: 60 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
 	},
 }
 
