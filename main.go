@@ -1033,7 +1033,7 @@ type AppConfig struct {
 	MaxQuotaNodeSwitches int `json:"max_quota_node_switches,omitempty"`
 
 	// ---- 节点健康检查（可选）----
-	// 0 = 默认 15min；负数 = 禁用健康检查；URL 空 = 默认 https://www.gstatic.com/generate_204
+	// 0 = 默认 15min；负数 = 禁用健康检查；URL 空 = 默认 https://opencode.ai/zen/v1/models
 	NodeHealthIntervalMinutes int    `json:"node_health_interval_minutes,omitempty"`
 	NodeHealthProbeURL        string `json:"node_health_probe_url,omitempty"`
 
