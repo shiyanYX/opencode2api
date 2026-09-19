@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **配额熔断（quota halt）：节点耗尽后直连仍 429 时停止空转**。此前节点池无可用节点时出口回退直连，直连同样被上游按 IP 限流（429）后，网关仍在**同一个 IP** 上继续打满重试闸门，且每个新请求重来一遍——实测单请求烧掉 `maxAttempts(3) + maxQuotaSwitches(5)` 的上游调用预算、1–2 秒内打出一串 `429 quota_signal`，面板上表现为永不停止的 429 空转。现在：直连出口收到 429（免费层）时**立即跳出重试循环**，把这条上游 429 的原始 body 原样返回下游客户端（报错形态与既有透传一致），并置进程级熔断标记；熔断期间免费层请求在 `callOpenCodeAPI` / `callOpenCodeAPIStream` 入口**直接返回 429**（重放保存的错误 body），零上游调用、零节点切换，失败从 1–2 秒降到毫秒级；每个请求惰性检查节点池，一旦出现 `available` 节点（含配额冷却到期被 `sweepExpiredLocked` 自动翻回的）立即解除并恢复转发，无需重启或人工干预。仅免费层（`路由: public`）受影响：付费层的 `insufficient_quota`/`credits_error` 是账号计费问题、与出口 IP 无关，不参与熔断。新增 `quota_halt.go`；`EgressResult` 新增 `Direct` 字段以区分「真·直连」与静态 socks5（两者此前都是 `nodeFp == ""`，无法区分）；`nodePool.hasEligibleNode()` 提供与选路语义一致的可用性判定（先清扫冷却到期的 exhausted，dead 仍需探测成功）。术语见 `CONTEXT.md`；管理面板的熔断状态展示待后续讨论。
+  - 验证：`go vet` 干净、构建通过；熔断链路由本地集成测试覆盖（假上游计数：触发时上游调用恰 1 次、熔断期间 0 次，节点翻回 available 后自动放行，付费层不拦截——测试文件按约定不入库）；本地实例实测 chat 非流式 / chat 流式 / `/v1/messages` 非流式三条协议面均 200 无回归（本机出口 IP 当前未被限流，故未能在真实上游复现 429 场景）。
+
 - **适配 OpenCode Zen 免费层的客户端形态校验（三轮，`FreeTierError` 403）**：免费层不按账号而按「请求像不像官方 opencode 客户端」鉴权，上游在 2026-09-17～09-18 的 36 小时内连续收紧三轮，每轮都使代理全线 403。现在四道条件全部满足，且**对下游 agent 零改动**（工具名、schema、`tool_choice` 契约不变）。完整实测矩阵与「上游再变时如何重新定位」的流程见新文档 `docs/UPSTREAM-COMPAT.md`，决策记录见 `docs/adr/0002-zen-free-tier-client-fingerprint.md`。
   - **session 形态**：新增 `opencode_id.go`，按官方 `packages/opencode/src/id/id.ts` 的 `Identifier.create` 布局生成 `<prefix>_<6 字节时间戳的 12 位小写十六进制><14 位 base62>`（前缀后固定 26 字符，同毫秒用自增计数器保证单调不重复），替换原先的 `"ses_" + randomString(24)`；用于 `x-opencode-session`（含按节点绑定的会话池与全局会话）与 `x-opencode-request`。实测只有前 12 位必须为小写十六进制、前缀后长度必须恰为 26，且不校验时间分量时效。
   - **stream 形态**：上游免费层要求 `body.stream` 恒为 `true`（`stream:false` 或缺失均 403）。`ensureAgentUpstreamShape` 据此强制置真并补 `stream_options.include_usage` 以取用量；非流式客户端由新增的 `aggregateUpstreamSSE` 把上游 SSE 聚合回单个 `chat.completion`（内容/推理/工具调用参数分片/`finish_reason`/`usage` 全部还原，非 SSE 输入原样透传），三种协议的 6 个调用点因此无需改动。

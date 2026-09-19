@@ -773,6 +773,22 @@ func (p *nodePool) nodeCount() int {
 	return len(p.nodes)
 }
 
+// hasEligibleNode 报告池中是否存在可路由的 available 节点。
+// 与选路语义一致：先清扫冷却到期的 exhausted 节点（定时恢复），
+// dead 节点只认探测成功，不在这里翻回。
+func (p *nodePool) hasEligibleNode() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	p.sweepExpiredLocked(now)
+	for _, n := range p.nodes {
+		if p.eligible(n, now) {
+			return true
+		}
+	}
+	return false
+}
+
 // waitStateSaves 等待所有异步状态写入完成（测试清理用）。
 func (p *nodePool) waitStateSaves() {
 	p.saveWG.Wait()

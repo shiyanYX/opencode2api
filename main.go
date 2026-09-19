@@ -2505,6 +2505,11 @@ func maxAttemptsForUpstreamStatus(status int) int {
 }
 
 func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) ([]byte, int, http.Header, error) {
+	// 配额熔断闸门：节点池无可用节点且直连出口已被上游 429 限流时，
+	// 直接返回 429，不再访问上游（见 quota_halt.go）。
+	if halted, haltBody := quotaHaltGuard.gate(auth); halted {
+		return quotaHaltResponse(ctx, haltBody)
+	}
 	initOCSession()
 
 	var bodyMap map[string]any
@@ -2712,6 +2717,26 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			}
 			// 预算用尽或直连：不换，按原错误路径返回
 		}
+
+		// 出口已回退直连、上游仍 429：剩余重试都打在同一个 IP 上，只会空转。
+		// 立即停止重试并进入熔断，等节点池恢复可用节点（见 quota_halt.go）。
+		if egResult.Direct && resp.StatusCode == http.StatusTooManyRequests && auth.tier() == TierFree {
+			if quotaHaltGuard.halt("direct_429", errBody) {
+				log.Warn("quota_halt_entered",
+					"try_model", modelID,
+					"surface", surface,
+					"status", resp.StatusCode,
+					"attempt_index", attempt,
+					"node_pool_size", proxyPool.nodeCount(),
+				)
+				callLogEvent(ctx, "quota_halt", nodeFp, "enter: 直连出口 429，停止重试等待节点恢复")
+			}
+			lastBody = errBody
+			lastStatus = resp.StatusCode
+			lastHeader = resp.Header
+			lastErr = fmt.Errorf("upstream error")
+			break
+		}
 		nonRetryable := isNonRetryableUpstreamError(resp.StatusCode, errBody)
 		canRetry := !nonRetryable && shouldRetryUpstreamStatus(resp.StatusCode) && attempt+1 < maxAttemptsForUpstreamStatus(resp.StatusCode)
 		retryReason := ""
@@ -2756,6 +2781,15 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 }
 
 func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) (io.ReadCloser, int, http.Header, error) {
+	// 配额熔断闸门：节点池无可用节点且直连出口已被上游 429 限流时，
+	// 直接返回 429，不再访问上游（见 quota_halt.go）。
+	if halted, haltBody := quotaHaltGuard.gate(auth); halted {
+		body, status, header, err := quotaHaltResponse(ctx, haltBody)
+		if err != nil {
+			return nil, status, header, err
+		}
+		return io.NopCloser(bytes.NewReader(body)), status, header, nil
+	}
 	initOCSession()
 
 	var bodyMap map[string]any
@@ -2945,6 +2979,25 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				)
 				continue
 			}
+		}
+
+		// 出口已回退直连、上游仍 429：剩余重试都打在同一个 IP 上，只会空转。
+		// 立即停止重试并进入熔断，等节点池恢复可用节点（见 quota_halt.go）。
+		if egResult.Direct && resp.StatusCode == http.StatusTooManyRequests && auth.tier() == TierFree {
+			if quotaHaltGuard.halt("direct_429", errBody) {
+				log.Warn("quota_halt_entered",
+					"try_model", modelID,
+					"surface", surface,
+					"status", resp.StatusCode,
+					"attempt_index", attempt,
+					"node_pool_size", proxyPool.nodeCount(),
+				)
+				callLogEvent(ctx, "quota_halt", nodeFp, "enter: 直连出口 429，停止重试等待节点恢复")
+			}
+			lastBody = errBody
+			lastStatus = resp.StatusCode
+			lastHeader = resp.Header
+			break
 		}
 		nonRetryable := isNonRetryableUpstreamError(resp.StatusCode, errBody)
 		canRetry := !nonRetryable && shouldRetryUpstreamStatus(resp.StatusCode) && attempt+1 < maxAttemptsForUpstreamStatus(resp.StatusCode)

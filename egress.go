@@ -32,6 +32,7 @@ type EgressRequest struct {
 type EgressResult struct {
 	Client *http.Client // 永不为 nil
 	NodeFP string       // "" = 直连/sticky（非节点池追踪的节点）
+	Direct bool         // true = 真·直连出口（区别于静态 socks5）
 
 	key string        // sticky key，Invalidate() 用
 	eg  *EgressClient // 反向引用
@@ -102,7 +103,7 @@ func (eg *EgressClient) Get(r EgressRequest) EgressResult {
 	paidDirect := eg.paidDirect
 	eg.cfgMu.RUnlock()
 	if tier == TierPaid && paidDirect {
-		return EgressResult{Client: eg.direct}
+		return EgressResult{Client: eg.direct, Direct: true}
 	}
 
 	// 节点池活跃 → 从池中选取
@@ -114,7 +115,7 @@ func (eg *EgressClient) Get(r EgressRequest) EgressResult {
 				NodeFP: n.Fingerprint,
 			}
 		}
-		return EgressResult{Client: eg.direct} // 全部冷却中 → 直连
+		return EgressResult{Client: eg.direct, Direct: true} // 全部冷却中 → 直连
 	}
 
 	// 静态 socks5
@@ -130,12 +131,13 @@ func (eg *EgressClient) getSocks5Client(r EgressRequest) EgressResult {
 	eg.cfgMu.RUnlock()
 
 	if active == "" || len(proxies) == 0 {
-		return EgressResult{Client: eg.direct}
+		return EgressResult{Client: eg.direct, Direct: true}
 	}
 
-	// 固定单代理（非轮询）
+	// 固定单代理（非轮询）；地址在列表中找不到时内部回退直连，需如实标记
 	if active != socks5RR {
-		return EgressResult{Client: eg.getSingleProxyClient(active, proxies)}
+		c := eg.getSingleProxyClient(active, proxies)
+		return EgressResult{Client: c, Direct: c == eg.direct}
 	}
 
 	// 轮询但无 sticky → 简单轮询
