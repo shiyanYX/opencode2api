@@ -22,6 +22,9 @@ opencode2api.exe
 # Temp files
 .tmp-cc/
 
+# 测试仅保留本地，不提交到 GitHub
+*_test.go
+
 # Editor and OS files
 .DS_Store
 .idea/
