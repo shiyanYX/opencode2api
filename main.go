@@ -837,7 +837,8 @@ var (
 	hiddenFreeAliases    = map[string]bool{}   // 已禁用的免费模型（对外不暴露）
 	reasoningEffortMap   = map[string]string{}
 	forceDisableThinking bool
-	apiKey               string // 统一网关密钥（config.api_key），空 = 不启用
+	apiKey               string   // 统一网关密钥（config.api_key），空 = 不启用
+	apiKeys              []string // 动态管理的 API 密钥列表（config.api_keys[].key）
 	// promptCacheRetention 注入上游的缓存保留时长；"" = 运行时默认 "24h"，"off" 禁用注入。
 	promptCacheRetention string
 	// truncationStopReasonCfg 决定“流未见到合法 finish_reason 就结束”时向下游声明的
@@ -1018,7 +1019,9 @@ type AppConfig struct {
 	ModelRegionMap map[string]string `json:"model_region_map,omitempty"`
 	// ApiKey 统一网关密钥：客户端用它通过鉴权并按付费档获取全量模型；
 	// 留空时退回现状（任意有效 sk- key 或免密钥免费档）。
-	ApiKey        string        `json:"api_key,omitempty"`
+	ApiKey string `json:"api_key,omitempty"`
+	// ApiKeys 动态管理的 API 密钥列表：支持多 key 增删，优先级高于静态 api_key。
+	ApiKeys []ApiKeyEntry `json:"api_keys,omitempty"`
 	Socks5Proxies []Socks5Proxy `json:"socks5_proxies,omitempty"`
 	ActiveSocks5  string        `json:"active_socks5,omitempty"`
 	// Socks5PaidDirect controls whether keyed/paid upstream calls bypass SOCKS5.
@@ -1070,6 +1073,13 @@ type AppConfig struct {
 type QuotaSignalsConfig struct {
 	ErrorTypes      []string `json:"error_types,omitempty"`
 	MessageKeywords []string `json:"message_keywords,omitempty"`
+}
+
+// ApiKeyEntry 动态管理的 API 密钥条目。
+type ApiKeyEntry struct {
+	Key       string `json:"key"`
+	Name      string `json:"name,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
 }
 
 func defaultQuotaErrorTypes() []string {
@@ -1214,6 +1224,52 @@ func saveConfig(path string, cfg AppConfig) error {
 	return os.WriteFile(path, data, 0644)
 }
 
+// startConfigWatcher 后台轮询 config.json 修改时间，检测到变化时自动加载并应用。
+// 解析失败保留旧配置，仅打 warn 日志。
+func startConfigWatcher() {
+	go func() {
+		var lastModTime time.Time
+		if info, err := os.Stat(configPath); err == nil {
+			lastModTime = info.ModTime()
+		}
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			info, err := os.Stat(configPath)
+			if err != nil {
+				continue
+			}
+			if !info.ModTime().After(lastModTime) {
+				continue
+			}
+			lastModTime = info.ModTime()
+			// 验证新配置：只解析，不改运行时
+			newCfg := loadConfig(configPath)
+			// loadConfig 不返回 error，但空 model_alias + 空 api_key 说明解析失败
+			// 用 JSON re-parse 验证格式
+			raw, readErr := os.ReadFile(configPath)
+			if readErr != nil {
+				slog.Warn("config watcher: read failed", "error", readErr)
+				continue
+			}
+			var verify AppConfig
+			if json.Unmarshal(raw, &verify) != nil {
+				slog.Warn("config watcher: invalid JSON, keeping old config")
+				continue
+			}
+			// 验证通过，应用新配置
+			applyConfig(newCfg)
+			if err := saveConfig(configPath, newCfg); err != nil {
+				slog.Warn("config watcher: save normalized config failed", "error", err)
+			}
+			slog.Info("config hot-reloaded",
+				"aliases", len(newCfg.ModelAlias),
+				"api_key_set", newCfg.ApiKey != "",
+			)
+		}
+	}()
+}
+
 func applyConfig(cfg AppConfig) {
 	configMu.Lock()
 	defer configMu.Unlock()
@@ -1235,6 +1291,13 @@ func applyConfig(cfg AppConfig) {
 	}
 	forceDisableThinking = cfg.ForceDisableThinking
 	apiKey = cfg.ApiKey
+	// 动态 API 密钥：提取 key 值列表供认证匹配
+	apiKeys = make([]string, 0, len(cfg.ApiKeys))
+	for _, k := range cfg.ApiKeys {
+		if k.Key != "" {
+			apiKeys = append(apiKeys, k.Key)
+		}
+	}
 	truncationStopReasonCfg = cfg.TruncationStopReason
 	if cfg.PromptCacheRetention != "" {
 		promptCacheRetention = cfg.PromptCacheRetention
@@ -2377,8 +2440,16 @@ func extractUpstreamAuth(r *http.Request) UpstreamAuth {
 	// 网关只认这一把 key；上游仍按 public 免费档转发，不产生新的档位语义。
 	configMu.RLock()
 	unified := apiKey
+	dynamicKeys := make(map[string]bool, len(apiKeys))
+	for _, k := range apiKeys {
+		dynamicKeys[k] = true
+	}
 	configMu.RUnlock()
 	if unified != "" && token == unified {
+		return UpstreamAuth{Mode: AuthRoutePublic, Source: source}
+	}
+	// 动态 API 密钥列表：与静态 api_key 等效，均走 public 免费档。
+	if dynamicKeys[token] {
 		return UpstreamAuth{Mode: AuthRoutePublic, Source: source}
 	}
 	// 只有 sk- 开头的才是有效 key，其余（no-key-required 等占位符）一律走 public
@@ -6837,6 +6908,90 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// adminAPIKeysHandler 管理动态 API 密钥（GET 列表 / POST 新增 / DELETE 删除）。
+func adminAPIKeysHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		configMu.RLock()
+		cfg := loadConfig(configPath)
+		keys := cfg.ApiKeys
+		configMu.RUnlock()
+		// 脱敏：只返回 key 的前 6 位和后 4 位
+		type maskedKey struct {
+			Key       string `json:"key"`
+			MaskedKey string `json:"masked_key"`
+			Name      string `json:"name,omitempty"`
+			CreatedAt string `json:"created_at,omitempty"`
+		}
+		result := make([]maskedKey, len(keys))
+		for i, k := range keys {
+			mk := k.Key
+			if len(mk) > 10 {
+				mk = mk[:6] + "..." + mk[len(mk)-4:]
+			}
+			result[i] = maskedKey{Key: k.Key, MaskedKey: mk, Name: k.Name, CreatedAt: k.CreatedAt}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"keys": result})
+	case http.MethodPost:
+		var payload struct {
+			Name string `json:"name,omitempty"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			// 允许空 body
+		}
+		newKey := "sk-" + randomHex(32)
+		entry := ApiKeyEntry{
+			Key:       newKey,
+			Name:      payload.Name,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		}
+		cfg := loadConfig(configPath)
+		cfg.ApiKeys = append(cfg.ApiKeys, entry)
+		if err := saveConfig(configPath, cfg); err != nil {
+			http.Error(w, `{"error":"Failed to save config"}`, http.StatusInternalServerError)
+			return
+		}
+		applyConfig(cfg)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status": "ok",
+			"key":    newKey,
+			"name":   entry.Name,
+		})
+	case http.MethodDelete:
+		var payload struct {
+			Key string `json:"key"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.Key == "" {
+			http.Error(w, `{"error":"key is required"}`, http.StatusBadRequest)
+			return
+		}
+		cfg := loadConfig(configPath)
+		found := false
+		for i, k := range cfg.ApiKeys {
+			if k.Key == payload.Key {
+				cfg.ApiKeys = append(cfg.ApiKeys[:i], cfg.ApiKeys[i+1:]...)
+				found = true
+				break
+			}
+		}
+		if !found {
+			http.Error(w, `{"error":"key not found"}`, http.StatusNotFound)
+			return
+		}
+		if err := saveConfig(configPath, cfg); err != nil {
+			http.Error(w, `{"error":"Failed to save config"}`, http.StatusInternalServerError)
+			return
+		}
+		applyConfig(cfg)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // adminTrendsHandler 用量趋势：按 range=today|7d|30d 返回聚簇时间序列（来自调用日志）。
 func adminTrendsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -6947,6 +7102,7 @@ func main() {
 	}
 	startModelRefresh()
 	startModelsDevRefresh()
+	startConfigWatcher()
 	slog.Info("server starting",
 		"port", port,
 		"log_level", getLogLevelString(),
@@ -6976,6 +7132,7 @@ func main() {
 	mux.HandleFunc("/api/logs/stream", loggingMiddleware(requireAuth(adminLogsHandler)))
 	mux.HandleFunc("/api/logs/export", loggingMiddleware(requireAuth(adminLogsHandler)))
 	mux.HandleFunc("/api/call-log", loggingMiddleware(requireAuth(adminCallLogHandler)))
+	mux.HandleFunc("/api/apikeys", loggingMiddleware(requireAuth(adminAPIKeysHandler)))
 	mux.HandleFunc("/api/reload", loggingMiddleware(requireAuth(reloadHandler)))
 	mux.HandleFunc("/health", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
