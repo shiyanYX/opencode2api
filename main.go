@@ -289,41 +289,12 @@ var (
 )
 
 func fetchOCVersion() string {
-	req, _ := http.NewRequest("GET", "https://registry.npmjs.org/opencode-ai/latest", nil)
-	req.Header.Set("Accept", "application/json")
-	resp, err := mgmtClient.Do(req)
-	if err != nil {
-		return "1.15.3"
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var info struct {
-		Version string `json:"version"`
-	}
-	if json.Unmarshal(body, &info) == nil && info.Version != "" {
-		return info.Version
-	}
-	return "1.15.3"
+	return probeOCVersion(mgmtClient)
 }
 
 // fetchOCVersionDirect 绕过节点池直连探测版本（会话切换时用，避免占用配额路径）。
 func fetchOCVersionDirect() string {
-	client := &http.Client{Timeout: 5 * time.Second}
-	req, _ := http.NewRequest("GET", "https://registry.npmjs.org/opencode-ai/latest", nil)
-	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return "1.15.3"
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var info struct {
-		Version string `json:"version"`
-	}
-	if json.Unmarshal(body, &info) == nil && info.Version != "" {
-		return info.Version
-	}
-	return "1.15.3"
+	return probeOCVersion(ocVersionClient())
 }
 
 // noSessionRefresh 测试桩：置真时 refreshOCSession 不做网络请求。
@@ -2600,6 +2571,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	// 循环上限 = 重试上限 + 配额预算，两者各自封顶互不挤占（重试仍由 canRetry 限制）。
 	nodeSwitchPending := false
 	quotaSwitches := 0
+	versionRefreshed := false // 426 时只刷新一次版本，避免无谓循环
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
 
@@ -2683,6 +2655,20 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+
+		// 426 UpgradeRequired：上游提高了免费层的版本门槛。刷新一次版本号后重试
+		// （npm latest 通常已满足新门槛），每个请求最多刷新一次。见 oc_version.go。
+		if resp.StatusCode == http.StatusUpgradeRequired && !versionRefreshed {
+			versionRefreshed = true
+			log.Warn("upgrade_required_refresh_version",
+				"model", modelID,
+				"current_version", ocClientVer,
+				"min_required", minFreeTierOCVersion,
+			)
+			callLogEvent(ctx, "switch", nodeFp, "upgrade_required:refresh_version")
+			refreshOCSession()
+			continue
+		}
 
 		// 检测区域限制错误（自动学习 + 区域探测）
 		if regionRestricted, detectedRegion := classifyRegionRestriction(resp.StatusCode, errBody); regionRestricted {
@@ -2878,6 +2864,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	// 独立预算（默认 5 个节点），不占用重试闸门；循环上限 = 重试上限 + 配额预算。
 	nodeSwitchPending := false
 	quotaSwitches := 0
+	versionRefreshed := false // 426 时只刷新一次版本，避免无谓循环
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
 
@@ -2947,6 +2934,20 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+
+		// 426 UpgradeRequired：上游提高了免费层的版本门槛。刷新一次版本号后重试
+		// （npm latest 通常已满足新门槛），每个请求最多刷新一次。见 oc_version.go。
+		if resp.StatusCode == http.StatusUpgradeRequired && !versionRefreshed {
+			versionRefreshed = true
+			log.Warn("upgrade_required_refresh_version",
+				"model", modelID,
+				"current_version", ocClientVer,
+				"min_required", minFreeTierOCVersion,
+			)
+			callLogEvent(ctx, "switch", nodeFp, "upgrade_required:refresh_version")
+			refreshOCSession()
+			continue
+		}
 
 		// 检测区域限制错误（自动学习 + 区域探测）
 		if regionRestricted, detectedRegion := classifyRegionRestriction(resp.StatusCode, errBody); regionRestricted {

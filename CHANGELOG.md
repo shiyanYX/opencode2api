@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **修复：UA 版本回退常量低于上游新门槛，导致全量免费模型 426 `UpgradeRequired`**。上游在 2026-09-21 收紧版本下限：`User-Agent` 里的 opencode 版本 **>= 1.18.0** 才放行（1.15.3 / 1.16.0 / 1.17.0 / 1.17.9 一律 426），而本项目的 npm 探测失败回退常量是 `"1.15.3"`——只要 npm 探测抖动一次，就回退到低于门槛的版本、全部免费模型请求变 426（生产实测累计 891 次，日志中可见 `version=1.15.3`）。
+  - 新增 `oc_version.go`：回退常量提升为 `fallbackOCVersion = "1.18.31"`（自身满足门槛）；记录**最近一次成功探测到的版本**（`lastGoodOCVersion`），探测失败优先回退到它，且低于门槛的版本不入缓存；`sanitizeOCVersion` 只保留前导 `x.y.z`（上游拒绝 git-describe 形式）；`main.go` 的 `fetchOCVersion` / `fetchOCVersionDirect` 收敛为对 `probeOCVersion` 的薄封装。
+  - 两个上游重试循环新增 **426 自愈**：命中 `UpgradeRequired` 时刷新一次版本号并重试（每个请求最多一次），上游再次抬高门槛时可自愈，无需重启。
+  - 测试：新增 `oc_version_test.go`（4 例：回退常量满足门槛、semver 比较含 git-describe 串、版本规范化、缓存优先且拒绝低版本）；同时补齐本地缺失的 18 例形态/回映射测试（`tool_shape_test.go` 10 例、`opencode_id_test.go` 4 例、`rewrite_error_test.go` 2 例、`agent_shape_test.go` 2 例），全仓 30 例通过（按 `.gitignore` 约定，`*_test.go` 仅保留本地、不入库）。
+  - 验证：本地实例直连上游实测——chat 非流式 + 无工具 → 200（`content: "OK 👌"`）、chat 非流式 + 大写工具 → 200 且工具名回映射为 `Bash`、chat 流式 → 200，本地日志 426/FreeTierError 计数为 0。
+  - 文档：`docs/UPSTREAM-COMPAT.md` 改为「五道条件」（新增 UA 版本下限一节，含 2026-09-21 实测矩阵与「不要把兜底值设成会被上游拒绝的值」这条教训），重新定位流程补充「先看错误类型」；`README.md` 排查小节区分 403/426/429 三种错误；`CONTEXT.md` 与 `docs/adr/0002-zen-free-tier-client-fingerprint.md` 同步。
+
 - **配额熔断（quota halt）：节点耗尽后直连仍 429 时停止空转**。此前节点池无可用节点时出口回退直连，直连同样被上游按 IP 限流（429）后，网关仍在**同一个 IP** 上继续打满重试闸门，且每个新请求重来一遍——实测单请求烧掉 `maxAttempts(3) + maxQuotaSwitches(5)` 的上游调用预算、1–2 秒内打出一串 `429 quota_signal`，面板上表现为永不停止的 429 空转。现在：直连出口收到 429（免费层）时**立即跳出重试循环**，把这条上游 429 的原始 body 原样返回下游客户端（报错形态与既有透传一致），并置进程级熔断标记；熔断期间免费层请求在 `callOpenCodeAPI` / `callOpenCodeAPIStream` 入口**直接返回 429**（重放保存的错误 body），零上游调用、零节点切换，失败从 1–2 秒降到毫秒级；每个请求惰性检查节点池，一旦出现 `available` 节点（含配额冷却到期被 `sweepExpiredLocked` 自动翻回的）立即解除并恢复转发，无需重启或人工干预。仅免费层（`路由: public`）受影响：付费层的 `insufficient_quota`/`credits_error` 是账号计费问题、与出口 IP 无关，不参与熔断。新增 `quota_halt.go`；`EgressResult` 新增 `Direct` 字段以区分「真·直连」与静态 socks5（两者此前都是 `nodeFp == ""`，无法区分）；`nodePool.hasEligibleNode()` 提供与选路语义一致的可用性判定（先清扫冷却到期的 exhausted，dead 仍需探测成功）。术语见 `CONTEXT.md`；管理面板的熔断状态展示待后续讨论。
   - 验证：`go vet` 干净、构建通过；熔断链路由本地集成测试覆盖（假上游计数：触发时上游调用恰 1 次、熔断期间 0 次，节点翻回 available 后自动放行，付费层不拦截——测试文件按约定不入库）；本地实例实测 chat 非流式 / chat 流式 / `/v1/messages` 非流式三条协议面均 200 无回归（本机出口 IP 当前未被限流，故未能在真实上游复现 429 场景）。
 
