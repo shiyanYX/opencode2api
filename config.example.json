@@ -15,7 +15,6 @@
   "cache_control_breakpoints": true,
   "text_only_models": ["deepseek"],
   "api_key": "",
-  "api_keys": [],
   "socks5_proxies": [
     {
       "name": "local",
