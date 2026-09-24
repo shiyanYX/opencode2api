@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **修复：Chat 流式转发未保证 SSE 事件空行分隔，导致下游客户端 `JSON.parse` 失败（`PI_AI_ERROR` / `Unexpected non-whitespace character after JSON at position N`）**。`consumeChatStream` 此前对每个 `data:` 行只补单个 `\n`，事件之间的空行完全依赖上游是否发送；上游（Zen）不发空行时，多个 `data:` 事件会被 OpenAI SDK 的 SSE 解析器 join 成一个 JSON（首段恰好 300/306 字符时报 position 301/307），`JSON.parse` 抛出非 network/timeout/5xx 的 SyntaxError，被 DeepSeek Harness 的 `classifyPiAiError` 兜底为 `PI_AI_ERROR` 且不重试，turn 直接终止。新增 `writeSSELine`：`data:` 行统一以 `\n\n` 终止（非 data 行原样透传），`consumeChatStream` 改走该写出路径；`[DONE]`、截断兜底 chunk、Claude 面等原本已写 `\n\n` 的分支不受影响。对已正常发空行的上游只多出无害空行（SSE 规范允许多个空行），不改变 `data:` JSON 内容。
+  - 测试：新增 `sse_write_test.go`（3 例：连续 data 事件被空行分隔、带尾换行的 data 规范化为单空行、非 data 行原样透传；按 `.gitignore` 约定仅本地保留），全仓测试 + `go vet` + 构建通过。
+
 - **修复：UA 版本回退常量低于上游新门槛，导致全量免费模型 426 `UpgradeRequired`**。上游在 2026-09-21 收紧版本下限：`User-Agent` 里的 opencode 版本 **>= 1.18.0** 才放行（1.15.3 / 1.16.0 / 1.17.0 / 1.17.9 一律 426），而本项目的 npm 探测失败回退常量是 `"1.15.3"`——只要 npm 探测抖动一次，就回退到低于门槛的版本、全部免费模型请求变 426（生产实测累计 891 次，日志中可见 `version=1.15.3`）。
   - 新增 `oc_version.go`：回退常量提升为 `fallbackOCVersion = "1.18.31"`（自身满足门槛）；记录**最近一次成功探测到的版本**（`lastGoodOCVersion`），探测失败优先回退到它，且低于门槛的版本不入缓存；`sanitizeOCVersion` 只保留前导 `x.y.z`（上游拒绝 git-describe 形式）；`main.go` 的 `fetchOCVersion` / `fetchOCVersionDirect` 收敛为对 `probeOCVersion` 的薄封装。
   - 两个上游重试循环新增 **426 自愈**：命中 `UpgradeRequired` 时刷新一次版本号并重试（每个请求最多一次），上游再次抬高门槛时可自愈，无需重启。

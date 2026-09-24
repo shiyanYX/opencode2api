@@ -2228,6 +2228,20 @@ func cleanStreamDelta(delta map[string]any, keepReasoning bool) {
 	}
 }
 
+// writeSSELine 写出一行 SSE。data 事件必须以空行终止，否则上游不发空行时
+// 多个 data 事件会被客户端 join 成一个 JSON 解析失败。
+func writeSSELine(w io.Writer, line string) {
+	if strings.HasPrefix(line, "data:") {
+		io.WriteString(w, strings.TrimRight(line, "\r\n"))
+		io.WriteString(w, "\n\n")
+		return
+	}
+	io.WriteString(w, line)
+	if !strings.HasSuffix(line, "\n") {
+		io.WriteString(w, "\n")
+	}
+}
+
 // convertStreamChunkWithUsage 转换流式 chunk 并同时提取 usage，避免二次解析
 func convertStreamChunkWithUsage(line string, keepReasoning bool) (string, map[string]any) {
 	trimmed := strings.TrimSpace(line)
@@ -3273,8 +3287,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 
 				forwardedAny = true
-				w.Write([]byte(out))
-				w.Write([]byte("\n"))
+				writeSSELine(w, out)
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
 				}
