@@ -939,10 +939,11 @@ function renderHeroDetailForFilter(){
 }
 ```
 
-并在 Task 4 Step 5 加调用的同一位置，把 `renderHeroDetail(d);` 改为：
+并把 Task 4 Step 5 加入 `renderStats` 末尾的那一行，从 `renderHeroDetail(d);` 改为：
 
 ```javascript
   window.__lastStats=d;
+  renderModelOptions();      // loadStats 与 loadTrends 并发返回，先后不定，双触发自愈
   renderHeroDetailForFilter();
 ```
 
