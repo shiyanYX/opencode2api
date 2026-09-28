@@ -162,6 +162,8 @@ trendsByModelFromCallLog(rng string) []ModelTrendPoint
 
 `ModelTrendPoint` 复用 `TrendsPoint` 全部字段并增加 `Model string \`json:"model"\``。
 
+**零桶策略**：对每个「在本区间内出现过请求」的模型，输出该区间的**全部**桶（无数据的桶填零），而非只输出有数据的桶。理由：`trendsFromCallLog` 的既有注释写明「含零数据时段保证连线连续」，逐模型必须保持同样性质，否则某模型只在最近 3 天有流量时，趋势线会在其余 27 天断裂。响应规模因此为「有数据的模型数 × 桶数」（30d 时约 8×30=240 行），可接受。
+
 **`main.go` `adminTrendsHandler`** — 读 `group` query 参数：
 
 - `group=model` → 调用 `trendsByModelFromCallLog`
@@ -197,9 +199,11 @@ trendsByModelFromCallLog(rng string) []ModelTrendPoint
 **模型筛选联动**
 
 - 模型下拉选项优先取 `/api/stats` 的 `models` 键（仅列出实际产生过请求的模型）；若 `models` 为空（全新实例无用量），回退到 `/api/models` 的 `free_models` 列表
-- 趋势图始终拉 `group=model` 数据。`模型=全部` 时，前端**按桶把该桶内所有模型的 `prompt_tokens`、`completion_tokens`、`cache_read_tokens`、`cache_creation_tokens` 分别求和**，得到与现状一致的聚合三线（输入 = `prompt_tokens - cache_read_tokens`）；选具体模型时只取该模型的行
+- 趋势图始终拉 `group=model` 数据。`模型=全部` 时，前端**按桶把该桶内所有模型的 `prompt_tokens`、`completion_tokens`、`cache_read_tokens`、`cache_creation_tokens` 分别求和**，得到与现状一致的聚合结果；选具体模型时只取该模型的行
+- **两个 tab 都要响应模型筛选**：`initTrend`（Token）与 `initReqTrend`（请求数，画 成功/失败 两条线）消费的是同一份 `trendsData`，因此共用同一套聚合逻辑。`initReqTrend` 聚合的是 `ok` / `fail` 两个字段
+- Token tab 的「输入」序列沿用 main 的公式 `prompt_tokens - cache_read_tokens`。**该公式仅在 `prompt_tokens` 为「含缓存的输入总量」时成立**（OpenAI / DeepSeek 风格）。`usageFromMap` 对 Anthropic 走 `input_tokens` 分支，其语义是不含 `cache_read_input_tokens`，理论上会算出负值。实测生产数据无此问题：136,931 条成功记录（含 3,282 条 `/v1/messages`）中 `prompt < cache_read` 的为 0 条。本次**保持与 main 一致，不改公式**，仅在此记录该前提假设
 - 甜甜圈、模型明细表随模型筛选联动（两处 main 本就按模型出数据）；概览四格随筛选重算
-- 时间范围下拉提供 4 项：当天 / 7 天 / 30 天 / 180 天
+- 时间范围下拉提供 4 项：当天 / 7 天 / 30 天 / 180 天。替换 main 的 `setTrendRange(1/7/30)` 按钮组时需注意其内部只有 `1→today` / `7→7d` / 其余→`30d` 三分支，**缺 180d 分支**，新实现需显式处理
 
 **ECharts 加载失败提示**
 
@@ -250,11 +254,12 @@ trendsByModelFromCallLog(rng string) []ModelTrendPoint
 2. **向后兼容回归**：改动前后各调用一次 `/api/stats/trends?range=30d`（不带 `group`），两次输出 `diff` 必须为空
 3. `?range=30d&group=model` 返回按「时间×模型」分组的行；把同一时间桶内所有模型的各字段求和，结果须等于不带 `group` 时的同桶值
 4. 实例启动后浏览器确认：概览统计、趋势图、甜甜圈、模型明细表、热力图、节点表、订阅表、日志、调用日志均显示真实数据
-5. 模型下拉切换 → 趋势图 / 甜甜圈 / 明细表 / 概览四格联动
+5. 模型下拉切换 → 趋势图（**Token 与请求数两个 tab**）/ 甜甜圈 / 明细表 / 概览四格全部联动
 6. 时间下拉切换 → 数据刷新；快速连点 4 个范围后，最终显示的必须是最后点击的那一项（竞态验证）
-7. 配置编辑器：订阅、推理档位、别名、SOCKS5 的增删改保存后，`config.json` 实际变更
-8. 节点「切换 / 解除」按钮实际生效
-9. 断网后刷新页面 → 出现 ECharts 加载失败提示条，而非空白
+7. 某模型仅在区间内少数几天有流量时，其趋势线仍覆盖完整区间（验证零桶策略）
+8. 配置编辑器：订阅、推理档位、别名、SOCKS5 的增删改保存后，`config.json` 实际变更
+9. 节点「切换 / 解除」按钮实际生效
+10. 断网后刷新页面 → 出现 ECharts 加载失败提示条，而非空白
 
 ---
 
