@@ -289,41 +289,12 @@ var (
 )
 
 func fetchOCVersion() string {
-	req, _ := http.NewRequest("GET", "https://registry.npmjs.org/opencode-ai/latest", nil)
-	req.Header.Set("Accept", "application/json")
-	resp, err := mgmtClient.Do(req)
-	if err != nil {
-		return "1.15.3"
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var info struct {
-		Version string `json:"version"`
-	}
-	if json.Unmarshal(body, &info) == nil && info.Version != "" {
-		return info.Version
-	}
-	return "1.15.3"
+	return probeOCVersion(mgmtClient)
 }
 
 // fetchOCVersionDirect 绕过节点池直连探测版本（会话切换时用，避免占用配额路径）。
 func fetchOCVersionDirect() string {
-	client := &http.Client{Timeout: 5 * time.Second}
-	req, _ := http.NewRequest("GET", "https://registry.npmjs.org/opencode-ai/latest", nil)
-	req.Header.Set("Accept", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return "1.15.3"
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	var info struct {
-		Version string `json:"version"`
-	}
-	if json.Unmarshal(body, &info) == nil && info.Version != "" {
-		return info.Version
-	}
-	return "1.15.3"
+	return probeOCVersion(ocVersionClient())
 }
 
 // noSessionRefresh 测试桩：置真时 refreshOCSession 不做网络请求。
@@ -429,12 +400,15 @@ var (
 
 // 默认免费模型列表（兜底用）
 var defaultFreeModels = map[string]bool{
+	"big-pickle":                      true,
+	"space-bunny-free":                true,
+	"mimo-v2.6-flash-free":            true,
 	"mimo-v2.5-free":                  true,
 	"ling-3.0-flash-fin-free":         true,
 	"nemotron-3-ultra-free":           true,
 	"nemotron-3.5-lightning-free":     true,
-	"big-pickle":                      true,
 	"muse-spark-1.3-contributor-free": true,
+	"jev-1.13-free":                   true,
 }
 
 func fetchModels() ([]ModelInfo, error) {
@@ -583,7 +557,7 @@ func saveFreeModelsCache(models map[string]bool) {
 }
 
 // fetchFreeModelsFromDocs 从 OpenCode Zen 文档抓取免费模型列表
-// 从定价表格中提取 Input 价格为 "Free" 的模型
+// 策略：先从 Endpoints 表格构建 "模型名称 → 模型 ID" 映射，再从 Pricing 表格获取免费模型名称，最后用映射转换
 func fetchFreeModelsFromDocs() (map[string]bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -603,19 +577,34 @@ func fetchFreeModelsFromDocs() (map[string]bool, error) {
 	body, _ := io.ReadAll(resp.Body)
 	html := string(body)
 
+	// 第一步：从 Endpoints 表格构建 "模型名称 → 模型 ID" 映射
+	// 表格格式：<tr><td>Model Name</td><td>model-id</td><td>[<code...>https://...endpoint</code>]</td>...
+	// 注意：第三列必须是 URL（允许 <code> 等标签包裹），避免匹配到 Pricing 表格的 <td>Free</td><td>Free</td>
+	nameToID := make(map[string]string)
+	reEndpoints := regexp.MustCompile(`<tr><td>([^<]+)</td><td>([a-zA-Z0-9._-]+)</td><td>(?:<[^>]+>)*https?://`)
+	for _, match := range reEndpoints.FindAllStringSubmatch(html, -1) {
+		if len(match) > 2 {
+			name := strings.TrimSpace(match[1])
+			id := strings.TrimSpace(match[2])
+			if name != "" && id != "" {
+				nameToID[name] = id
+			}
+		}
+	}
+
+	if len(nameToID) == 0 {
+		return nil, fmt.Errorf("no model mappings found in endpoints table")
+	}
+
+	// 第二步：从 Pricing 表格提取 Input 列为 "Free" 的模型名称
+	// 表格格式：<tr><td>Model Name</td><td>Free</td>...
 	models := make(map[string]bool)
-
-	// 从定价表格提取免费模型：格式 <tr><td>ModelName</td><td>Free</td>...
-	// 匹配 Input 列为 "Free" 的行
-	re := regexp.MustCompile(`<tr><td>([^<]+)</td><td>Free</td>`)
-	matches := re.FindAllStringSubmatch(html, -1)
-
-	for _, match := range matches {
+	rePricing := regexp.MustCompile(`<tr><td>([^<]+)</td><td>Free</td>`)
+	for _, match := range rePricing.FindAllStringSubmatch(html, -1) {
 		if len(match) > 1 {
 			name := strings.TrimSpace(match[1])
-			modelID := modelNameToID(name)
-			if modelID != "" {
-				models[modelID] = true
+			if id, ok := nameToID[name]; ok {
+				models[id] = true
 			}
 		}
 	}
@@ -625,22 +614,6 @@ func fetchFreeModelsFromDocs() (map[string]bool, error) {
 	}
 
 	return models, nil
-}
-
-// modelNameToID 将文档模型名称转换为 API ID
-func modelNameToID(name string) string {
-	special := map[string]string{
-		"Big Pickle":                      "big-pickle",
-		"MiMo-V2.5 Free":                  "mimo-v2.5-free",
-		"Ling 3.0 Flash Fin Free":         "ling-3.0-flash-fin-free",
-		"Nemotron 3 Ultra Free":           "nemotron-3-ultra-free",
-		"Nemotron 3.5 Lightning Free":     "nemotron-3.5-lightning-free",
-		"Muse Spark 1.3 Contributor Free": "muse-spark-1.3-contributor-free",
-	}
-	if id, ok := special[name]; ok {
-		return id
-	}
-	return ""
 }
 
 // loadFallbackFreeModels 加载兜底免费模型列表
@@ -2257,6 +2230,20 @@ func cleanStreamDelta(delta map[string]any, keepReasoning bool) {
 	}
 }
 
+// writeSSELine 写出一行 SSE。data 事件必须以空行终止，否则上游不发空行时
+// 多个 data 事件会被客户端 join 成一个 JSON 解析失败。
+func writeSSELine(w io.Writer, line string) {
+	if strings.HasPrefix(line, "data:") {
+		io.WriteString(w, strings.TrimRight(line, "\r\n"))
+		io.WriteString(w, "\n\n")
+		return
+	}
+	io.WriteString(w, line)
+	if !strings.HasSuffix(line, "\n") {
+		io.WriteString(w, "\n")
+	}
+}
+
 // convertStreamChunkWithUsage 转换流式 chunk 并同时提取 usage，避免二次解析
 func convertStreamChunkWithUsage(line string, keepReasoning bool) (string, map[string]any) {
 	trimmed := strings.TrimSpace(line)
@@ -2600,6 +2587,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	// 循环上限 = 重试上限 + 配额预算，两者各自封顶互不挤占（重试仍由 canRetry 限制）。
 	nodeSwitchPending := false
 	quotaSwitches := 0
+	versionRefreshed := false // 426 时只刷新一次版本，避免无谓循环
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
 
@@ -2683,6 +2671,20 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+
+		// 426 UpgradeRequired：上游提高了免费层的版本门槛。刷新一次版本号后重试
+		// （npm latest 通常已满足新门槛），每个请求最多刷新一次。见 oc_version.go。
+		if resp.StatusCode == http.StatusUpgradeRequired && !versionRefreshed {
+			versionRefreshed = true
+			log.Warn("upgrade_required_refresh_version",
+				"model", modelID,
+				"current_version", ocClientVer,
+				"min_required", minFreeTierOCVersion,
+			)
+			callLogEvent(ctx, "switch", nodeFp, "upgrade_required:refresh_version")
+			refreshOCSession()
+			continue
+		}
 
 		// 检测区域限制错误（自动学习 + 区域探测）
 		if regionRestricted, detectedRegion := classifyRegionRestriction(resp.StatusCode, errBody); regionRestricted {
@@ -2878,6 +2880,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	// 独立预算（默认 5 个节点），不占用重试闸门；循环上限 = 重试上限 + 配额预算。
 	nodeSwitchPending := false
 	quotaSwitches := 0
+	versionRefreshed := false // 426 时只刷新一次版本，避免无谓循环
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
 
@@ -2947,6 +2950,20 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+
+		// 426 UpgradeRequired：上游提高了免费层的版本门槛。刷新一次版本号后重试
+		// （npm latest 通常已满足新门槛），每个请求最多刷新一次。见 oc_version.go。
+		if resp.StatusCode == http.StatusUpgradeRequired && !versionRefreshed {
+			versionRefreshed = true
+			log.Warn("upgrade_required_refresh_version",
+				"model", modelID,
+				"current_version", ocClientVer,
+				"min_required", minFreeTierOCVersion,
+			)
+			callLogEvent(ctx, "switch", nodeFp, "upgrade_required:refresh_version")
+			refreshOCSession()
+			continue
+		}
 
 		// 检测区域限制错误（自动学习 + 区域探测）
 		if regionRestricted, detectedRegion := classifyRegionRestriction(resp.StatusCode, errBody); regionRestricted {
@@ -3272,8 +3289,7 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 				}
 
 				forwardedAny = true
-				w.Write([]byte(out))
-				w.Write([]byte("\n"))
+				writeSSELine(w, out)
 				if f, ok := w.(http.Flusher); ok {
 					f.Flush()
 				}

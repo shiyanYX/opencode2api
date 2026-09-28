@@ -127,20 +127,26 @@ rg 'promoted_reasoning=true' opencode2api.log
 - `OPENCODE2API_LOG_LEVEL`
 - `OPENCODE2API_LOG_STDOUT`
 
-### 免费模型 403 `FreeTierError`
+### 免费模型 403 `FreeTierError` / 426 `UpgradeRequired`
 
-免费模型报 `403 FreeTierError: OpenCode's free tier can only be used from within OpenCode` 时，
-几乎都是**上游收紧了「客户端形态」校验**，而不是你的 key、账号或出口 IP 有问题——换 IP、换 key、
-降级版本都无效。本项目已对齐截至 2026-09-18 实测的四道条件：
+免费模型被拒时，几乎都是**上游收紧了「客户端形态」校验**，而不是你的 key、账号或出口 IP 有问题
+——换 IP、换 key、降级版本都无效。本项目已对齐截至 2026-09-21 实测的五道条件：
 
 1. `x-opencode-session` 必须符合官方 ID 形态（`ses_` + 12 位小写十六进制 + 14 位 base62）；
-2. `User-Agent` 必须是 `opencode/<semver>` 且不低于 1.17.0；
+2. `User-Agent` 必须是 `opencode/<semver>`，且**不低于 1.18.0**；
 3. 上游请求 `stream` 必须为 `true`（非流式客户端由网关本地聚合）；
-4. 上游 `tools` 必须含官方小写工具名 `bash`/`glob`/`grep`/`read`（网关自动规范化并回映射）。
+4. 上游 `tools` 必须含官方小写工具名 `bash`/`glob`/`grep`/`read`（网关自动规范化并回映射）；
+5. UA 必须存在且形如 `opencode/<semver>`。
+
+三种错误的区分：
+
+| 错误 | 含义 | 处理 |
+|---|---|---|
+| `403 FreeTierError` | 客户端形态被拒（session / stream / tools / UA 缺失或非 semver） | 形态对齐，换节点无用 |
+| `426 UpgradeRequired` | UA 里的 opencode 版本低于上游门槛 | 检查日志 `version=` 与 npm 探测是否失效；网关收到 426 会自动刷新版本重试一次 |
+| `429 FreeUsageLimitError` | 免费额度按出口 IP 限流 | 换出口/节点才有意义 |
 
 排查与「上游再次变更时如何重新定位」的完整流程见 [docs/UPSTREAM-COMPAT.md](docs/UPSTREAM-COMPAT.md)。
-注意区分两个错误：`FreeTierError`（403，客户端形态被拒，换节点无用）与 `FreeUsageLimitError`
-（429，免费额度按出口 IP 限流，靠切换节点缓解）。
 
 ## 本地构建
 

@@ -10,16 +10,21 @@ OpenCode Zen 的免费层**不按账号鉴权，而按「请求像不像官方 o
 >      "message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}
 > ```
 
-## 一、已实测的四道条件
+## 一、已实测的五道条件
 
-截至 2026-09-18，以下条件**必须同时满足**，缺一即 403：
+截至 2026-09-21，以下条件**必须同时满足**，缺一即被拒：
 
-| # | 条件 | 本项目实现 |
-|---|---|---|
-| 1 | `x-opencode-session` = `ses_` + 12 位小写十六进制 + 14 位 base62（前缀后固定 26 字符） | `opencode_id.go` 的 `newOpenCodeID` 复刻官方 `Identifier.create` |
-| 2 | `User-Agent` = `opencode/<semver>`，且不低于 1.17.0 | `main.go` 取 npm `opencode-ai` latest，回退 `1.18.31` |
-| 3 | `body.stream` 必须为 `true` | `agent_shape.go` 强制置真；非流式客户端由 `aggregateUpstreamSSE` 本地聚合 |
-| 4 | `body.tools` 必须包含官方小写工具名 `bash`、`glob`、`grep`、`read` | `agent_shape.go` 的 `shapeToolsForUpstream` 规范化 + 补齐 |
+| # | 条件 | 失配时的错误 | 本项目实现 |
+|---|---|---|---|
+| 1 | `x-opencode-session` = `ses_` + 12 位小写十六进制 + 14 位 base62（前缀后固定 26 字符） | 403 `FreeTierError` | `opencode_id.go` 的 `newOpenCodeID` 复刻官方 `Identifier.create` |
+| 2 | `User-Agent` = `opencode/<semver>`，且**不低于 1.18.0** | **426 `UpgradeRequired`** | `oc_version.go` 取 npm `opencode-ai` latest，回退 `1.18.31` |
+| 3 | `body.stream` 必须为 `true` | 403 `FreeTierError` | `agent_shape.go` 强制置真；非流式客户端由 `aggregateUpstreamSSE` 本地聚合 |
+| 4 | `body.tools` 必须包含官方小写工具名 `bash`、`glob`、`grep`、`read` | 403 `FreeTierError` | `agent_shape.go` 的 `shapeToolsForUpstream` 规范化 + 补齐 |
+| 5 | `User-Agent` 必须存在且形如 `opencode/<semver>` | 403 `FreeTierError` | 同上 |
+
+> 条件 2 与 5 是同一道校验的两个失败档位：格式不对（缺失、无斜杠、非 semver）走 403
+> `FreeTierError`；格式对但版本过低走 **426 `UpgradeRequired`**。两者是**不同的错误类型**，
+> 排查时不要混为一谈。
 
 ### 条件 1：session 形态（2026-09-17 上线）
 
@@ -44,6 +49,31 @@ OpenCode Zen 的免费层**不按账号鉴权，而按「请求像不像官方 o
 
 ⇒ 只有**前 12 位必须是小写十六进制**，后 14 位内容自由，前缀后长度必须恰好 26。
 12 位时间分量**不校验时效**（随机值、一年前的时间戳都能过）。
+
+### 条件 2：UA 版本下限（2026-09-21 收紧到 1.18.0）
+
+其余条件全部满足、只改 UA 时的实测（2026-09-21）：
+
+| `User-Agent` | 结果 |
+|---|---|
+| `opencode/1.15.3` / `1.16.0` / `1.17.0` / `1.17.9` | **426** `UpgradeRequired` |
+| `opencode/1.18.0` | 200 |
+| `opencode/1.18.31` | 200 |
+| `opencode/1.19.0` / `999.0.0` | 200 |
+| `opencode/latest/1.18.31/cli` | 200 |
+| UA 缺失 | 403 `FreeTierError` |
+
+⇒ 门槛是 **>= 1.18.0**（注意高于社区早前记录的 1.17.0）。版本号只比较前导 `x.y.z`，
+git-describe 形式（`1.18.31.r12.g88c6c7a`）上游会拒，`sanitizeOCVersion` 只保留前导三段。
+
+**踩过的坑（务必保留这段教训）**：版本号来自 npm registry 探测，探测失败会回退。
+本项目的回退常量曾是 `"1.15.3"`——低于门槛。于是**只要 npm 探测抖动一次，全量免费模型请求就变成
+426**，而日志里只留下 `version=1.15.3`。现在：
+
+- 回退常量提升为 `fallbackOCVersion = "1.18.31"`（自身满足门槛，且有单测断言）；
+- 记录「最近一次成功探测到的版本」（`lastGoodOCVersion`），探测失败优先回退到它，
+  低于门槛的版本不入缓存；
+- 收到 426 时**自动刷新一次版本号并重试**（每个请求最多一次），上游再次抬高门槛时可自愈。
 
 ### 条件 3：stream 必须为 true（2026-09-17 上线）
 
@@ -104,11 +134,14 @@ OpenCode Zen 的免费层**不按账号鉴权，而按「请求像不像官方 o
 
 ## 三、上游再次变更时怎么重新定位
 
-上游近 36 小时内连续上线了三道闸门（session 形态 → stream → 工具名）。再次出现全线 403 时按以下顺序做，
-**不要猜**：
+上游在 2026-09-17～09-21 间连续上线了四道闸门（session 形态 → stream → 工具名 → 版本下限）。
+再次出现故障时按以下顺序做，**不要猜**：
 
-1. **先确认是上游门槛而不是限流或本地故障**
-   - 报错是资格类拒绝（`FreeTierError`）而不是 `FreeUsageLimitError`；换出口 IP 无效 → 不是 IP 配额问题。
+1. **先看错误类型，别把所有拒绝当成同一件事**
+   - 403 `FreeTierError` = 客户端形态被拒（session / stream / tools / UA 缺失或非 semver）；
+   - 426 `UpgradeRequired` = UA 里的版本号低于门槛（**先查日志里的 `version=`**，
+     再看回退常量与 npm 探测是否失效）；
+   - 429 `FreeUsageLimitError` = 按出口 IP 的额度限流，换 IP/换节点才有意义。
    - 用**真实 opencode CLI** 发同一模型：能通 → 门槛是「像不像官方客户端」；否则才是账号/上游故障。
 2. **抓真实客户端的请求**
    - 本地起一个 CONNECT 代理（自签 CA），给 CLI 设 `HTTPS_PROXY` 与 `NODE_EXTRA_CA_CERTS`，
@@ -117,9 +150,10 @@ OpenCode Zen 的免费层**不按账号鉴权，而按「请求像不像官方 o
      ID 在 `packages/opencode/src/id/id.ts`，UA 在 `installation/index.ts`。
 3. **逐字段二分**
    - 以「真实请求 → 200」为基线，**每次只把一个字段换成我们的值**，逐个定位到失配项。
-   - 顺序建议：`User-Agent` → `x-opencode-session` → `body.stream` → `body.tools` → 其余头。
+   - 顺序建议：`User-Agent`（含版本号）→ `x-opencode-session` → `body.stream` → `body.tools` → 其余头。
    - 注意保持其余字段不变，否则会得到互相矛盾的结论。
-4. **把新结论补进本文档的矩阵**，并在 `agent_shape.go` / `opencode_id.go` 对应位置实现。
+4. **把新结论补进本文档的矩阵**，并在 `oc_version.go` / `agent_shape.go` / `opencode_id.go`
+   对应位置实现。
 
 定位工具（可复用，未纳入仓库）：本地 CONNECT 代理 + 自签 CA 约 130 行 Python；二分脚本直接
 `ssl.wrap_socket` 连上游、按列表构造 header 块并断言状态码。
@@ -128,7 +162,9 @@ OpenCode Zen 的免费层**不按账号鉴权，而按「请求像不像官方 o
 
 - **这是对抗性适配，不是稳定接口**。上游未公开承诺这些形态，任何一次收紧都可能让代理失效；
   重新定位的成本约为「一次 MITM + 一轮二分」。
-- 免费层额度本身仍按出口 IP 限流（`FreeUsageLimitError` 429），与本文的四道闸门是两回事：
+- **不要把「降级值」设成会被上游拒绝的值**。版本回退常量曾是 `1.15.3`（低于 1.18.0 门槛），
+  一次 npm 探测抖动就让全量请求变 426。任何形态参数的兜底值都必须自身满足当前门槛，并加单测断言。
+- 免费层额度本身仍按出口 IP 限流（`FreeUsageLimitError` 429），与本文的五道闸门是两回事：
   前者靠切换节点缓解，后者只能靠形态对齐。
 - 条件 3 使所有非流式请求在上游侧变为流式，本网关需本地聚合（内存占用按 `max_tokens` 有界，
   用量从末尾 chunk 取）。

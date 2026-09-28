@@ -6,23 +6,30 @@
 
 ## 背景
 
-OpenCode Zen 免费层按「请求像不像官方 opencode 客户端」鉴权，而非按账号或 IP。2026-09-17 至 09-18
-的 36 小时内上游连续收紧三轮，每轮都使代理全线返回同一个 403：
+OpenCode Zen 免费层按「请求像不像官方 opencode 客户端」鉴权，而非按账号或 IP。2026-09-17 至 09-21
+上游连续收紧四轮，前三轮都使代理全线返回同一个 403：
 
 ```json
 403 {"type":"error","error":{"type":"FreeTierError",
      "message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}
 ```
 
-三轮依次是：
+四轮依次是：
 
 1. `x-opencode-session` 必须符合官方 ID 形态（`ses_` + 12 位小写十六进制 + 14 位 base62）；
 2. `body.stream` 必须为 `true`；
-3. `body.tools` 必须包含官方小写工具名 `bash`、`glob`、`grep`、`read`。
+3. `body.tools` 必须包含官方小写工具名 `bash`、`glob`、`grep`、`read`；
+4. `User-Agent` 里的 opencode 版本必须 **>= 1.18.0**（低于则 426，错误类型与前三轮不同）：
+
+```json
+426 {"type":"error","error":{"type":"UpgradeRequired",
+     "message":"Error from provider (Console): OpenCode 1.18.0 or newer is required to use the free tier"}}
+```
 
 第一轮之前本项目的实现是 `"ses_" + randomString(24)`；第二轮之前非流式请求按 `stream:false` 直发；
 第三轮之前只处理「客户端不带 tools」的场景，而生产主客户端（Claude Code 风格、工具名首字母大写）
-自带工具却因不含官方小写名而全线 403。
+自带工具却因不含官方小写名而全线 403；第四轮暴露的是**兜底值本身不合规**——npm 版本探测失败时回退到
+`1.15.3`，低于 1.18.0 门槛，一次网络抖动就让全量请求变 426。
 
 排除过的假设（均已实测证伪）：多出口共享 session、host IP 被封、TLS/JA3 指纹、
 User-Agent 内容（短 UA 配正确 session 也能通）、请求体必须含官方 system prompt、
@@ -43,6 +50,9 @@ Authorization 必须是真实 key。
    客户端完全无工具时才设 `tool_choice:"none"`。
 4. **对下游透明**：响应侧按 `上游名 -> 客户端原名` 回映射，并丢弃空壳工具产生的调用。
    流式路径由 `newToolNameRewriter` 包装上游 SSE 统一收口，三条协议面共用。
+5. **版本形态**：新增 `oc_version.go` 统一管理 UA 版本——回退常量必须自身满足门槛
+   （`fallbackOCVersion = "1.18.31"`，有单测断言）、优先回退到「最近一次成功探测到的版本」、
+   低于门槛的版本不入缓存、只保留前导 `x.y.z`；收到 426 时刷新一次版本并重试以自愈。
 
 ## 理由
 
@@ -52,10 +62,13 @@ Authorization 必须是真实 key。
   （空壳），模型可能选中空壳导致参数不合客户端 schema；改写则上游只看到一份工具。
 - **下游保持不变是本方案的硬约束**：网关的用户是各类 agent 客户端，任何要求它们改工具名/改
   schema 的方案都不可接受；回映射使工具名、schema、`tool_choice` 契约全部不变。
+- **兜底值也必须合规**：版本号是探测来的、会失败，回退值若低于门槛就等于「网络抖动即全量失败」。
+  凡是会被上游校验的形态参数，其兜底值都要满足当前门槛并加单测钉住。
 
 ## 后果
 
-- 正面：免费层恢复可用；对下游零改动；新增 20 项单元测试覆盖形态与回映射。
+- 正面：免费层恢复可用；对下游零改动；30 项单元测试覆盖形态、回映射与版本回退（本地保留，
+  按 `.gitignore` 约定不入库）。
 - 负面：这是**对抗性适配**，上游未承诺这些形态，任何一次收紧都可能再次失效；重新定位成本约为
   「一次 MITM 抓包 + 一轮逐字段二分」（流程见 `docs/UPSTREAM-COMPAT.md`）。
 - 负面：所有非流式请求在上游侧变为流式，网关需本地聚合（内存按 `max_tokens` 有界）。
