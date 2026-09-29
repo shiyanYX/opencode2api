@@ -42,10 +42,16 @@ fetch('/api/config').then(function(r){if(r.ok)DEMO_MODE=false})
 ### 2.1 DOM 骨架高度重叠
 
 ```
-test 86 个元素 id，main 108 个，共有 51 个 → test 的 59% 在 main 中已存在
+test 79 个元素 id（真实 id 属性），main 100 个，共有 51 个 → test 的 65% 在 main 中已存在
 ```
 
-共有的骨架：`page-overview` `page-nodes` `page-subs` `page-misc` `page-logs` `nav` `view-app` `sideAddr` `pageTitle` `pageCrumb`；所有表格容器 `nodeTable` `subTable` `socks5Table` `capTable` `statsTable` `aliasTable` `effortTable` `logList` `clList`；节点统计 `ovTotal` `ovHealthy` `ovExhausted` `ovDead` `ovActive` `ovManual`。
+> 更正：早期用 `grep -oE 'id="..."'` 统计时，正则会匹配到 `data-od-id="overview"` 内部的 `id="overview"` 子串，test/main 两侧都被灌入虚假的 id，导致分母偏大（曾误报 59%）。改用 `(?<![-\w])id="..."` 排除该误匹配后，实际为 65%。**结论方向不变且更强**：页面骨架与全部表格容器确实是两版共有的真实 id。
+
+共有的页面骨架（真实 `id`）：`page-overview` `page-nodes` `page-subs` `page-misc` `page-logs`
+
+共有的表格容器（真实 `id`）：`nodeTable` `subTable` `socks5Table` `capTable` `statsTable` `aliasTable` `effortTable` `webshareTable` `chartStatsTable`
+
+> 注意：section 元素**没有**独立的 `id="overview"`，只有 `id="page-overview"` 与 `data-od-id="overview"`。写自动化检查时用 `#page-*` 选择器，用 `#overview` 恒为 0。
 
 ### 2.2 同一套设计令牌
 
