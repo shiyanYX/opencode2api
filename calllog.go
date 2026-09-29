@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -375,42 +376,46 @@ type TrendsPoint struct {
 	CacheRead        int64  `json:"cache_read_tokens"`
 }
 
-// trendsFromCallLog 扫描 call_log.jsonl 全量历史，按 range 聚簇返回时间序列。
-// range: today（24 个整点小时桶）/ 7d / 30d / 180d（逐日桶，含零数据时段保证连线连续）。
-// 路径未初始化或文件缺失时返回空数组。
-func trendsFromCallLog(rng string) []TrendsPoint {
-	callLog.mu.Lock()
-	p := callLog.path
-	callLog.mu.Unlock()
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return nil
-	}
+// ModelTrendPoint 用量趋势按模型分组的单桶记录。字段与 TrendsPoint 一致，
+// 额外携带 Model，供前端做模型维度筛选。
+type ModelTrendPoint struct {
+	TS               string `json:"ts"`
+	Model            string `json:"model"`
+	Requests         int64  `json:"requests"`
+	OK               int64  `json:"ok"`
+	Fail             int64  `json:"fail"`
+	PromptTokens     int64  `json:"prompt_tokens"`
+	CompletionTokens int64  `json:"completion_tokens"`
+	CacheCreation    int64  `json:"cache_creation_tokens"`
+	CacheRead        int64  `json:"cache_read_tokens"`
+}
+
+// trendBuckets 按 range 切分时间桶：返回每个桶的时间标签与「时间→桶索引」映射。
+// today 返回 24 个整点小时桶；7d/30d/180d 返回逐日桶。均含零数据时段以保证连线连续。
+func trendBuckets(rng string) ([]string, func(time.Time) int) {
 	now := time.Now()
 	loc := now.Location()
-	var buckets []TrendsPoint
-	var bidx func(t time.Time) int
-	dayIdx := func(t time.Time, start time.Time) int {
-		lt := t.Local()
-		dayStart := time.Date(lt.Year(), lt.Month(), lt.Day(), 0, 0, 0, 0, lt.Location())
-		return int(dayStart.Sub(start) / (24 * time.Hour))
-	}
 	switch rng {
 	case "7d", "30d", "180d":
 		n := map[string]int{"7d": 7, "30d": 30, "180d": 180}[rng]
 		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, -(n - 1))
-		buckets = make([]TrendsPoint, n)
+		ts := make([]string, n)
 		for i := 0; i < n; i++ {
-			buckets[i] = TrendsPoint{TS: start.AddDate(0, 0, i).Format("2006-01-02")}
+			ts[i] = start.AddDate(0, 0, i).Format("2006-01-02")
 		}
-		bidx = func(t time.Time) int { return dayIdx(t, start) }
+		dayIdx := func(t time.Time) int {
+			lt := t.Local()
+			dayStart := time.Date(lt.Year(), lt.Month(), lt.Day(), 0, 0, 0, 0, lt.Location())
+			return int(dayStart.Sub(start) / (24 * time.Hour))
+		}
+		return ts, dayIdx
 	default: // today
 		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
-		buckets = make([]TrendsPoint, 24)
+		ts := make([]string, 24)
 		for i := 0; i < 24; i++ {
-			buckets[i] = TrendsPoint{TS: start.Add(time.Duration(i) * time.Hour).Format("2006-01-02T15:04")}
+			ts[i] = start.Add(time.Duration(i) * time.Hour).Format("2006-01-02T15:04")
 		}
-		bidx = func(t time.Time) int {
+		return ts, func(t time.Time) int {
 			lt := t.In(loc)
 			if lt.Year() != now.Year() || lt.YearDay() != now.YearDay() {
 				return -1
@@ -418,6 +423,18 @@ func trendsFromCallLog(rng string) []TrendsPoint {
 			return lt.Hour()
 		}
 	}
+}
+
+// forEachBucketedCallRecord 遍历落在 rng 区间内的调用记录，fn 收到记录与桶索引。
+func forEachBucketedCallRecord(rng string, fn func(rec CallRecord, bucket int)) {
+	callLog.mu.Lock()
+	p := callLog.path
+	callLog.mu.Unlock()
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return
+	}
+	ts, bidx := trendBuckets(rng)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -432,9 +449,20 @@ func trendsFromCallLog(rng string) []TrendsPoint {
 			continue
 		}
 		i := bidx(t)
-		if i < 0 || i >= len(buckets) {
+		if i < 0 || i >= len(ts) {
 			continue
 		}
+		fn(rec, i)
+	}
+}
+
+func trendsFromCallLog(rng string) []TrendsPoint {
+	ts, _ := trendBuckets(rng)
+	buckets := make([]TrendsPoint, len(ts))
+	for i, label := range ts {
+		buckets[i] = TrendsPoint{TS: label}
+	}
+	forEachBucketedCallRecord(rng, func(rec CallRecord, i int) {
 		buckets[i].Requests++
 		if rec.Status == "ok" {
 			buckets[i].OK++
@@ -445,8 +473,46 @@ func trendsFromCallLog(rng string) []TrendsPoint {
 		buckets[i].CompletionTokens += rec.CompletionTokens
 		buckets[i].CacheCreation += rec.CacheCreation
 		buckets[i].CacheRead += rec.CacheRead
-	}
+	})
 	return buckets
+}
+
+// trendsByModelFromCallLog 在 trendsFromCallLog 的切分基础上按模型再分一层。
+// 对区间内出现过请求的每个模型输出全部桶（无数据填零），保证该模型的折线
+// 覆盖整个区间而非只在有流量的几天出现。输出顺序：模型名升序，桶索引升序。
+func trendsByModelFromCallLog(rng string) []ModelTrendPoint {
+	ts, _ := trendBuckets(rng)
+	idx := make(map[string][]ModelTrendPoint)
+	forEachBucketedCallRecord(rng, func(rec CallRecord, i int) {
+		row, ok := idx[rec.Model]
+		if !ok {
+			row = make([]ModelTrendPoint, len(ts))
+			for j, label := range ts {
+				row[j] = ModelTrendPoint{TS: label, Model: rec.Model}
+			}
+			idx[rec.Model] = row
+		}
+		row[i].Requests++
+		if rec.Status == "ok" {
+			row[i].OK++
+		} else {
+			row[i].Fail++
+		}
+		row[i].PromptTokens += rec.PromptTokens
+		row[i].CompletionTokens += rec.CompletionTokens
+		row[i].CacheCreation += rec.CacheCreation
+		row[i].CacheRead += rec.CacheRead
+	})
+	models := make([]string, 0, len(idx))
+	for m := range idx {
+		models = append(models, m)
+	}
+	sort.Strings(models)
+	out := make([]ModelTrendPoint, 0, len(models)*len(ts))
+	for _, m := range models {
+		out = append(out, idx[m]...)
+	}
+	return out
 }
 
 // ---- API：GET /api/call-log?limit= / DELETE /api/call-log ----

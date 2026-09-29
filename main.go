@@ -6899,7 +6899,8 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// adminTrendsHandler 用量趋势：按 range=today|7d|30d 返回聚簇时间序列（来自调用日志）。
+// adminTrendsHandler 用量趋势：按 range=today|7d|30d|180d 返回聚簇时间序列（来自调用日志）。
+// group=model 时额外按模型分组，供前端做模型维度筛选；不带该参数时行为与原先完全一致。
 func adminTrendsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -6909,11 +6910,19 @@ func adminTrendsHandler(w http.ResponseWriter, r *http.Request) {
 	if rng != "7d" && rng != "30d" && rng != "180d" {
 		rng = "today"
 	}
+	w.Header().Set("Content-Type", "application/json")
+	if r.URL.Query().Get("group") == "model" {
+		pts := trendsByModelFromCallLog(rng)
+		if pts == nil {
+			pts = []ModelTrendPoint{}
+		}
+		json.NewEncoder(w).Encode(pts)
+		return
+	}
 	pts := trendsFromCallLog(rng)
 	if pts == nil {
 		pts = []TrendsPoint{}
 	}
-	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(pts)
 }
 
