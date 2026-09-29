@@ -31,6 +31,12 @@
   --ok:#2fd489; --ok-dim:rgba(47,212,137,.13);
   --orange:#f0b04a; --orange-dim:rgba(240,176,74,.12);
   --purple:#b197f7; --purple-dim:rgba(177,151,247,.13);
+  /* 数据系列色板：图表与模型筛选共用，亮色主题下另有一套 */
+  --series-1:#5b9bff;  /* 输入 / 首个模型 */
+  --series-2:#2fd489;  /* 输出 */
+  --series-3:#b18cff;  /* 缓存读 */
+  --series-4:#f0b04a;  /* 缓存写 */
+  --series-5:#fb7185;  /* 辅助 */
   --red:#ff6b6b; --red-dim:rgba(255,107,107,.12);
   --radius:12px; --radius-sm:8px;
   --font:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif;
@@ -48,6 +54,7 @@
   --orange:#a1530a; --orange-dim:rgba(161,83,10,.10);
   --purple:#6d4fc4; --purple-dim:rgba(109,79,196,.10);
   --red:#b42318; --red-dim:rgba(180,35,24,.09);
+  --series-1:#2f5fd6; --series-2:#0d8f5c; --series-3:#7048c4; --series-4:#b57500; --series-5:#d93a5c;
   --shadow:0 10px 30px rgba(30,40,70,.1);
   --btn-text:#ffffff;
 }
@@ -820,6 +827,8 @@ function renderLatencyDist(nodes){
 const charts={};
 function isDark(){return(document.documentElement.getAttribute('data-theme')||'dark')==='dark'}
 function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
+// seriesColor 返回第 i 个数据系列的色值，超出 5 个时循环取模。
+function seriesColor(i){const n=((i%5)+5)%5;return getCSS('--series-'+(n+1))||['#5b9bff','#2fd489','#b18cff','#f0b04a','#fb7185'][n]}
 let currentTrendDays=30,trendTab='token';
 
 function initAllCharts(){initTrend(currentTrendDays);initHeatmap()}
@@ -841,7 +850,7 @@ function initTrend(days){
   const promptNoCache=slice.map(d=>(d.prompt_tokens||0)-(d.cache_read_tokens||0));
   const cacheHit=slice.map(d=>d.cache_read_tokens||0);
   const compT=slice.map(d=>d.completion_tokens||0);
-  const bC=getCSS('--blue')||'#7ea2ff',oC=getCSS('--ok')||'#2fd489',pC=getCSS('--purple')||'#b197f7';
+  const bC=seriesColor(0),oC=seriesColor(1),pC=seriesColor(2);
   charts.trend.setOption({
     tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+trendTooltipTitle(params[0].axisValue)+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+fmtFull(p.value)+'<br/>');return s}},
     legend:{data:['输入','命中缓存','输出'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
@@ -861,7 +870,7 @@ function initReqTrend(days){
   const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
   const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
   const ok=slice.map(d=>d.ok||0);const fail=slice.map(d=>d.fail||0);
-  const okC=getCSS('--ok')||'#2fd489',failC=getCSS('--red')||'#ff6b6b';
+  const okC=seriesColor(1),failC=getCSS('--red')||'#ff6b6b';
   charts.reqTrend.setOption({
     tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+trendTooltipTitle(params[0].axisValue)+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+p.value+'<br/>');return s}},
     legend:{data:['成功','失败'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
@@ -946,7 +955,7 @@ function initDonut(ms){
   charts.donut=echarts.init(el);
   charts.donut.setOption({
     tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)'},
-    color:['#6f96ff','#7ea2ff','#2fd489','#b197f7'],
+    color:[0,1,2,3,4].map(seriesColor),
     series:[{type:'pie',radius:['42%','72%'],center:['50%','52%'],padAngle:3,
       itemStyle:{borderRadius:8,borderColor:isDark()?'#101828':'#ffffff',borderWidth:3},
       label:{show:true,formatter:'{b}\n{d}%',fontSize:12,color:isDark()?'#e9eef8':'#161a26',lineHeight:18},
