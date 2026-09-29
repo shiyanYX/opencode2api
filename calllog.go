@@ -425,16 +425,16 @@ func trendBuckets(rng string) ([]string, func(time.Time) int) {
 	}
 }
 
-// forEachBucketedCallRecord 遍历落在 rng 区间内的调用记录，fn 收到记录与桶索引。
-func forEachBucketedCallRecord(rng string, fn func(rec CallRecord, bucket int)) {
+// forEachBucketedCallRecord 用给定的桶配置遍历落在区间内的调用记录，
+// fn 收到记录与桶索引。返回 false 表示日志文件不可读。
+func forEachBucketedCallRecord(ts []string, bidx func(time.Time) int, fn func(rec CallRecord, bucket int)) bool {
 	callLog.mu.Lock()
 	p := callLog.path
 	callLog.mu.Unlock()
 	data, err := os.ReadFile(p)
 	if err != nil {
-		return
+		return false
 	}
-	ts, bidx := trendBuckets(rng)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -454,15 +454,17 @@ func forEachBucketedCallRecord(rng string, fn func(rec CallRecord, bucket int)) 
 		}
 		fn(rec, i)
 	}
+	return true
 }
 
+// 路径未初始化或文件缺失时返回空数组
 func trendsFromCallLog(rng string) []TrendsPoint {
-	ts, _ := trendBuckets(rng)
+	ts, bidx := trendBuckets(rng)
 	buckets := make([]TrendsPoint, len(ts))
 	for i, label := range ts {
 		buckets[i] = TrendsPoint{TS: label}
 	}
-	forEachBucketedCallRecord(rng, func(rec CallRecord, i int) {
+	if !forEachBucketedCallRecord(ts, bidx, func(rec CallRecord, i int) {
 		buckets[i].Requests++
 		if rec.Status == "ok" {
 			buckets[i].OK++
@@ -473,7 +475,9 @@ func trendsFromCallLog(rng string) []TrendsPoint {
 		buckets[i].CompletionTokens += rec.CompletionTokens
 		buckets[i].CacheCreation += rec.CacheCreation
 		buckets[i].CacheRead += rec.CacheRead
-	})
+	}) {
+		return nil
+	}
 	return buckets
 }
 
@@ -481,9 +485,9 @@ func trendsFromCallLog(rng string) []TrendsPoint {
 // 对区间内出现过请求的每个模型输出全部桶（无数据填零），保证该模型的折线
 // 覆盖整个区间而非只在有流量的几天出现。输出顺序：模型名升序，桶索引升序。
 func trendsByModelFromCallLog(rng string) []ModelTrendPoint {
-	ts, _ := trendBuckets(rng)
+	ts, bidx := trendBuckets(rng)
 	idx := make(map[string][]ModelTrendPoint)
-	forEachBucketedCallRecord(rng, func(rec CallRecord, i int) {
+	forEachBucketedCallRecord(ts, bidx, func(rec CallRecord, i int) {
 		row, ok := idx[rec.Model]
 		if !ok {
 			row = make([]ModelTrendPoint, len(ts))
