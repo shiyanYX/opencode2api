@@ -559,11 +559,15 @@ commit 2a29a37 取回。"
 ### Task 3: 移植 `--series-*` 色板并改写图表取色
 
 **Files:**
-- Modify: `static/admin.html`（`:root` 变量块、亮色主题块、`initTrend`、`initReqTrend`、`initDonut`、`initHeatmap`）
+- Modify: `static/admin.html`（`:root` 变量块、亮色主题块、`initTrend`、`initReqTrend`、`initDonut`）
+
+> **不包含 `initHeatmap`。** 早前版本的文件清单列了它，但 8 个 Step 无一步涉及，属计划自身的不一致，已移除。判断依据见 Task 3 审查：规范契约是 Step + Interfaces 段，Files 段是非规范的落点提示；Step 7 的 4 条验收是穷举的、不含热力图；Interfaces 段自己把消费方划给了「后续任务」。
 
 **Interfaces:**
 - Consumes: Task 2 的 main 版 admin.html
 - Produces: CSS 变量 `--series-1` … `--series-5`（暗色与亮色各一套）；新增 JS 辅助 `function seriesColor(i int) string`，返回第 i 个系列色（超出 5 个时循环取模）。后续任务的图表与筛选下拉共用该函数。
+
+> **热力图不要顺手改成 `seriesColor()`。** 热力图编码的是**连续量级**（`maxV=Math.max(1,...cells.map(c=>c[2]))`），需要 sequential ramp；而 `--series-*` 是**分类色板**（输入/输出/缓存读/缓存写/辅助）。塞进 `visualMap.inRange` 会让低值渲染成绿、中值渲染成紫，把「多/少」读成「不同类别」，量级顺序被摧毁。现状（写死的 `['#cfe0ff'…'#2b5fd9']` 单调蓝 ramp）在亮色下是可读的，缺口只是色板一致性——**留着不动严格优于改坏**。若将来要统一，应另给 `--heat-0..5` 顺序色 token（双主题各一套）。
 
 ---
 

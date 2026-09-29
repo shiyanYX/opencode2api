@@ -666,10 +666,30 @@ const qa=s=>document.querySelectorAll(s);
 let cfg={},nodeData=[],subData=[],wsData=[],wsInfo={},nodeEditors=[],modelList=[],freeModelIDs=[],filter='all';
 let DEMO_MODE=false,demoLogTimer=null;
 let trendsData=[],trendRange='30d',trendTimer=null,heatmapData=[];
+// 主题切换要重绘四张图，但重绘需要数据，而这些数据分散在各自函数的局部变量里：
+// renderStats() 的 ms 是函数内 const（模块作用域取不到），只能在这里缓存一份引用。
+// statModels=null 表示 /api/stats 还没成功拿到 models；chartsReady=false 表示
+// 首屏图表尚未创建（applyTheme() 在启动时也会被调一次，那次必须跳过重绘）。
+let statModels=null,chartsReady=false;
 
 /* ---------- 主题：默认深色 ---------- */
 function applyTheme(){
   document.documentElement.setAttribute('data-theme',localStorage.getItem('theme')||'dark');
+  redrawCharts();
+}
+// 主题切换后必须重绘：ECharts 在 setOption 时通过 getCSS() 把 CSS 变量的色值读一次
+// 就固化进实例里，data-theme 变了图不会自己跟着变。
+// 守卫：启动路径上 applyTheme() 在 DOMContentLoaded 监听器注册之前就被调用了一次，
+// 那时 chartsReady 仍是 false，这里直接返回——既不会碰还没初始化的模块级 const，
+// 也不会在没有任何实例的空态上白画一遍。
+function redrawCharts(){
+  if(!chartsReady)return;
+  // #reqTrendChart 默认 display:none，只重画当前 tab 可见的那张（同 renderTrends 的写法），
+  // 免得在隐藏容器上 init 出一个 0 宽的实例。
+  if(trendTab==='token')initTrend(currentTrendDays);else initReqTrend(currentTrendDays);
+  initHeatmap();
+  // statModels 为空说明 /api/stats 没成功：宁可不画，也别用空数据把现有甜甜圈刷成「暂无数据」。
+  if(statModels)initDonut(statModels);
 }
 function toggleTheme(){
   const cur=document.documentElement.getAttribute('data-theme');
@@ -773,7 +793,7 @@ function renderOverview(d){
   q('#ovManual').textContent=d.manual_name?('手动: '+d.manual_name):(d.manual_fp?shortFp(d.manual_fp):'自动轮询');
 }
 function renderStats(d){
-  const ms=d.models||{};const ks=Object.keys(ms);
+  const ms=d.models||{};statModels=ms;const ks=Object.keys(ms);
   let totalTokens=0,cacheRead=0,totalReqs=0;
   for(const k of ks){const m=ms[k];totalReqs+=m.request_count||0;totalTokens+=m.total_tokens||0;cacheRead+=m.cache_read_tokens||0}
   q('#tcTotalToken').textContent=fmtFull(totalTokens);q('#tcTotalReq').textContent=totalReqs.toLocaleString()+' 次请求';
@@ -828,10 +848,12 @@ const charts={};
 function isDark(){return(document.documentElement.getAttribute('data-theme')||'dark')==='dark'}
 function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
 // seriesColor 返回第 i 个数据系列的色值，超出 5 个时循环取模。
-function seriesColor(i){const n=((i%5)+5)%5;return getCSS('--series-'+(n+1))||['#5b9bff','#2fd489','#b18cff','#f0b04a','#fb7185'][n]}
+// 先取整：契约虽是 int，但后续任务若传进均值下标（如 2.5），
+// 不取整会算成 getCSS('--series-3.5') 拿到空串、数组下标也是 undefined，静默丢色。
+function seriesColor(i){const n=((Math.round(i)%5)+5)%5;return getCSS('--series-'+(n+1))||['#5b9bff','#2fd489','#b18cff','#f0b04a','#fb7185'][n]}
 let currentTrendDays=30,trendTab='token';
 
-function initAllCharts(){initTrend(currentTrendDays);initHeatmap()}
+function initAllCharts(){initTrend(currentTrendDays);initHeatmap();chartsReady=true}
 // fmtAxisTs 把后端桶时间戳格式化成紧凑轴标签：
 //   小时桶 "2026-09-17T14:00" → "14:00"；日桶 "2026-09-17" → "09-17"。
 function fmtAxisTs(ts,hourly){
