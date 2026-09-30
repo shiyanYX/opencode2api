@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>OPENCODE TO API · 管理面板</title>
+<!-- 内联 SVG favicon：否则浏览器会自发请求 /favicon.ico 产生 404，而 Playwright 不把
+     浏览器自发请求计入 page 的 response 事件，导致响应枚举查不到、无法定位来源。
+     Ruling 23 记的「把 resource_errors() 升级为断言」要闭合，这是前提。 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236f96ff'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='17' font-weight='bold' fill='%23fff' text-anchor='middle'%3Eo%3C/text%3E%3C/svg%3E">
 <!-- defer（而非 async）：文档解析完成、DOMContentLoaded 触发之前必定执行完，
      所以 DOMContentLoaded 处理器里 initAllCharts() 拿到的 echarts 一定已就绪，
      不会误报「加载失败」。同时它不阻塞解析——CDN 挂起时页面照样渲染得出来。
@@ -171,7 +175,6 @@ input,select,textarea{font-family:inherit;color:inherit}
 .tbl th.num,.tbl td.num{text-align:right}
 .tbl input[type=text],.tbl input[type=password],.tbl input:not([type]),.tbl select{padding:5px 8px;font-size:12.5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);width:100%;min-width:60px;transition:border-color .14s,box-shadow .14s}
 .tbl input:focus,.tbl select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
-.tbl input:focus-visible,.tbl select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
 /* ---------- 状态徽章 / 标签 / 节点名 ---------- */
 .badge{display:inline-flex;align-items:center;gap:5px;padding:2.5px 9px;border-radius:999px;font-size:11.5px;font-weight:600;letter-spacing:.03em}
@@ -740,12 +743,16 @@ function applyTheme(){
 // 也不会在没有任何实例的空态上白画一遍。
 function redrawCharts(){
   if(!chartsReady)return;
-  // #reqTrendChart 默认 display:none，只重画当前 tab 可见的那张（同 renderTrends 的写法），
-  // 免得在隐藏容器上 init 出一个 0 宽的实例。
-  if(trendTab==='token')initTrend(currentTrendDays);else initReqTrend(currentTrendDays);
-  initHeatmap();
+  // 容器被图表设置面板隐藏时 clientWidth 为 0，此时 echarts.init() 会落成 100×100
+  // 的默认画布；等它重新显示，ECharts 不会自动 resize，图就缩成左上角一小坨。
+  // 所以 0 宽容器一律跳过，由 toggleChart 的 show 分支在重新显示时补画。
+  const vis=el=>el&&el.clientWidth>0;
+  // #reqTrendChart 默认 display:none，只重画当前 tab 可见的那张（同 renderTrends 的写法）。
+  if(vis(q('#trendChart')))initTrend(currentTrendDays);
+  if(vis(q('#reqTrendChart')))initReqTrend(currentTrendDays);
+  if(vis(q('#heatmapChart')))initHeatmap();
   // statModels 为空说明 /api/stats 没成功：宁可不画，也别用空数据把现有甜甜圈刷成「暂无数据」。
-  if(statModels)initDonut(statModels);
+  if(statModels&&vis(q('#donutChart')))initDonut(statModels);
 }
 function toggleTheme(){
   const cur=document.documentElement.getAttribute('data-theme');
@@ -1146,7 +1153,17 @@ function initDonut(ms){
   });
 }
 function toggleChartSettings(){q('#chartSettingsPanel').classList.toggle('open')}
-function toggleChart(name,show){const el=q('#chart'+name.charAt(0).toUpperCase()+name.slice(1));if(el)el.style.display=show?'':'none'}
+function toggleChart(name,show){
+  const el=q('#chart'+name.charAt(0).toUpperCase()+name.slice(1));
+  if(!el)return;
+  el.style.display=show?'':'none';
+  // 重新显示时必须重画：ECharts 不会自动 resize。隐藏期间若发生过主题切换，
+  // redrawCharts() 会跳过 0 宽容器而留下上一套配色，show 时必须按当前主题补画。
+  if(!show)return;
+  if(name==='donut'){if(statModels)initDonut(statModels)}
+  else if(name==='heatmap'){initHeatmap()}
+  else{renderTrends()}
+}
 function renderTrends(){
   if(trendTab==='token')initTrend(currentTrendDays);else initReqTrend(currentTrendDays);
 }
@@ -1204,6 +1221,10 @@ function setTrendModel(m){
   // setTrendRefresh 是 no-op、trendTimer 为 null、无人重调 loadStats，3 秒后仍不自愈。
   // (d&&d.models)||{} 那处防御保留：它对 loadStats 正常路径的首次调用仍有用。
   if(window.__lastStats)renderStats(window.__lastStats);
+  // renderStats 是这条路径上唯一会同步 sel.value 的调用点（它末尾调 renderModelOptions）。
+  // 被上面的守卫跳过时下拉会停在旧值、与内部 trendModel 脱节（显示「全部模型」而
+  // trendModel 已是某个具体模型，趋势图空白且无说明），所以这里无条件兜一次。
+  const sel=q('#trendModelSel');if(sel)sel.value=trendModel;
   // renderStats 内部的 renderModelOptions() 可能把已不在列表里的 trendModel 复位成
   // 'all'（下拉模型集回退到 free_models 时必然发生）。上面 aggTrend() 是用复位前的
   // 模型聚合的，不重跑的话趋势图会停在空聚合上，而下拉已显示「全部模型」。
