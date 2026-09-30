@@ -135,6 +135,13 @@ input,select,textarea{font-family:inherit;color:inherit}
 
 /* ---------- 统计卡 ---------- */
 .stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:22px}
+.hs-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.hs-cell{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 16px}
+.hs-label{font-size:11.5px;color:var(--text-ter);margin-bottom:6px;letter-spacing:.02em}
+.hs-val{font-size:21px;font-weight:700;font-family:var(--mono);color:var(--text);line-height:1.2}
+.hs-bar{height:4px;border-radius:2px;background:var(--line);margin-top:10px;overflow:hidden}
+.hs-bar>i{display:block;height:100%;width:0;border-radius:2px;transition:width .3s}
+@media (max-width:760px){.hs-grid{grid-template-columns:repeat(2,1fr)}}
 .stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden}
 .stat .k{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--text-ter);margin-bottom:9px;display:flex;align-items:center;gap:7px}
 .stat .v{font-size:30px;font-weight:700;font-family:var(--mono);letter-spacing:-.02em;line-height:1;font-variant-numeric:tabular-nums}
@@ -407,6 +414,14 @@ input,select,textarea{font-family:inherit;color:inherit}
       <div class="token-card blue-card"><div class="tc-label">累计总 Token</div><div class="tc-value" id="tcTotalToken" style="color:var(--blue)">-</div><div class="tc-sub muted" id="tcTotalReq">-</div></div>
       <div class="token-card purple-card"><div class="tc-label">缓存命中率</div><div class="tc-value" id="tcCacheRate" style="color:var(--purple)">-</div><div class="progress-bar"><div class="pbar"><i id="tcCacheBar" style="width:0"></i></div><span class="pct" id="tcCachePct">-</span></div></div>
       <div class="token-card" style="background:linear-gradient(135deg,rgba(240,176,74,.08),rgba(240,176,74,.02));border-color:rgba(240,176,74,.2)"><div class="tc-label">平均 tps</div><div class="tc-value" id="tcAvgTps" style="color:var(--orange)">-</div><div class="tc-sub muted" id="tcTpsSamples">-</div></div>
+    </div>
+    <div class="card hero-stats-card" style="margin-top:16px">
+      <div class="hs-grid">
+        <div class="hs-cell"><div class="hs-label">输入</div><div class="hs-val" id="gIn">—</div><div class="hs-bar"><i id="gInBar" style="background:var(--series-1)"></i></div></div>
+        <div class="hs-cell"><div class="hs-label">输出</div><div class="hs-val" id="gOut">—</div><div class="hs-bar"><i id="gOutBar" style="background:var(--series-2)"></i></div></div>
+        <div class="hs-cell"><div class="hs-label">缓存读</div><div class="hs-val" id="gCR">—</div><div class="hs-bar"><i id="gCRBar" style="background:var(--series-3)"></i></div></div>
+        <div class="hs-cell"><div class="hs-label">缓存写</div><div class="hs-val" id="gCW">—</div><div class="hs-bar"><i id="gCWBar" style="background:var(--series-4)"></i></div></div>
+      </div>
     </div>
 
     <!-- 趋势图（Token 用量 / 请求次数 tab 切换） -->
@@ -812,6 +827,22 @@ function renderStats(d){
   q('#statsTable').querySelector('tbody').innerHTML=h;
   // 更新甜甜圈图
   initDonut(ms);
+  renderHeroDetail(d);
+}
+// renderHeroDetail 把 /api/stats 的各模型累计值汇总成四格明细。
+// 口径：输入=prompt_tokens，输出=completion_tokens，缓存读/写取对应字段。
+// 注意此处是全时段累计值，与统计表的 token 列（时段值）口径不同，沿用 main 既有做法。
+function renderHeroDetail(d){
+  const models=(d&&d.models)||{};
+  const sum={in:0,out:0,cr:0,cw:0};
+  for(const k in models){
+    const m=models[k];
+    sum.in+=m.prompt_tokens||0;sum.out+=m.completion_tokens||0;
+    sum.cr+=m.cache_read_tokens||0;sum.cw+=m.cache_created_tokens||0;
+  }
+  const max=Math.max(sum.in,sum.out,sum.cr,sum.cw,1);
+  const set=(id,v)=>{const el=q(id);if(el)el.textContent=fmtFull(v);const bar=q(id+'Bar');if(bar)bar.style.width=Math.round(v/max*100)+'%'};
+  set('#gIn',sum.in);set('#gOut',sum.out);set('#gCR',sum.cr);set('#gCW',sum.cw);
 }
 function renderCaps(rows){
   rows=(rows||[]).filter(x=>x&&x.id).sort((a,b)=>a.id.localeCompare(b.id));
