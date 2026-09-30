@@ -368,6 +368,10 @@ input,select,textarea{font-family:inherit;color:inherit}
 .req-table .usage-bar{flex:1;height:6px;background:rgba(148,163,184,.12);border-radius:99px;overflow:hidden;max-width:80px}
 .req-table .usage-bar i{display:block;height:100%;background:var(--accent);border-radius:99px}
 @media(max-width:640px){.token-cards{grid-template-columns:1fr}}
+.filter-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.input-sm{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;padding:5px 9px;outline:none;cursor:pointer}
+.input-sm:hover{border-color:var(--border-strong)}
+.input-sm:focus{border-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -431,7 +435,17 @@ input,select,textarea{font-family:inherit;color:inherit}
           <div style="display:flex;gap:4px;background:var(--surface-2);border-radius:8px;padding:2px"><button class="btn btn-sm" style="background:var(--accent-dim);color:var(--accent);border:none;border-radius:6px" onclick="switchTrendTab('token',this)" id="trendTabToken">📈 Token 用量</button><button class="btn btn-sm btn-ghost" onclick="switchTrendTab('req',this)" id="trendTabReq">📊 请求次数</button></div>
           <button class="chart-settings-btn" onclick="toggleChartSettings()" title="图表设置">⚙️</button>
         </div>
-        <div class="time-chips"><span class="chip" onclick="setTrendRange(1,this)">今日</span><span class="chip" onclick="setTrendRange(7,this)">7天</span><span class="chip active" onclick="setTrendRange(30,this)">30天</span></div>
+        <div class="filter-bar">
+          <select id="trendRangeSel" class="input-sm" onchange="setTrendRange(this.value)">
+            <option value="today">当天</option>
+            <option value="7d">最近 7 天</option>
+            <option value="30d" selected>最近 30 天</option>
+            <option value="180d">最近半年</option>
+          </select>
+          <select id="trendModelSel" class="input-sm" onchange="setTrendModel(this.value)">
+            <option value="all">全部模型</option>
+          </select>
+        </div>
       </div>
       <div class="chart-settings-panel" id="chartSettingsPanel">
         <label><input type="checkbox" checked onchange="toggleChart('heatmap',this.checked)"> 📅 请求热力图</label>
@@ -681,6 +695,8 @@ const qa=s=>document.querySelectorAll(s);
 let cfg={},nodeData=[],subData=[],wsData=[],wsInfo={},nodeEditors=[],modelList=[],freeModelIDs=[],filter='all';
 let DEMO_MODE=false,demoLogTimer=null;
 let trendsData=[],trendRange='30d',trendTimer=null,heatmapData=[];
+/* 按模型分组的趋势原始数据 + 竞态防护序号 */
+let TREND_BY_MODEL=[],trendModel='all',trendSeq=0;
 // 主题切换要重绘四张图，但重绘需要数据，而这些数据分散在各自函数的局部变量里：
 // renderStats() 的 ms 是函数内 const（模块作用域取不到），只能在这里缓存一份引用。
 // statModels=null 表示 /api/stats 还没成功拿到 models；chartsReady=false 表示
@@ -808,7 +824,15 @@ function renderOverview(d){
   q('#ovManual').textContent=d.manual_name?('手动: '+d.manual_name):(d.manual_fp?shortFp(d.manual_fp):'自动轮询');
 }
 function renderStats(d){
-  const ms=d.models||{};statModels=ms;const ks=Object.keys(ms);
+  const all=(d&&d.models)||{};
+  // 模型下拉的选项必须取全量 d.models 的键。若改用过滤后的 ms 的键，
+  // 选中某模型后下拉里就只剩那一个模型，用户再也切不回去。
+  window.__lastStatsModels=Object.keys(all);
+  // d 仍以全量传入；顶部两卡(tcTotalToken/tcTotalReq)、四格、甜甜圈、请求量表、
+  // 模型明细表统一从过滤后的 ms 派生，口径一致。选中模型已不在 all 里（陈旧筛选）
+  // 时退回全量，配合下面的 renderModelOptions() 自愈回「全部模型」。
+  const ms=(trendModel==='all'||!all[trendModel])?all:{[trendModel]:all[trendModel]};
+  statModels=ms;const ks=Object.keys(ms);
   let totalTokens=0,cacheRead=0,totalReqs=0;
   for(const k of ks){const m=ms[k];totalReqs+=m.request_count||0;totalTokens+=m.total_tokens||0;cacheRead+=m.cache_read_tokens||0}
   q('#tcTotalToken').textContent=fmtFull(totalTokens);q('#tcTotalReq').textContent=totalReqs.toLocaleString()+' 次请求';
@@ -827,7 +851,9 @@ function renderStats(d){
   q('#statsTable').querySelector('tbody').innerHTML=h;
   // 更新甜甜圈图
   initDonut(ms);
-  renderHeroDetail(d);
+  window.__lastStats=d;
+  renderModelOptions();      // loadStats 与 loadTrends 并发返回，先后不定，双触发自愈
+  renderHeroDetailForFilter();
 }
 // renderHeroDetail 把 /api/stats 的各模型累计值汇总成四格明细。
 // 口径：输出=completion_tokens，缓存读/写取对应字段。
@@ -849,6 +875,13 @@ function renderHeroDetail(d){
   const max=Math.max(sum.in,sum.out,sum.cr,sum.cw,1);
   const set=(id,v)=>{const el=q(id);if(el)el.textContent=fmtFull(v);const bar=q(id+'Bar');if(bar)bar.style.width=Math.round(v/max*100)+'%'};
   set('#gIn',sum.in);set('#gOut',sum.out);set('#gCR',sum.cr);set('#gCW',sum.cw);
+}
+/* 模型筛选后的四格：复用 renderHeroDetail 的求和逻辑，但只取选中的模型。
+   renderStats 的 d 始终是全量，所以四格必须经这里过滤，否则不跟筛选联动。 */
+function renderHeroDetailForFilter(){
+  const all=window.__lastStats||{};
+  if(trendModel==='all'||!all.models){renderHeroDetail(all);return}
+  renderHeroDetail({models:{[trendModel]:all.models[trendModel]||{}}});
 }
 function renderCaps(rows){
   rows=(rows||[]).filter(x=>x&&x.id).sort((a,b)=>a.id.localeCompare(b.id));
@@ -949,11 +982,9 @@ function switchTrendTab(tab,btn){
   if(tab==='token'){q('#trendChart').style.display='';q('#reqTrendChart').style.display='none';initTrend(currentTrendDays)}
   else{q('#trendChart').style.display='none';q('#reqTrendChart').style.display='';initReqTrend(currentTrendDays)}
 }
-function setTrendRange(days,btn){
-  currentTrendDays=days;
-  trendRange=days===1?'today':days===7?'7d':'30d';
-  btn.parentElement.querySelectorAll('.chip').forEach(c=>c.classList.remove('active'));
-  btn.classList.add('active');
+function setTrendRange(range){
+  trendRange=range;
+  currentTrendDays=(range==='today')?24:parseInt(range,10)||30;
   loadTrends();
 }
 // 请求热力图：GitHub 贡献图样式 —— 7 行（周一→周日）× N 列（周）。
@@ -1029,13 +1060,57 @@ function renderTrends(){
 }
 function setTrendRefresh(){}  /* no-op: ECharts handles refresh via loadTrends */
 async function loadTrends(){
+  const mySeq=++trendSeq;
   try{
-    const r=await fetch('/api/stats/trends?range='+trendRange);
+    const r=await fetch('/api/stats/trends?range='+trendRange+'&group=model');
     if(!r.ok)throw new Error('HTTP '+r.status);
-    trendsData=await r.json();
-    if(!Array.isArray(trendsData))trendsData=[];
-  }catch(e){trendsData=[]}
+    const d=await r.json();
+    if(mySeq!==trendSeq)return;           // 过期响应，丢弃
+    TREND_BY_MODEL=Array.isArray(d)?d:[];
+  }catch(e){
+    if(mySeq!==trendSeq)return;
+    TREND_BY_MODEL=[];
+  }
+  aggTrend();
+  renderModelOptions();
   renderTrends();
+}
+/* 按当前模型筛选把按模型分组的数据聚合成原 trendsData 的结构。
+   trendModel==='all' 时跨模型求和；否则只取该模型。 */
+function aggTrend(){
+  const byTs=new Map();
+  for(const r of TREND_BY_MODEL){
+    if(trendModel!=='all'&&r.model!==trendModel)continue;
+    let t=byTs.get(r.ts);
+    if(!t){t={ts:r.ts,requests:0,ok:0,fail:0,prompt_tokens:0,completion_tokens:0,cache_creation_tokens:0,cache_read_tokens:0};byTs.set(r.ts,t)}
+    t.requests+=r.requests||0;t.ok+=r.ok||0;t.fail+=r.fail||0;
+    t.prompt_tokens+=r.prompt_tokens||0;t.completion_tokens+=r.completion_tokens||0;
+    t.cache_creation_tokens+=r.cache_creation_tokens||0;t.cache_read_tokens+=r.cache_read_tokens||0;
+  }
+  trendsData=[...byTs.values()].sort((a,b)=>a.ts<b.ts?-1:1);
+  return trendsData;
+}
+
+function setTrendModel(m){
+  trendModel=m||'all';
+  aggTrend();
+  renderTrends();
+  // renderStats 接收全量 d，函数内部自己按 trendModel 过滤 ms 并重画
+  // initDonut(ms) / renderHeroDetailForFilter()，所以这里不再单独调 renderDonut()。
+  renderStats(window.__lastStats);
+  renderHeroDetailForFilter();
+}
+
+/* 模型下拉选项：优先取 /api/stats 中真实产生过请求的模型（renderStats 缓存的
+   __lastStatsModels）；全新实例无用量时回退到 /api/models 的 free_models。 */
+function renderModelOptions(){
+  const sel=q('#trendModelSel');if(!sel)return;
+  let models=(window.__lastStatsModels||[]).slice();
+  if(!models.length&&typeof freeModelIDs!=='undefined'&&freeModelIDs)models=freeModelIDs.slice();
+  sel.innerHTML='<option value="all">全部模型</option>'
+    +models.map(m=>'<option value="'+esc(m)+'">'+esc(m)+'</option>').join('');
+  if(models.indexOf(trendModel)<0)trendModel='all';
+  sel.value=trendModel;
 }
 function trendDemo(rng){
   const out=[],now=new Date();const days=rng==='7d'?7:rng==='30d'?30:1;
