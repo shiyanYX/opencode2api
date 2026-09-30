@@ -877,11 +877,16 @@ function renderHeroDetail(d){
   set('#gIn',sum.in);set('#gOut',sum.out);set('#gCR',sum.cr);set('#gCW',sum.cw);
 }
 /* 模型筛选后的四格：复用 renderHeroDetail 的求和逻辑，但只取选中的模型。
-   renderStats 的 d 始终是全量，所以四格必须经这里过滤，否则不跟筛选联动。 */
+   renderStats 的 d 始终是全量，所以四格必须经这里过滤，否则不跟筛选联动。
+   陈旧筛选（trendModel 已不在全量里）时退回全量，与 renderStats 里 ms 的
+   (trendModel==='all'||!all[trendModel])?all:{...} 同源；否则这里会渲染出
+   {[trendModel]:{}} 的全 0 四格，而同一次 renderStats 的两卡/两表/甜甜圈已按
+   全量渲染，两者口径不一致——原先只靠调用序恰好等价。 */
 function renderHeroDetailForFilter(){
   const all=window.__lastStats||{};
-  if(trendModel==='all'||!all.models){renderHeroDetail(all);return}
-  renderHeroDetail({models:{[trendModel]:all.models[trendModel]||{}}});
+  const models=all.models||{};
+  if(trendModel==='all'||!models[trendModel]){renderHeroDetail(all);return}
+  renderHeroDetail({models:{[trendModel]:models[trendModel]}});
 }
 function renderCaps(rows){
   rows=(rows||[]).filter(x=>x&&x.id).sort((a,b)=>a.id.localeCompare(b.id));
@@ -1071,8 +1076,14 @@ async function loadTrends(){
     if(mySeq!==trendSeq)return;
     TREND_BY_MODEL=[];
   }
-  aggTrend();
+  // renderModelOptions() 必须先于 aggTrend()：它可能把已不在下拉里的 trendModel
+  // 复位成 'all'（下拉模型集回退到 free_models 时必然发生，而 free_models 与趋势
+  // 查询的模型集完全不相交）。原序是 aggTrend()→renderModelOptions()→renderTrends()，
+  // 于是 renderTrends() 把「用即将被丢弃的模型算出的空聚合」画上去：下拉显示
+  // 「全部模型」而趋势图永久空白，且不重跑一次 loadTrends 就没有恢复手段。
+  // 改序后 aggTrend() 拿到的永远是复位后的 trendModel，无需再判断是否发生过复位。
   renderModelOptions();
+  aggTrend();
   renderTrends();
 }
 /* 按当前模型筛选把按模型分组的数据聚合成原 trendsData 的结构。
@@ -1092,24 +1103,50 @@ function aggTrend(){
 }
 
 function setTrendModel(m){
-  trendModel=m||'all';
+  const want=m||'all';
+  trendModel=want;
   aggTrend();
   renderTrends();
-  // renderStats 接收全量 d，函数内部自己按 trendModel 过滤 ms 并重画
-  // initDonut(ms) / renderHeroDetailForFilter()，所以这里不再单独调 renderDonut()。
-  renderStats(window.__lastStats);
-  renderHeroDetailForFilter();
+  // 护栏在调用点，renderStats 内部不动。__lastStats 只在 /api/stats 成功返回后由
+  // renderStats 写入，loadStats 的 catch 分支从不写它。所以它在两种情况下为空：
+  // (1) loadStats 仍在飞；(2) /api/stats 请求失败（页面此时唯一的恢复入口是 catch
+  // 写进 #statsTable 的那个「重试」按钮）。这两种情况下调 renderStats(undefined) 会
+  // 以 all={} 跑完，把顶部两卡、四格、两张表、甜甜圈全抹成 0/「暂无数据」，并把
+  // __lastStatsModels 从 8 清成 0 导致模型下拉回退到 10 个 free_models（与真正有量的
+  // 8 个模型完全不相交），最后 innerHTML 覆盖掉那个唯一的「重试」按钮。又因为
+  // setTrendRefresh 是 no-op、trendTimer 为 null、无人重调 loadStats，3 秒后仍不自愈。
+  // (d&&d.models)||{} 那处防御保留：它对 loadStats 正常路径的首次调用仍有用。
+  if(window.__lastStats)renderStats(window.__lastStats);
+  // renderStats 内部的 renderModelOptions() 可能把已不在列表里的 trendModel 复位成
+  // 'all'（下拉模型集回退到 free_models 时必然发生）。上面 aggTrend() 是用复位前的
+  // 模型聚合的，不重跑的话趋势图会停在空聚合上，而下拉已显示「全部模型」。
+  // 这与 loadTrends 里那处理由同一，两处调用点都得兜住。
+  if(trendModel!==want){aggTrend();renderTrends()}
+  // 这里刻意不再调 renderHeroDetailForFilter()：__lastStats 有值时 renderStats 末尾
+  // 已经调过一次；为空时它会把四格写成全 0（renderHeroDetail({})），正是 Important 1
+  // 要消除的「静默全量抹除」。实测保留它会让 __lastStats 为空时 gIn/gOut 从
+  // 4,162,713 / 1,564,415 被抹成 0。四格随筛选联动由 renderStats 那一次调用保证。
 }
 
 /* 模型下拉选项：优先取 /api/stats 中真实产生过请求的模型（renderStats 缓存的
-   __lastStatsModels）；全新实例无用量时回退到 /api/models 的 free_models。 */
+   __lastStatsModels）；全新实例无用量时回退到 /api/models 的 free_models。
+   注意：函数名只说「渲染选项」，但它带一个副作用——trendModel 已不在列表里时会被
+   复位成 'all'。调用方凡是先用 trendModel 做过聚合的，都必须让本函数先跑。 */
 function renderModelOptions(){
   const sel=q('#trendModelSel');if(!sel)return;
   let models=(window.__lastStatsModels||[]).slice();
   if(!models.length&&typeof freeModelIDs!=='undefined'&&freeModelIDs)models=freeModelIDs.slice();
-  sel.innerHTML='<option value="all">全部模型</option>'
-    +models.map(m=>'<option value="'+esc(m)+'">'+esc(m)+'</option>').join('');
-  if(models.indexOf(trendModel)<0)trendModel='all';
+  // 仅在选项集合真的变化时重建 innerHTML：整块重写会把手工打开着的下拉合上。
+  // 签名挂在 DOM 上，模型来源切换（__lastStatsModels ↔ free_models）也能正确触发重建。
+  const sig=JSON.stringify(models);
+  if(sel.dataset.optSig!==sig){
+    sel.innerHTML='<option value="all">全部模型</option>'
+      +models.map(m=>'<option value="'+esc(m)+'">'+esc(m)+'</option>').join('');
+    sel.dataset.optSig=sig;
+  }
+  // trendModel==='all' 要先短路掉：models 永不含 'all'，不短路的话最常见的这一档
+  // 每次都会「触发」复位，把 'all' 赋回 'all'，读起来像别的意思。
+  if(trendModel!=='all'&&models.indexOf(trendModel)<0)trendModel='all';
   sel.value=trendModel;
 }
 function trendDemo(rng){
