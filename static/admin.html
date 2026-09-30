@@ -4,7 +4,11 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>OPENCODE TO API · 管理面板</title>
-<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<!-- defer（而非 async）：文档解析完成、DOMContentLoaded 触发之前必定执行完，
+     所以 DOMContentLoaded 处理器里 initAllCharts() 拿到的 echarts 一定已就绪，
+     不会误报「加载失败」。同时它不阻塞解析——CDN 挂起时页面照样渲染得出来。
+     async 不保证顺序，可能在 DOMContentLoaded 之后才到，会造成假阳性提示。 -->
+<script defer src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
 <style>
 /* ---------- 免费模型自动映射行 ---------- */
 .row-auto td{color:var(--text-sec);background:color-mix(in srgb,var(--accent-dim) 30%,transparent)}
@@ -928,6 +932,15 @@ function getCSS(v){return getComputedStyle(document.documentElement).getProperty
 function seriesColor(i){const n=((Math.round(i)%5)+5)%5;return getCSS('--series-'+(n+1))||['#5b9bff','#2fd489','#b18cff','#f0b04a','#fb7185'][n]}
 let currentTrendDays=30,trendTab='token';
 
+/* CDN 不可用时在图表容器内显示可见提示，而不是静默留白。
+   静默 return 会让用户误以为"没有数据"。 */
+function chartLoadFail(chartId,label){
+  const el=q(chartId);if(!el)return;
+  el.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;min-height:120px;text-align:center;color:var(--text-ter);font-size:12.5px;padding:20px">'
+    +'<div><div style="font-size:22px;margin-bottom:8px">📉</div>'
+    +label+' 加载失败<br><span style="font-size:11.5px;opacity:.75">ECharts 未能从 CDN 加载，请检查网络或改用本地资源</span></div></div>';
+  console.warn('ECharts 加载失败，'+label+' 无法渲染');
+}
 function initAllCharts(){initTrend(currentTrendDays);initHeatmap();chartsReady=true}
 // fmtAxisTs 把后端桶时间戳格式化成紧凑轴标签：
 //   小时桶 "2026-09-17T14:00" → "14:00"；日桶 "2026-09-17" → "09-17"。
@@ -940,7 +953,8 @@ function fmtAxisTs(ts,hourly){
 // 7天/30天档给完整日期。
 function trendTooltipTitle(ts){return trendRange==='today'?fmtAxisTs(ts,true):ts}
 function initTrend(days){
-  currentTrendDays=days;const el=q('#trendChart');if(!el||typeof echarts==='undefined')return;
+  currentTrendDays=days;const el=q('#trendChart');if(!el)return;
+  if(typeof echarts==='undefined'){chartLoadFail('#trendChart','趋势图');return}
   if(charts.trend)charts.trend.dispose();charts.trend=echarts.init(el);
   const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
   const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
@@ -962,7 +976,8 @@ function initTrend(days){
   });
 }
 function initReqTrend(days){
-  const el=q('#reqTrendChart');if(!el||typeof echarts==='undefined')return;
+  const el=q('#reqTrendChart');if(!el)return;
+  if(typeof echarts==='undefined'){chartLoadFail('#reqTrendChart','请求数趋势图');return}
   if(charts.reqTrend)charts.reqTrend.dispose();charts.reqTrend=echarts.init(el);
   const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
   const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
@@ -995,7 +1010,8 @@ function setTrendRange(range){
 // 请求热力图：GitHub 贡献图样式 —— 7 行（周一→周日）× N 列（周）。
 // 某列只有在包含「某月 1 日」时才打月份标签，于是月份自然落在坐标轴下方。
 function initHeatmap(){
-  const el=q('#heatmapChart');if(!el||typeof echarts==='undefined')return;
+  const el=q('#heatmapChart');if(!el)return;
+  if(typeof echarts==='undefined'){chartLoadFail('#heatmapChart','请求热力图');return}
   if(charts.heatmap){charts.heatmap.dispose();charts.heatmap=null}
   const byDay={};
   for(const b of (heatmapData||[])){const k=(b.ts||'').slice(0,10);if(k)byDay[k]=(b.prompt_tokens||0)+(b.completion_tokens||0)}
@@ -1039,7 +1055,8 @@ function initHeatmap(){
   });
 }
 function initDonut(ms){
-  const el=q('#donutChart');if(!el||typeof echarts==='undefined')return;
+  const el=q('#donutChart');if(!el)return;
+  if(typeof echarts==='undefined'){chartLoadFail('#donutChart','模型请求分布');return}
   const data=ms?Object.entries(ms).map(([name,s])=>({name,value:s.request_count||0})).filter(d=>d.value>0):[];
   // 顺序很关键：必须先把容器清空、再 echarts.init。原先是 init 之后才
   // el.innerHTML=''，把 echarts 刚插进去的 canvas 一起删掉了，实例绑在空壳上，
