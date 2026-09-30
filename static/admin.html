@@ -933,14 +933,60 @@ function seriesColor(i){const n=((Math.round(i)%5)+5)%5;return getCSS('--series-
 let currentTrendDays=30,trendTab='token';
 
 /* CDN 不可用时在图表容器内显示可见提示，而不是静默留白。
-   静默 return 会让用户误以为"没有数据"。 */
+   静默 return 会让用户误以为"没有数据"。
+   提示节点带 chart-load-fail 类：echarts 迟到时（见下方探针）要能把它摘掉，
+   而 echarts.init() 只往容器里挂自己的节点、不会清空容器，所以必须显式摘。 */
 function chartLoadFail(chartId,label){
   const el=q(chartId);if(!el)return;
-  el.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;min-height:120px;text-align:center;color:var(--text-ter);font-size:12.5px;padding:20px">'
+  el.innerHTML='<div class="'+CHART_FAIL_CLS+'" style="display:flex;align-items:center;justify-content:center;height:100%;min-height:120px;text-align:center;color:var(--text-ter);font-size:12.5px;padding:20px">'
     +'<div><div style="font-size:22px;margin-bottom:8px">📉</div>'
     +label+' 加载失败<br><span style="font-size:11.5px;opacity:.75">ECharts 未能从 CDN 加载，请检查网络或改用本地资源</span></div></div>';
   console.warn('ECharts 加载失败，'+label+' 无法渲染');
 }
+/* ---------- CDN 挂起兜底：不依赖 DOMContentLoaded ----------
+   head 里那个 ECharts script 带 defer：不阻塞解析，所以 CDN 挂起时页面照样渲染得出来；
+   但它必定在 DOMContentLoaded 之前执行完，所以一旦 CDN 挂起，DCL 永不触发，
+   DOMContentLoaded 处理器里的 initAllCharts() 从不执行——页面有卡片有表格、数据全停在 —，
+   四个图表区却没有任何说明，用户会以为网关坏了。
+
+   下面这段在本页内联脚本里（解析期就执行，早于 DCL）起一个探针，绕开 DCL 直接给提示：
+     · CHART_ALERT_MS 到点仍没有 echarts → 打提示（模式 B）；
+     · 打完提示继续观察，echarts 一旦迟到 → 撤掉提示并重绘（模式「慢」）。
+   正常情况下 CDN 实测 1.5–5s 到，探针到 8s 时早已停止，什么都不做，不会有假阳性。 */
+const CHART_ALERT_MS=8000;    // 慢网实测 1.5–5s；取 8s 留足余量再提示
+const CHART_RECHECK_MS=2000;  // 打完提示后的复查间隔
+const CHART_FAIL_CLS='chart-load-fail';
+const CHART_BOXES=[['#trendChart','趋势图'],['#reqTrendChart','请求数趋势图'],['#heatmapChart','请求热力图'],['#donutChart','模型请求分布']];
+let chartAlerted=false,chartProbeTimer=null;
+function scheduleChartProbe(delay){
+  if(chartProbeTimer)return;
+  chartProbeTimer=setTimeout(chartProbeTick,delay);
+}
+function chartProbeTick(){
+  chartProbeTimer=null;
+  if(typeof echarts!=='undefined'){
+    // echarts 迟到（慢加载）。只在真打过提示时才做事：正常路径上 chartsReady
+    // 可能已经是 true，无条件 redrawCharts() 会白白把三张图重画一遍。
+    if(chartAlerted){clearChartLoadFail();redrawCharts();}
+    return; // echarts 已就位，之后由 DOMContentLoaded 的 initAllCharts() 接管
+  }
+  if(!chartAlerted){chartAlerted=true;CHART_BOXES.forEach(([id,label])=>chartLoadFail(id,label))}
+  scheduleChartProbe(CHART_RECHECK_MS); // 还没有，继续探（echarts 迟到时靠这一轮收尾）
+}
+// 只摘提示节点，不能用 el.innerHTML=''：ECharts 的 canvas 也挂在同一个容器里，
+// 一把清空会把已经画好的图一起抹掉。
+function clearChartFailNode(el){
+  if(!el)return;
+  const box=el.querySelector('.'+CHART_FAIL_CLS);
+  if(box&&box.parentNode)box.parentNode.removeChild(box);
+}
+function clearChartLoadFail(){
+  chartAlerted=false;
+  // #reqTrendChart 默认 display:none、initAllCharts() 也不画它（只有切 tab 才画），
+  // 所以四个容器都得清一遍，否则隐藏容器里会一直留着过期的提示。
+  CHART_BOXES.forEach(([id])=>clearChartFailNode(q(id)));
+}
+scheduleChartProbe(CHART_ALERT_MS);
 function initAllCharts(){initTrend(currentTrendDays);initHeatmap();chartsReady=true}
 // fmtAxisTs 把后端桶时间戳格式化成紧凑轴标签：
 //   小时桶 "2026-09-17T14:00" → "14:00"；日桶 "2026-09-17" → "09-17"。
@@ -955,6 +1001,7 @@ function trendTooltipTitle(ts){return trendRange==='today'?fmtAxisTs(ts,true):ts
 function initTrend(days){
   currentTrendDays=days;const el=q('#trendChart');if(!el)return;
   if(typeof echarts==='undefined'){chartLoadFail('#trendChart','趋势图');return}
+  clearChartFailNode(el); // 迟到的 echarts：先摘掉先前打上的提示，否则提示与 canvas 并存
   if(charts.trend)charts.trend.dispose();charts.trend=echarts.init(el);
   const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
   const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
@@ -978,6 +1025,7 @@ function initTrend(days){
 function initReqTrend(days){
   const el=q('#reqTrendChart');if(!el)return;
   if(typeof echarts==='undefined'){chartLoadFail('#reqTrendChart','请求数趋势图');return}
+  clearChartFailNode(el);
   if(charts.reqTrend)charts.reqTrend.dispose();charts.reqTrend=echarts.init(el);
   const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
   const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
@@ -1012,6 +1060,7 @@ function setTrendRange(range){
 function initHeatmap(){
   const el=q('#heatmapChart');if(!el)return;
   if(typeof echarts==='undefined'){chartLoadFail('#heatmapChart','请求热力图');return}
+  clearChartFailNode(el);
   if(charts.heatmap){charts.heatmap.dispose();charts.heatmap=null}
   const byDay={};
   for(const b of (heatmapData||[])){const k=(b.ts||'').slice(0,10);if(k)byDay[k]=(b.prompt_tokens||0)+(b.completion_tokens||0)}
