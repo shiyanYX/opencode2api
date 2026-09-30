@@ -35,7 +35,12 @@ import sys
 from playwright.sync_api import sync_playwright
 
 CHROME = "/home/jingyx/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome"
-LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+# --no-proxy-server / --proxy-bypass-list=* 必须带：admin.html:7 是阻塞式
+# <script src="https://cdn.jsdelivr.net/...">，若 Chromium 走 shell 里的
+# HTTPS_PROXY 且该代理挂死，DOMContentLoaded 本身就永不触发——任何
+# wait_until 取值都救不了，表现为随机的 Page.goto 超时。Task 5 审查时撞到过。
+LAUNCH_ARGS = ["--no-sandbox", "--disable-dev-shm-usage",
+               "--no-proxy-server", "--proxy-bypass-list=*"]
 DEFAULT_URL = "http://127.0.0.1:8899/"
 PAGES = ["overview", "nodes", "subs", "misc", "logs"]
 SETTLE_MS = 5000       # 导航后固定等待：ECharts CDN + 首屏 fetch
