@@ -140,7 +140,7 @@ input,select,textarea{font-family:inherit;color:inherit}
 .hs-label{font-size:11.5px;color:var(--text-ter);margin-bottom:6px;letter-spacing:.02em}
 .hs-val{font-size:21px;font-weight:700;font-family:var(--mono);color:var(--text);line-height:1.2}
 .hs-bar{height:4px;border-radius:2px;background:var(--line);margin-top:10px;overflow:hidden}
-.hs-bar>i{display:block;height:100%;width:0;border-radius:2px;transition:width .3s}
+.hs-bar>i{display:block;height:100%;width:0;min-width:2px;border-radius:2px;transition:width .3s}
 @media (max-width:760px){.hs-grid{grid-template-columns:repeat(2,1fr)}}
 .stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden}
 .stat .k{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--text-ter);margin-bottom:9px;display:flex;align-items:center;gap:7px}
@@ -830,14 +830,20 @@ function renderStats(d){
   renderHeroDetail(d);
 }
 // renderHeroDetail 把 /api/stats 的各模型累计值汇总成四格明细。
-// 口径：输入=prompt_tokens，输出=completion_tokens，缓存读/写取对应字段。
-// 注意此处是全时段累计值，与统计表的 token 列（时段值）口径不同，沿用 main 既有做法。
+// 口径：输出=completion_tokens，缓存读/写取对应字段。
+// 注意 prompt_tokens 已包含 cache_read_tokens（实测缓存读约占 prompt 的 50%）。
+// 故此处「输入」取 prompt - cache_read，与同页趋势图 initTrend 的「输入」同义，
+// 且 输入+输出+缓存读 恰好等于「累计总 Token」；缓存写不计入 total_tokens，是额外维度。
+// 四格来自 /api/stats 的全时段累计；而 statsTable 的 token 列是时段聚合，两者口径不同
+// （沿用 main 既有做法，本次不统一）。
+// 另：缓存两格走累计计数，而历史 cache_read 因旧版把 read/created 写反而缺失且无法回填
+// （见 updateCacheRate 的说明）——长周期部署上这两格可能与 trends 接口有偏差。
 function renderHeroDetail(d){
   const models=(d&&d.models)||{};
   const sum={in:0,out:0,cr:0,cw:0};
   for(const k in models){
-    const m=models[k];
-    sum.in+=m.prompt_tokens||0;sum.out+=m.completion_tokens||0;
+    const m=models[k]||{};
+    sum.in+=(m.prompt_tokens||0)-(m.cache_read_tokens||0);sum.out+=m.completion_tokens||0;
     sum.cr+=m.cache_read_tokens||0;sum.cw+=m.cache_created_tokens||0;
   }
   const max=Math.max(sum.in,sum.out,sum.cr,sum.cw,1);
