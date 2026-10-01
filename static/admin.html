@@ -43,7 +43,7 @@
   --series-1:#5b9bff;  /* 输入 / 首个模型 */
   --series-2:#2fd489;  /* 输出 */
   --series-3:#b18cff;  /* 缓存读 */
-  --series-4:#f0b04a;  /* 缓存写 */
+  --series-4:#f0b04a;  /* 第 4 个数据系列 */
   --series-5:#fb7185;  /* 辅助 */
   --red:#ff6b6b; --red-dim:rgba(255,107,107,.12);
   --radius:12px; --radius-sm:8px;
@@ -144,13 +144,40 @@ input,select,textarea{font-family:inherit;color:inherit}
 
 /* ---------- 统计卡 ---------- */
 .stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:22px}
-.hs-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-.hs-cell{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 16px}
-.hs-label{font-size:11.5px;color:var(--text-ter);margin-bottom:6px;letter-spacing:.02em}
-.hs-val{font-size:21px;font-weight:700;font-family:var(--mono);color:var(--text);line-height:1.2}
-.hs-bar{height:4px;border-radius:2px;background:var(--line);margin-top:10px;overflow:hidden}
-.hs-bar>i{display:block;height:100%;width:0;min-width:2px;border-radius:2px;transition:width .3s}
-@media (max-width:760px){.hs-grid{grid-template-columns:repeat(2,1fr)}}
+/* ---------- 顶部 Token Hero（cc-switch UsageHero 版式） ---------- */
+/* 宽屏 5 格一行、窄屏 2 格（对齐 cc-switch 的 grid-cols-2 lg:grid-cols-5）。
+   断点 1000px：main 固定 204px 侧栏 + 72px 内边距，低于该宽度时 5 格会被压到 ~95px。 */
+.hero-usage-card{display:flex;flex-direction:column;gap:14px}
+.uh-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.uh-lead{display:flex;align-items:center;gap:12px;min-width:0}
+.uh-glyph{display:grid;place-items:center;width:40px;height:40px;border-radius:12px;flex-shrink:0;background:linear-gradient(135deg,var(--accent-dim),transparent);color:var(--accent)}
+.uh-label{font-size:12px;font-weight:500;color:var(--text-ter);margin-bottom:2px}
+.uh-value-line{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.uh-value{font-size:26px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.uh-badge{font-size:11.5px;font-weight:600;color:var(--text-sec);background:var(--surface-2);border-radius:6px;padding:2px 6px;font-variant-numeric:tabular-nums}
+.uh-req{display:flex;flex-direction:column;gap:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:9px 14px}
+.uh-req-k{font-size:10px;color:var(--text-ter);letter-spacing:.06em;text-transform:uppercase}
+.uh-req-v{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:600;color:var(--blue);font-variant-numeric:tabular-nums}
+.uh-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+@media (min-width:1000px){.uh-grid{grid-template-columns:repeat(5,1fr)}}
+.uh-cell{display:flex;flex-direction:column;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:12px}
+/* label 用前景色 70% 透明（cc-switch text-foreground/70），不是 muted 灰；图标另取强调色 */
+.uh-cell-l{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:500;color:var(--text-ter)}
+.uh-cell-l>span{color:var(--text);opacity:.7;letter-spacing:.03em}
+.uh-blue{color:var(--blue)}.uh-purple{color:var(--purple)}.uh-green{color:var(--ok)}.uh-amber{color:var(--orange)}
+.uh-cell-v{font-size:14px;font-weight:600;line-height:1.35;font-variant-numeric:tabular-nums}
+/* 命中率是特殊格：值在标签行右侧（不是下方），下面是进度条 */
+.uh-hit{grid-column:span 2;justify-content:center;gap:8px}
+@media (min-width:1000px){.uh-hit{grid-column:span 1}}
+.uh-hit-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.uh-hit-v{font-size:12.5px;font-weight:700;color:var(--ok);font-variant-numeric:tabular-nums}
+.uh-hit-bar{position:relative;height:6px;border-radius:99px;background:var(--surface-2);overflow:hidden}
+.uh-hit-bar>i{display:block;height:100%;width:0;border-radius:99px;background:var(--ok);transition:width .4s}
+/* 数字宽→完整 / 窄→缩写。用普通媒体查询 + 双 span：admin.html 既有断点先例是 760px，
+   且引入 @container 需要额外的 container-type 落点，不在这份单文件里冒险。 */
+.v-mini .abbr{display:none}
+@media (max-width:760px){.v-mini .full{display:none}.v-mini .abbr{display:inline}}
+
 .stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden;transition:border-color .15s,box-shadow .15s}
 .stat:hover{border-color:var(--border-strong);box-shadow:0 2px 8px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.04)}
 .stat .k{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-ter);margin-bottom:9px;display:flex;align-items:center;gap:7px}
@@ -366,18 +393,6 @@ input,select,textarea{font-family:inherit;color:inherit}
 }
 
 /* ---------- ECharts Token 统计 ---------- */
-.token-cards{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px;margin-bottom:14px}
-.token-card{background:linear-gradient(135deg,rgba(111,150,255,.06),rgba(111,150,255,.01));border:1px solid rgba(111,150,255,.18);border-radius:14px;padding:18px 20px}
-.token-card .tc-label{font-size:12px;color:var(--text-ter);margin-bottom:6px}
-.token-card .tc-value{font-size:28px;font-weight:700;line-height:1.1}
-.token-card .tc-sub{font-size:12px;margin-top:4px}
-.blue-card{background:linear-gradient(135deg,rgba(111,150,255,.06),rgba(111,150,255,.01));border-color:rgba(111,150,255,.18)}
-.green-card{background:linear-gradient(135deg,rgba(47,212,137,.06),rgba(47,212,137,.01));border-color:rgba(47,212,137,.18)}
-.purple-card{background:linear-gradient(135deg,rgba(177,151,247,.06),rgba(177,151,247,.01));border-color:rgba(177,151,247,.18)}
-.progress-bar{display:flex;align-items:center;gap:6px;margin-top:6px}
-.pbar{flex:1;height:6px;background:rgba(148,163,184,.12);border-radius:99px;overflow:hidden}
-.pbar i{display:block;height:100%;background:var(--purple);border-radius:99px;transition:width .4s}
-.pct{font-size:11px;color:var(--text-ter);min-width:32px;text-align:right}
 .chart-box{width:100%;height:210px}
 .chart-box-lg{width:100%;height:280px}
 .time-chips{display:flex;gap:6px}
@@ -393,7 +408,6 @@ input,select,textarea{font-family:inherit;color:inherit}
 .req-table .usage{display:flex;align-items:center;gap:8px}
 .req-table .usage-bar{flex:1;height:6px;background:rgba(148,163,184,.12);border-radius:99px;overflow:hidden;max-width:80px}
 .req-table .usage-bar i{display:block;height:100%;background:var(--accent);border-radius:99px}
-@media(max-width:640px){.token-cards{grid-template-columns:1fr}}
 /* gap/margin/padding/分隔线 取自 test 版；flex-wrap 保留在基础规则，
    因为 main 没有 test 那条把它移进去的 @media(max-width:960px) */
 .filter-bar{display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:20px;padding-bottom:18px;border-bottom:1px solid var(--border)}
@@ -431,6 +445,12 @@ input,select,textarea{font-family:inherit;color:inherit}
     <h1 id="pageTitle">概览<span class="crumb" id="pageCrumb">OPENCODE TO API</span></h1>
     <button class="btn btn-ghost btn-sm" onclick="reloadConfig()"><span class="lbl">刷新会话 &amp; 模型</span></button>
     <button class="btn btn-primary btn-sm" onclick="loadAll()"><span class="lbl">刷新数据</span></button>
+    <select id="autoRefreshSel" class="input-sm" style="width:auto" onchange="setAutoRefresh(parseInt(this.value,10)||0)" title="自动刷新概览统计的间隔；离开概览页自动暂停">
+      <option value="0">⟳ 关闭</option>
+      <option value="10000">⟳ 10s</option>
+      <option value="30000">⟳ 30s</option>
+      <option value="60000">⟳ 1m</option>
+    </select>
   </div>
 
   <!-- ============ 概览 ============ -->
@@ -441,18 +461,30 @@ input,select,textarea{font-family:inherit;color:inherit}
       <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>配额冷却</div><div class="v orange" id="ovExhausted">-</div><div class="sub">1h 自动恢复</div></div>
       <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>故障</div><div class="v red" id="ovDead">-</div><div class="sub">60s 后自动重试</div></div>
     </div>
-    <!-- Token 统计三指标卡 -->
-    <div class="token-cards">
-      <div class="token-card blue-card"><div class="tc-label">累计总 Token</div><div class="tc-value" id="tcTotalToken" style="color:var(--blue)">-</div><div class="tc-sub muted" id="tcTotalReq">-</div></div>
-      <div class="token-card purple-card"><div class="tc-label">缓存命中率</div><div class="tc-value" id="tcCacheRate" style="color:var(--purple)">-</div><div class="progress-bar"><div class="pbar"><i id="tcCacheBar" style="width:0"></i></div><span class="pct" id="tcCachePct">-</span></div></div>
-      <div class="token-card" style="background:linear-gradient(135deg,rgba(240,176,74,.08),rgba(240,176,74,.02));border-color:rgba(240,176,74,.2)"><div class="tc-label">平均 tps</div><div class="tc-value" id="tcAvgTps" style="color:var(--orange)">-</div><div class="tc-sub muted" id="tcTpsSamples">-</div></div>
-    </div>
-    <div class="card hero-stats-card" style="margin-top:16px">
-      <div class="hs-grid">
-        <div class="hs-cell"><div class="hs-label">输入</div><div class="hs-val" id="gIn">—</div><div class="hs-bar"><i id="gInBar" style="background:var(--series-1)"></i></div></div>
-        <div class="hs-cell"><div class="hs-label">输出</div><div class="hs-val" id="gOut">—</div><div class="hs-bar"><i id="gOutBar" style="background:var(--series-2)"></i></div></div>
-        <div class="hs-cell"><div class="hs-label">缓存读</div><div class="hs-val" id="gCR">—</div><div class="hs-bar"><i id="gCRBar" style="background:var(--series-3)"></i></div></div>
-        <div class="hs-cell"><div class="hs-label">缓存写</div><div class="hs-val" id="gCW">—</div><div class="hs-bar"><i id="gCWBar" style="background:var(--series-4)"></i></div></div>
+    <!-- 顶部 Token 用量：cc-switch UsageHero 版式（真实消耗大数字 + 五格明细）。
+         取数统一来自 GET /api/stats?range=<当前时间窗>，与下方两张表、甜甜圈、
+         趋势图共用同一份响应——五格因此同时跟随「时间窗」和「模型筛选」。 -->
+    <div class="card hero-usage-card" style="padding:16px;margin-bottom:14px">
+      <div class="uh-head">
+        <div class="uh-lead">
+          <span class="uh-glyph" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></span>
+          <div>
+            <div class="uh-label">真实消耗 Tokens</div>
+            <div class="uh-value-line"><span class="uh-value" id="tcTotalToken" title="">—</span><span class="uh-badge" id="tcTotalTokenShort">≈ —</span></div>
+          </div>
+        </div>
+        <div class="uh-req">
+          <span class="uh-req-k">总请求数</span>
+          <span class="uh-req-v"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span id="tcTotalReq">—</span></span>
+        </div>
+      </div>
+      <!-- 五格顺序（cc-switch：命中率在最后一格）：新增输入 → Output → 命中 → 平均 tps → 缓存命中率 -->
+      <div class="uh-grid">
+        <div class="uh-cell"><div class="uh-cell-l uh-blue"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg><span>新增输入</span></div><div class="uh-cell-v"><span class="v-mini"><span class="full" id="gIn">—</span><span class="abbr">—</span></span></div></div>
+        <div class="uh-cell"><div class="uh-cell-l uh-purple"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span>Output</span></div><div class="uh-cell-v"><span class="v-mini"><span class="full" id="gOut">—</span><span class="abbr">—</span></span></div></div>
+        <div class="uh-cell"><div class="uh-cell-l uh-green"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M20 12c0 1.66-3.58 3-8 3s-8-1.34-8-3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/></svg><span>命中</span></div><div class="uh-cell-v"><span class="v-mini"><span class="full" id="gCR">—</span><span class="abbr">—</span></span></div></div>
+        <div class="uh-cell" id="tcTpsSamples" title=""><div class="uh-cell-l uh-amber"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 6.2H21l-5.3 4 2 6.3-5.7-4.1-5.7 4.1 2-6.3-5.3-4h6.6z"/></svg><span>平均 tps</span></div><div class="uh-cell-v" id="tcAvgTps">—</div></div>
+        <div class="uh-cell uh-hit"><div class="uh-hit-top"><span class="uh-cell-l uh-green">缓存命中率</span><span class="uh-hit-v" id="tcCacheRate">—</span></div><div class="uh-hit-bar"><i id="tcCacheBar" style="width:0"></i></div></div>
       </div>
     </div>
 
@@ -723,8 +755,13 @@ const qa=s=>document.querySelectorAll(s);
 let cfg={},nodeData=[],subData=[],wsData=[],wsInfo={},nodeEditors=[],modelList=[],freeModelIDs=[],filter='all';
 let DEMO_MODE=false,demoLogTimer=null;
 let trendsData=[],trendRange='30d',trendTimer=null,heatmapData=[];
-/* 按模型分组的趋势原始数据 + 竞态防护序号 */
-let TREND_BY_MODEL=[],trendModel='all',trendSeq=0;
+/* 按模型分组的趋势原始数据。trends_by_model 现在随 /api/stats?range= 一起回来，
+   所以 TREND_BY_MODEL 由 loadStats 写入、loadTrends 消费，不再单独发请求。 */
+let TREND_BY_MODEL=[],trendModel='all';
+// statsSeq：/api/stats?range= 的竞态序号，发请求前自增，try 与 catch 两处都判。
+// statsRateSeq：盖在当前已渲染 stats 上的快照序号，供 updateCacheRate 做独立守卫
+// （它可能被非 loadStats 路径调用，必须能识别并丢弃「不是当前窗口」的数据）。
+let statsSeq=0,statsRateSeq=-1;
 // 主题切换要重绘四张图，但重绘需要数据，而这些数据分散在各自函数的局部变量里：
 // renderStats() 的 ms 是函数内 const（模块作用域取不到），只能在这里缓存一份引用。
 // statModels=null 表示 /api/stats 还没成功拿到 models；chartsReady=false 表示
@@ -760,9 +797,30 @@ function toggleTheme(){
   applyTheme();
 }
 
+/* ---------- 自动刷新（概览页统计） ----------
+   只重跑 loadStats()，不碰节点状态——避免每次轮询都打一遍 /api/nodes。
+   离开概览页自动暂停：页面的统计是按时间窗算的，停在别的页时刷新它没有意义。
+   默认关闭：cc-switch 默认是 30s，这里不做自动刷新，除非用户显式选。 */
+let autoRefreshTimer=null,currentPage='overview';
+function setAutoRefresh(ms){
+  if(autoRefreshTimer){clearInterval(autoRefreshTimer);autoRefreshTimer=null}
+  const el=q('#autoRefreshSel');
+  // 非法值一律回落「关闭」：不要因为 localStorage 里被改坏的值而疯狂发请求
+  const ok=[0,10000,30000,60000].includes(ms)?ms:0;
+  if(el)el.value=String(ok);
+  localStorage.setItem('autoRefresh',String(ok));
+  applyAutoRefresh();
+}
+function applyAutoRefresh(){
+  if(autoRefreshTimer){clearInterval(autoRefreshTimer);autoRefreshTimer=null}
+  const ms=parseInt(localStorage.getItem('autoRefresh')||'0',10)||0;
+  if(ms>0&&currentPage==='overview')autoRefreshTimer=setInterval(()=>{loadStats()},ms);
+}
+
 /* ---------- 导航 ---------- */
 const pageTitles={overview:['概览','OPENCODE TO API'],nodes:['节点池','节点健康与切换'],subs:['订阅与配额','订阅源 / 手动节点 / 免费额度'],misc:['代理与模型','推理 / 别名 / SOCKS5 / 网关'],logs:['运行日志','实时流式日志']};
 function showPage(id){
+  if(id!==currentPage){currentPage=id;applyAutoRefresh()}  // 离开/回到概览时暂停或恢复自动刷新
   qa('.page').forEach(p=>p.classList.remove('active'));
   q('#page-'+id).classList.add('active');
   qa('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===id));
@@ -781,6 +839,25 @@ function copyText(text,label){if(!text){showToast('暂无可复制内容','error
 function fallbackCopy(text,done){const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch{showToast('复制失败，请手动复制','error')}document.body.removeChild(ta)}
 function fmtBytes(b){b=Number(b)||0;if(b<=0)return '0B';const u=['B','KB','MB','GB','TB'];let i=0;while(b>=1024&&i<u.length-1){b/=1024;i++}return (b>=100?b.toFixed(0):b.toFixed(1))+u[i]}
 function fmtTokens(n){if(n==null||isNaN(n))return '-';if(n>=1000000)return (n/1000000).toFixed(n%1000000===0?0:1)+'M';if(n>=1000)return (n/1000).toFixed(n%1000===0?0:1)+'K';return ''+n}
+/* cc-switch formatTokensShort 的中文分支（format.ts:121）：>=1e8 亿 / >=1e4 万 / 否则千分位。
+   d 是小数位：Hero 的 ≈ 徽标用 2 位（cc-switch 传 compactDecimals=2），
+   小格用 1 位。 */
+function fmtTokensShort(n,d){
+  const v=Number(n)||0;
+  if(!(v>0))return '0';
+  if(v>=1e8)return (v/1e8).toFixed(2)+' 亿';
+  if(v>=1e4)return (v/1e4).toFixed(d)+' 万';
+  return v.toLocaleString();
+}
+/* 双 span 数字：.full 写完整数字（宽屏可见），同级的 .abbr 写缩写（窄屏可见）。
+   CSS 侧由 @media(max-width:760px) 二选一，两份文本始终同步刷新。 */
+function setDualNum(id,v){
+  const f=q('#'+id);if(!f)return;
+  f.textContent=fmtFull(v);
+  const box=f.parentElement;
+  const a=box?box.querySelector('.abbr'):null;
+  if(a)a.textContent=fmtTokensShort(v,1);
+}
 function fmtTime(t){return t?String(t).replace('T',' ').slice(0,16):'-'}
 function fmtModalities(list){if(!list||!list.length)return '-';const names={text:'文本',image:'图像',audio:'音频',video:'视频',pdf:'PDF'};return list.map(m=>names[m]||m).join(' / ')}
 function shortFp(fp){return fp?fp.slice(0,8):''}
@@ -790,7 +867,7 @@ function setConn(online){const el=q('#connState');el.classList.toggle('offline',
 /* ============================================================
    数据加载（真实后端 / 离线演示兜底）
    ============================================================ */
-async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),loadCaps(),fetchModelList(),loadTrends()]);renderConfigEditors()}
+async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),loadCaps(),fetchModelList()]);renderConfigEditors()}
 async function loadConfig(){
   if(DEMO_MODE){cfg=JSON.parse(JSON.stringify(DEMO.cfg));return}
   try{const r=await fetch('/api/config');if(!r.ok)throw new Error(await r.text());cfg=await r.json()}catch(e){showToast('配置加载失败: '+e.message,'error')}
@@ -799,12 +876,31 @@ async function loadNodes(){
   if(DEMO_MODE){nodeData=DEMO.nodes.map(n=>({...n}));subData=DEMO.subscriptions.filter(s=>s.url!=='webshare API').map(s=>({...s}));wsData=DEMO.subscriptions.filter(s=>s.url==='webshare API').map(s=>({name:s.name,nodes:s.nodes,last_updated_at:s.last_updated_at}));renderOverview({nodes:nodeData,healthy:nodeData.filter(n=>n.state==='available').length,exhausted_count:nodeData.filter(n=>n.state==='exhausted').length,dead_count:nodeData.filter(n=>n.state==='dead').length,active_name:nodeData.find(n=>n.active)?.name||'',manual_name:''});renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable();return}
   try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=(d.subscriptions||[]).filter(s=>s.url!=='webshare API');applyWsSnapshot(d.subscriptions||[]);renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable()}catch(e){q('#nodeTable tbody').innerHTML='<tr><td colspan="7" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>'}
 }
+/* GET /api/stats?range=<当前时间窗> 一次返回 models 聚合 + trends_by_model，
+   所以顶部 Hero、两张表、甜甜圈、趋势图共用同一份响应——每次筛选只打这一发。
+   statsSeq 在发请求前自增，try 与 catch **两处**都判：过期响应既不能渲染成功态，
+   也不能覆盖失败态（否则先发后到的失败响应会把已渲染的新窗口擦成「加载失败」）。 */
 async function loadStats(){
-  if(DEMO_MODE){renderStats(DEMO.stats);loadHeatmap();loadTps();return}
-  try{const r=await fetch('/api/stats');const d=await r.json();renderStats(d)}catch(e){const tb=q('#statsTable tbody');if(tb)tb.innerHTML='<tr><td colspan="7" class="empty-hint">加载失败 <button class="btn btn-sm btn-ghost" onclick="loadStats()">重试</button></td></tr>'}
-  loadHeatmap();loadTps();
+  const mySeq=++statsSeq;
+  if(DEMO_MODE){window.__lastStatsSeq=mySeq;renderStats(DEMO.stats);loadTrends(DEMO.stats.trends_by_model,mySeq);loadHeatmap();return}
+  try{
+    const r=await fetch('/api/stats?range='+trendRange);
+    if(mySeq!==statsSeq)return;
+    const d=await r.json();
+    if(mySeq!==statsSeq)return;
+    window.__lastStatsSeq=mySeq;
+    renderStats(d);
+    loadTrends(d.trends_by_model,mySeq);
+  }catch(e){
+    if(mySeq!==statsSeq)return;
+    const tb=q('#statsTable tbody');if(tb)tb.innerHTML='<tr><td colspan="7" class="empty-hint">加载失败 <button class="btn btn-sm btn-ghost" onclick="loadStats()">重试</button></td></tr>';
+  }
+  // 热力图与本次筛选无关（恒为 180d），且它是独立请求、不受 statsSeq 保护，
+  // 所以照旧无条件触发；它也只负责热力图，不再碰命中率（见 updateCacheRate）。
+  loadHeatmap();
 }
-// 一次拉 180 天日桶，同时喂热力图和「最近 30 天」缓存命中率，省一次全量扫描。
+// 热力图：一次拉 180 天日桶。它必须保持独立的 range=180d——编码连续量级需要
+// sequential ramp，跟顶部 Hero 的当前窗口不是一回事。
 async function loadHeatmap(){
   try{
     const r=await fetch('/api/stats/trends?range=180d');
@@ -812,34 +908,41 @@ async function loadHeatmap(){
     const d=await r.json();
     heatmapData=Array.isArray(d)?d:[];
   }catch(e){heatmapData=[]}
-  initHeatmap();updateCacheRate();
+  initHeatmap();
 }
-// 缓存命中率按「最近 30 天」口径：累计计数里的历史 cache_read 因旧版把
-// read/created 写反而缺失且无法回填，趋势接口按天给出真实值，直接聚合。
-function updateCacheRate(){
-  const el=q('#tcCacheRate');if(!el)return;
+// 缓存命中率（第 5 格）。公式一个字不动：命中 = cache_read / prompt，
+// 分母是 prompt 而不是「新增输入」，因为 prompt 本身已包含 cache_read。
+// 数据源从写死的 heatmapData.slice(-30)（恒定「最近 30 天」）换成当前窗口的
+// models 聚合，于是它同时跟随「时间窗」和「模型筛选」。
+//
+// 竞态守卫（两层，缺一不可）：
+//   (1) 调用方收敛——loadHeatmap 不再调本函数。命中率只可能由 loadStats 那条
+//       受 statsSeq 保护的路径写入，热力图的迟到响应因此永远碰不到它。
+//   (2) 本函数自带快照序号——即使将来有别的路径拿别处的数据来调，只要盖的
+//       statsRateSeq 对不上 window.__lastStatsSeq（当前已渲染 stats 的序号）
+//       就直接丢弃，不会把新窗口的命中率覆写成旧窗口的值。
+function updateCacheRate(models,seq){
+  if(seq!==window.__lastStatsSeq)return;   // 不是当前窗口的数据，丢弃
   let cr=0,pt=0;
-  for(const b of heatmapData.slice(-30)){cr+=b.cache_read_tokens||0;pt+=b.prompt_tokens||0}
+  for(const k in (models||{})){const m=models[k]||{};cr+=m.cache_read_tokens||0;pt+=m.prompt_tokens||0}
   const rate=pt>0?Math.round(cr/pt*100):0;
-  el.textContent=rate+'%';q('#tcCacheBar').style.width=rate+'%';q('#tcCachePct').textContent=rate+'%';
+  statsRateSeq=seq;
+  const el=q('#tcCacheRate');if(!el)return;
+  el.textContent=rate+'%';
+  const bar=q('#tcCacheBar');if(bar)bar.style.width=rate+'%';
 }
-// 平均 tps：取调用日志里最近 24h 的流式请求，对 output_speed 求均值。
-async function loadTps(){
+// 平均 tps（第 4 格）：按流式请求数加权 Σ(avg_output_speed×stream_req_count)/Σ stream_req_count。
+// 这与后端在每条调用日志上做的「流式子集均值」同口径（avg_output_speed 本身就是
+// 流式请求的均值，乘回流式条数就还原成该模型的输出速度总和）。
+// 不再单独 fetch /api/call-log?limit=1000：那份日志既与当前时间窗无关，也无法按模型聚合。
+function renderTps(models){
   const el=q('#tcAvgTps');if(!el)return;
-  try{
-    const r=await fetch('/api/call-log?limit=1000');
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    const d=await r.json();
-    const cutoff=Date.now()-24*3600*1000;
-    let sum=0,n=0;
-    for(const rec of (Array.isArray(d)?d:[])){
-      if(!(Date.parse(rec.ts||'')>=cutoff))continue;
-      const sp=rec.output_speed||0;
-      if(sp>0){sum+=sp;n++}
-    }
-    el.textContent=n?Math.round(sum/n)+' t/s':'—';
-    const sub=q('#tcTpsSamples');if(sub)sub.textContent=n?n+' 次流式采样':'近 24h 无流式请求';
-  }catch(e){el.textContent='—'}
+  let sum=0,w=0;
+  for(const k in (models||{})){const m=models[k]||{};const c=m.stream_req_count||0;if(c>0){sum+=(m.avg_output_speed||0)*c;w+=c}}
+  el.textContent=w?Math.round(sum/w)+' t/s':'—';
+  // 采样条数没有独立格子（cc-switch 的 MiniStat 只有「标签行 + 值」两行），
+  // 降级成整格的 title 悬浮说明，信息不丢但不占版式。
+  const cell=q('#tcTpsSamples');if(cell)cell.title=w?w+' 次流式采样':'窗口内无流式请求';
 }
 async function loadCaps(){
   if(DEMO_MODE){renderCaps(DEMO.caps);return}
@@ -860,16 +963,15 @@ function renderStats(d){
   // 模型下拉的选项必须取全量 d.models 的键。若改用过滤后的 ms 的键，
   // 选中某模型后下拉里就只剩那一个模型，用户再也切不回去。
   window.__lastStatsModels=Object.keys(all);
-  // d 仍以全量传入；顶部两卡(tcTotalToken/tcTotalReq)、四格、甜甜圈、请求量表、
-  // 模型明细表统一从过滤后的 ms 派生，口径一致。选中模型已不在 all 里（陈旧筛选）
-  // 时退回全量，配合下面的 renderModelOptions() 自愈回「全部模型」。
+  // d 仍以全量传入；顶部 Hero、甜甜圈、请求量表、模型明细表统一从过滤后的 ms 派生，
+  // 口径一致。选中模型已不在 all 里（陈旧筛选）时退回全量，配合下面的
+  // renderModelOptions() 自愈回「全部模型」。
   const ms=(trendModel==='all'||!all[trendModel])?all:{[trendModel]:all[trendModel]};
   statModels=ms;const ks=Object.keys(ms);
-  let totalTokens=0,cacheRead=0,totalReqs=0;
-  for(const k of ks){const m=ms[k];totalReqs+=m.request_count||0;totalTokens+=m.total_tokens||0;cacheRead+=m.cache_read_tokens||0}
-  q('#tcTotalToken').textContent=fmtFull(totalTokens);q('#tcTotalReq').textContent=totalReqs.toLocaleString()+' 次请求';
-  // 缓存在 updateCacheRate() 里按最近 30 天算，平均 tps 在 loadTps() 里算，
-  // 都不走累计计数（历史 cache_read 缺失且无法回填）。
+  let totalTokens=0,cacheRead=0;
+  for(const k of ks){const m=ms[k];totalTokens+=m.total_tokens||0;cacheRead+=m.cache_read_tokens||0}
+  // 顶部 Hero（大数字/≈ 徽标/总请求数/五格）由 renderHeroDetailForFilter() 统一渲染，
+  // 不在这里重复写：这里算的是 ms，本函数算的是 all，两处各算一次必然漂。
   // 请求量表
   const reqRows=ks.map(k=>({k:k,req:ms[k].request_count||0})).sort((a,b)=>b.req-a.req);
   const totalReq=reqRows.reduce((s,r)=>s+r.req,0);
@@ -887,32 +989,37 @@ function renderStats(d){
   renderModelOptions();      // loadStats 与 loadTrends 并发返回，先后不定，双触发自愈
   renderHeroDetailForFilter();
 }
-// renderHeroDetail 把 /api/stats 的各模型累计值汇总成四格明细。
-// 口径：输出=completion_tokens，缓存读/写取对应字段。
-// 注意 prompt_tokens 已包含 cache_read_tokens（实测缓存读约占 prompt 的 50%）。
-// 故此处「输入」取 prompt - cache_read，与同页趋势图 initTrend 的「输入」同义，
-// 且 输入+输出+缓存读 恰好等于「累计总 Token」；缓存写不计入 total_tokens，是额外维度。
-// 四格来自 /api/stats 的全时段累计；而 statsTable 的 token 列是时段聚合，两者口径不同
-// （沿用 main 既有做法，本次不统一）。
-// 另：缓存两格走累计计数，而历史 cache_read 因旧版把 read/created 写反而缺失且无法回填
-// （见 updateCacheRate 的说明）——长周期部署上这两格可能与 trends 接口有偏差。
+// renderHeroDetail 渲染顶部 UsageHero 卡：真实消耗大数字、≈ 徽标、总请求数与五格明细。
+// 数据源是 /api/stats?range=<窗口> 的 models，与下方两张表、甜甜圈、趋势图同一份响应。
+// 口径：注意 prompt_tokens 已包含 cache_read_tokens（实测命中约占 prompt 的 50%），
+// 故「新增输入」= prompt - cache_read（与趋势图 initTrend 的「输入」同义），
+// 于是 新增输入 + Output + 命中 ≡ (prompt-cr) + completion + cr = prompt + completion，
+// 恰好等于后端 total_tokens —— 三格之和与大数字永远闭合，diff 恒为 0。
+// 缓存写（cache_created_tokens）不参与展示：cc-switch 的第 3 格是「缓存写入」，
+// 本面板把那一格让给「命中」，所以 cache_created_tokens 在页面上没有任何读数。
+// 五格都取自同一份 models，因此随「时间窗 + 模型筛选」一起联动。
 function renderHeroDetail(d){
   const models=(d&&d.models)||{};
-  const sum={in:0,out:0,cr:0,cw:0};
+  const sum={in:0,out:0,cr:0,reqs:0};
   for(const k in models){
     const m=models[k]||{};
     sum.in+=(m.prompt_tokens||0)-(m.cache_read_tokens||0);sum.out+=m.completion_tokens||0;
-    sum.cr+=m.cache_read_tokens||0;sum.cw+=m.cache_created_tokens||0;
+    sum.cr+=m.cache_read_tokens||0;sum.reqs+=m.request_count||0;
   }
-  const max=Math.max(sum.in,sum.out,sum.cr,sum.cw,1);
-  const set=(id,v)=>{const el=q(id);if(el)el.textContent=fmtFull(v);const bar=q(id+'Bar');if(bar)bar.style.width=Math.round(v/max*100)+'%'};
-  set('#gIn',sum.in);set('#gOut',sum.out);set('#gCR',sum.cr);set('#gCW',sum.cw);
+  const real=sum.in+sum.out+sum.cr;
+  const vEl=q('#tcTotalToken');if(vEl){vEl.textContent=fmtFull(real);vEl.title=fmtFull(real)}
+  const sEl=q('#tcTotalTokenShort');if(sEl)sEl.textContent='≈ '+fmtTokensShort(real,2);
+  const rEl=q('#tcTotalReq');if(rEl)rEl.textContent=fmtFull(sum.reqs);
+  // 三格数字：宽屏写完整数字、窄屏写缩写（CSS 媒体查询决定哪个可见）
+  setDualNum('gIn',sum.in);setDualNum('gOut',sum.out);setDualNum('gCR',sum.cr);
+  renderTps(models);
+  updateCacheRate(models,window.__lastStatsSeq);
 }
-/* 模型筛选后的四格：复用 renderHeroDetail 的求和逻辑，但只取选中的模型。
-   renderStats 的 d 始终是全量，所以四格必须经这里过滤，否则不跟筛选联动。
+/* 模型筛选后的顶部 Hero：复用 renderHeroDetail 的求和逻辑，但只取选中的模型。
+   renderStats 的 d 始终是全量，所以 Hero 必须经这里过滤，否则不跟筛选联动。
    陈旧筛选（trendModel 已不在全量里）时退回全量，与 renderStats 里 ms 的
    (trendModel==='all'||!all[trendModel])?all:{...} 同源；否则这里会渲染出
-   {[trendModel]:{}} 的全 0 四格，而同一次 renderStats 的两卡/两表/甜甜圈已按
+   {[trendModel]:{}} 的全 0 Hero，而同一次 renderStats 的两表/甜甜圈已按
    全量渲染，两者口径不一致——原先只靠调用序恰好等价。 */
 function renderHeroDetailForFilter(){
   const all=window.__lastStats||{};
@@ -1081,7 +1188,9 @@ function switchTrendTab(tab,btn){
 function setTrendRange(range){
   trendRange=range;
   currentTrendDays=(range==='today')?24:parseInt(range,10)||30;
-  loadTrends();
+  // 只调 loadStats()：顶部 Hero、两张表、甜甜圈与趋势图全部来自同一份 ranged 响应。
+  // 单独再调一次 loadTrends() 会多打一发请求，还可能让两者返回次序错位。
+  loadStats();
 }
 // 请求热力图：GitHub 贡献图样式 —— 7 行（周一→周日）× N 列（周）。
 // 某列只有在包含「某月 1 日」时才打月份标签，于是月份自然落在坐标轴下方。
@@ -1167,25 +1276,22 @@ function toggleChart(name,show){
 function renderTrends(){
   if(trendTab==='token')initTrend(currentTrendDays);else initReqTrend(currentTrendDays);
 }
-function setTrendRefresh(){}  /* no-op: ECharts handles refresh via loadTrends */
-async function loadTrends(){
-  const mySeq=++trendSeq;
-  try{
-    const r=await fetch('/api/stats/trends?range='+trendRange+'&group=model');
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    const d=await r.json();
-    if(mySeq!==trendSeq)return;           // 过期响应，丢弃
-    TREND_BY_MODEL=Array.isArray(d)?d:[];
-  }catch(e){
-    if(mySeq!==trendSeq)return;
-    TREND_BY_MODEL=[];
-  }
+function setTrendRefresh(){}  /* no-op: ECharts handles refresh via loadStats */
+/* 趋势渲染阶段。trends_by_model 已随 /api/stats?range= 一起回来，所以本函数
+   不再自己 fetch，只负责「写入 + 渲染」；竞态守卫退化为一道 seq 校验
+   （loadStats 已用 statsSeq 保证只有最新响应会走到这里，但保留判断成本为零）。
+   调用方只有 loadStats —— 顶部 Hero、两张表、趋势图因此永远来自同一次响应。 */
+function loadTrends(rows,seq){
+  if(seq!==statsSeq)return;                 // 过期响应，丢弃
+  TREND_BY_MODEL=Array.isArray(rows)?rows:[];
   // renderModelOptions() 必须先于 aggTrend()：它可能把已不在下拉里的 trendModel
   // 复位成 'all'（下拉模型集回退到 free_models 时必然发生，而 free_models 与趋势
   // 查询的模型集完全不相交）。原序是 aggTrend()→renderModelOptions()→renderTrends()，
   // 于是 renderTrends() 把「用即将被丢弃的模型算出的空聚合」画上去：下拉显示
-  // 「全部模型」而趋势图永久空白，且不重跑一次 loadTrends 就没有恢复手段。
+  // 「全部模型」而趋势图永久空白，且不重跑一次加载就没有恢复手段。
   // 改序后 aggTrend() 拿到的永远是复位后的 trendModel，无需再判断是否发生过复位。
+  // ⚠️ 合并成单次请求后这个约束没有自动成立：renderStats 与本函数是先后调用，
+  //    谁先谁后完全取决于调用点，所以这里的调用序必须显式保持。
   renderModelOptions();
   aggTrend();
   renderTrends();
@@ -1215,7 +1321,7 @@ function setTrendModel(m){
   // renderStats 写入，loadStats 的 catch 分支从不写它。所以它在两种情况下为空：
   // (1) loadStats 仍在飞；(2) /api/stats 请求失败（页面此时唯一的恢复入口是 catch
   // 写进 #statsTable 的那个「重试」按钮）。这两种情况下调 renderStats(undefined) 会
-  // 以 all={} 跑完，把顶部两卡、四格、两张表、甜甜圈全抹成 0/「暂无数据」，并把
+  // 以 all={} 跑完，把顶部 Hero、两张表、甜甜圈全抹成 0/「暂无数据」，并把
   // __lastStatsModels 从 8 清成 0 导致模型下拉回退到 10 个 free_models（与真正有量的
   // 8 个模型完全不相交），最后 innerHTML 覆盖掉那个唯一的「重试」按钮。又因为
   // setTrendRefresh 是 no-op、trendTimer 为 null、无人重调 loadStats，3 秒后仍不自愈。
@@ -1231,9 +1337,10 @@ function setTrendModel(m){
   // 这与 loadTrends 里那处理由同一，两处调用点都得兜住。
   if(trendModel!==want){aggTrend();renderTrends()}
   // 这里刻意不再调 renderHeroDetailForFilter()：__lastStats 有值时 renderStats 末尾
-  // 已经调过一次；为空时它会把四格写成全 0（renderHeroDetail({})），正是 Important 1
-  // 要消除的「静默全量抹除」。实测保留它会让 __lastStats 为空时 gIn/gOut 从
-  // 4,162,713 / 1,564,415 被抹成 0。四格随筛选联动由 renderStats 那一次调用保证。
+  // 已经调过一次；为空时它会把顶部 Hero 写成全 0（renderHeroDetail({})），正是
+  // Important 1 要消除的「静默全量抹除」。实测保留它会让 __lastStats 为空时
+  // gIn/gOut 从 4,162,713 / 1,564,415 被抹成 0。
+  // 顶部 Hero 随筛选联动由 renderStats 那一次调用保证。
 }
 
 /* 模型下拉选项：优先取 /api/stats 中真实产生过请求的模型（renderStats 缓存的
@@ -1776,7 +1883,16 @@ const DEMO={
     {name:'备线路',url:'https://backup.example.com/uri',update_interval_hours:48,nodes:6,usage_total:536870912000,usage_used:12884901888,last_updated_at:'2026-08-09T08:12:00Z'},
     {name:'webshare-主池',url:'webshare API',update_interval_hours:12,nodes:5,last_updated_at:'2026-08-10T22:05:00Z'}
   ],
-  stats:{models:{'gpt-4o-mini':{request_count:1280,prompt_tokens:12345678,completion_tokens:2345678,total_tokens:14691356},'gpt-5.5':{request_count:342,prompt_tokens:8912345,completion_tokens:1234567,total_tokens:10146912},'glm-5.2':{request_count:876,prompt_tokens:4567890,completion_tokens:987654,total_tokens:5555544},'deepseek-r1':{request_count:2034,prompt_tokens:22334455,completion_tokens:3344556,total_tokens:25679011}}},
+  // 离线兜底的 /api/stats 响应。字段必须与 ranged 响应同形（models 带
+  // cache_read_tokens / avg_ttft_ms / avg_output_speed / stream_req_count，
+  // 外加 total_requests 与 trends_by_model），否则演示模式下顶部 Hero 会缺格、
+  // 五格闭合不成立，verify_ui.py 的 DEMO 判定也会失效。
+  stats:{total_requests:4532,models:{
+    'gpt-4o-mini':{request_count:1280,prompt_tokens:12345678,completion_tokens:2345678,total_tokens:14691356,cache_read_tokens:6700000,cache_created_tokens:0,avg_ttft_ms:412,avg_output_speed:58.4,stream_req_count:1240},
+    'gpt-5.5':{request_count:342,prompt_tokens:8912345,completion_tokens:1234567,total_tokens:10146912,cache_read_tokens:4100000,cache_created_tokens:0,avg_ttft_ms:538,avg_output_speed:44.1,stream_req_count:331},
+    'glm-5.2':{request_count:876,prompt_tokens:4567890,completion_tokens:987654,total_tokens:5555544,cache_read_tokens:1900000,cache_created_tokens:0,avg_ttft_ms:305,avg_output_speed:71.6,stream_req_count:852},
+    'deepseek-r1':{request_count:2034,prompt_tokens:22334455,completion_tokens:3344556,total_tokens:25679011,cache_read_tokens:9600000,cache_created_tokens:0,avg_ttft_ms:690,avg_output_speed:37.2,stream_req_count:1965}
+  },trends_by_model:[]},
   caps:[
     {id:'gpt-4o-mini',cw:128000,mo:16384,mod:['text','image']},
     {id:'gpt-5.5',cw:400000,mo:32768,mod:['text','image','pdf']},
@@ -1798,10 +1914,11 @@ window.addEventListener('DOMContentLoaded',async()=>{
   DEMO_MODE=!online;
   setConn(online);
   const sa=q('#sideAddr');if(sa)sa.textContent=(location.host||location.hostname)||(DEMO_MODE?'localhost:8000':'-');
-  await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats(),loadCaps(),loadTrends()]);
+  await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats(),loadCaps()]);
   renderConfigEditors();
   initLogs();
   initAllCharts();
+  setAutoRefresh(parseInt(localStorage.getItem('autoRefresh')||'0',10)||0);
 });
 </script>
 </body>
