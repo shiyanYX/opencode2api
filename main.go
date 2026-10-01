@@ -6875,9 +6875,40 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// statsRangeResponse 是 GET /api/stats?range=X 的响应体。
+// 内嵌 TokenStatsData 使 total_requests / models 两个字段与不带 range 的响应
+// **同名同层**，前端既有取值代码不需要分叉；额外的 trends_by_model 让前端
+// 一次请求就同时拿到模型聚合与按模型的趋势序列（省掉单独调 /api/stats/trends）。
+type statsRangeResponse struct {
+	TokenStatsData
+	TrendsByModel []ModelTrendPoint `json:"trends_by_model"`
+}
+
+// adminStatsHandler 令牌用量统计。
+// GET 不带 range 时逐字返回内存累计计数器（向后兼容红线，勿改 json.Marshal 那一段）；
+// 带 ?range=today|7d|30d|180d 时改由调用日志按窗口重算，数字随时间窗变化。
 func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		if rng := r.URL.Query().Get("range"); rng != "" {
+			// 窗口外的记录一律不计；rng 归一规则与 adminTrendsHandler 一致
+			rng = normalizeTrendRange(rng)
+			out := statsRangeResponse{
+				TokenStatsData: *modelStatsFromCallLog(rng),
+				TrendsByModel:  trendsByModelFromCallLog(rng),
+			}
+			if out.TrendsByModel == nil {
+				out.TrendsByModel = []ModelTrendPoint{}
+			}
+			data, err := json.Marshal(out)
+			if err != nil {
+				http.Error(w, `{"error":"marshal error"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Write(data)
+			return
+		}
 		tokenStatsMu.Lock()
 		data, err := json.Marshal(tokenStats)
 		tokenStatsMu.Unlock()
@@ -6906,10 +6937,9 @@ func adminTrendsHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	rng := r.URL.Query().Get("range")
-	if rng != "7d" && rng != "30d" && rng != "180d" {
-		rng = "today"
-	}
+	// 归一规则收敛到 normalizeTrendRange（calllog.go），与 /api/stats?range=
+	// 共用同一处判定，避免两处日后各改各的导致窗口边界分叉
+	rng := normalizeTrendRange(r.URL.Query().Get("range"))
 	w.Header().Set("Content-Type", "application/json")
 	if r.URL.Query().Get("group") == "model" {
 		pts := trendsByModelFromCallLog(rng)

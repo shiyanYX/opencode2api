@@ -519,6 +519,81 @@ func trendsByModelFromCallLog(rng string) []ModelTrendPoint {
 	return out
 }
 
+// normalizeTrendRange 把 range 归一为 today|7d|30d|180d：
+// 7d/30d/180d 之外一律 today，与 adminTrendsHandler 改动前的逐字判断同规则。
+// 该判断原先内联在 adminTrendsHandler 里，现由两处共用同一份实现，
+// 保证 /api/stats?range= 与 /api/stats/trends?range= 的窗口边界永不分叉。
+func normalizeTrendRange(rng string) string {
+	switch rng {
+	case "7d", "30d", "180d":
+		return rng
+	default:
+		return "today"
+	}
+}
+
+// modelStatsFromCallLog 按时间窗重算 /api/stats 的模型统计，形状与累计计数器
+// tokenStats 的 TokenStatsData 一致，但数字来自调用日志而非内存计数器——
+// 内存计数器没有时间窗，前端切时间下拉时顶部数字不会变。
+//
+// 窗口边界完全复用 trendBuckets(rng)：与 /api/stats/trends 是同一套边界，
+// 故同一 rng 下「本函数的逐字段求和」与「趋势桶求和」必然相等。
+//
+// ⚠️ 刻意的口径偏离（**不要**当成 bug「修」回去）：RequestCount 统计
+// **全部尝试**，含 Status != "ok" 的失败记录；而累计计数器
+// recordTokenUsageWithCache 只在拿到上游 usage 时被调用，故只记成功。
+// 两者不一致是有意为之：调用日志记全部尝试，趋势图的「请求次数」tab 也是
+// 全部尝试，前端 Hero 的「总请求数」必须与趋势图对齐。演示数据实测差异：
+// 成功 5,108 / 全部 5,446（差 338 条 error）。
+//
+// 其余口径的来源：
+//   - TotalTokens = prompt + completion（不是上游报的 total_tokens）。这是前端
+//     闭合不变量的前提：(新增输入 + Output + 命中) == 真实消耗，其中
+//     新增输入 = prompt - cache_read，故真实消耗必须等于 prompt + completion。
+//     注意这与累计计数器里 TotalTokens 取自 usage.total_tokens 的旧口径不同，
+//     两者不可直接相减比较。
+//   - AvgTTFTMs / AvgOutputSpeed / StreamReqCount：与 recordModelSpeed（main.go）
+//     同算法——仅当 rec.OutputSpeed > 0 时计入，增量平均 avg += (v-avg)/n；
+//     并且**同样跳过空 model 名**（recordModelSpeed 首行即 model == "" 时 return），
+//     免得同一个 model="" 的 key 在同一份 JSON 里出现两种语义。
+//     故空 model 名的记录会计入 RequestCount 与各项 token，却不计入速度统计。
+//   - 缓存读写直接取 rec.CacheRead / rec.CacheCreation，不做 0 值过滤，
+//     以免与趋势桶的求和口径分叉。
+//   - 空 model 名按 rec.Model 原样作 key、不过滤（沿用 Ruling 7 的既定裁定）。
+//
+// 日志文件不可读（全新安装尚未落盘、或被 DELETE 清掉）时返回**非 nil** 的空结构：
+// 返回 nil 指针会序列化成 "models":null，前端 renderStats 直接炸
+// （本项目在 69ab7dd 踩过一次）。
+func modelStatsFromCallLog(rng string) *TokenStatsData {
+	rng = normalizeTrendRange(rng)
+	ts, bidx := trendBuckets(rng)
+	out := &TokenStatsData{Models: map[string]*ModelStats{}}
+	if !forEachBucketedCallRecord(ts, bidx, func(rec CallRecord, _ int) {
+		ms, ok := out.Models[rec.Model]
+		if !ok {
+			ms = &ModelStats{}
+			out.Models[rec.Model] = ms
+		}
+		out.TotalRequests++
+		ms.RequestCount++
+		ms.PromptTokens += rec.PromptTokens
+		ms.CompletionTokens += rec.CompletionTokens
+		ms.TotalTokens += rec.PromptTokens + rec.CompletionTokens
+		ms.CacheReadTokens += rec.CacheRead
+		ms.CacheCreatedTokens += rec.CacheCreation
+		if rec.Model == "" || rec.OutputSpeed <= 0 {
+			return
+		}
+		ms.StreamReqCount++
+		n := float64(ms.StreamReqCount)
+		ms.AvgTTFTMs += (float64(rec.TTFTMs) - ms.AvgTTFTMs) / n
+		ms.AvgOutputSpeed += (rec.OutputSpeed - ms.AvgOutputSpeed) / n
+	}) {
+		return &TokenStatsData{Models: map[string]*ModelStats{}}
+	}
+	return out
+}
+
 // ---- API：GET /api/call-log?limit= / DELETE /api/call-log ----
 
 func adminCallLogHandler(w http.ResponseWriter, r *http.Request) {
