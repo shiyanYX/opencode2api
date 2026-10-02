@@ -615,6 +615,15 @@ func adminCallLogHandler(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(recs)
 	case http.MethodDelete:
 		callLog.clear()
+		// 累计计数器必须一起清，否则两个数据源会永久脱节：
+		// /api/stats 加了 ?range= 之后，概览页顶部读的是按窗口从调用日志
+		// 算出来的聚合。日志被删了而 stats.json 里的历史总量还在，
+		// 用户会看到「统计归零但总量没变」的矛盾现象。
+		// 语义定死：清空日志 = 统计从头计，与 DELETE /api/stats 一致。
+		tokenStatsMu.Lock()
+		tokenStats = &TokenStatsData{Models: map[string]*ModelStats{}}
+		tokenStatsMu.Unlock()
+		saveTokenStats()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	default:
