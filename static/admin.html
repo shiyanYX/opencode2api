@@ -497,7 +497,7 @@ input,select,textarea{font-family:inherit;color:inherit}
         </div>
         <div class="filter-bar">
           <select id="trendRangeSel" class="input-sm" onchange="setTrendRange(this.value)">
-            <option value="today">当天</option>
+            <option value="today">最近 24 小时</option>
             <option value="7d">最近 7 天</option>
             <option value="30d" selected>最近 30 天</option>
             <option value="180d">最近半年</option>
@@ -1349,8 +1349,12 @@ function setTrendModel(m){
    复位成 'all'。调用方凡是先用 trendModel 做过聚合的，都必须让本函数先跑。 */
 function renderModelOptions(){
   const sel=q('#trendModelSel');if(!sel)return;
+  // 只列「当前时间窗内真的有量」的模型。没有数据就是没有选项——
+  // 不回退 free_models：那是「全新实例从未有过请求」的兜底清单，与本窗口
+  // 的真实用量的模型集完全不相交，回退只会让用户在一堆注定为 0 的选项里挑。
+  // 副作用是有意接受的：窗口内无量的模型不再出现在下拉里，用户无从选中它，
+  // 这与「选了也是 0」相比少一步误操作。
   let models=(window.__lastStatsModels||[]).slice();
-  if(!models.length&&typeof freeModelIDs!=='undefined'&&freeModelIDs)models=freeModelIDs.slice();
   // 仅在选项集合真的变化时重建 innerHTML：整块重写会把手工打开着的下拉合上。
   // 签名挂在 DOM 上，模型来源切换（__lastStatsModels ↔ free_models）也能正确触发重建。
   const sig=JSON.stringify(models);

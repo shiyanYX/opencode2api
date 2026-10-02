@@ -391,7 +391,12 @@ type ModelTrendPoint struct {
 }
 
 // trendBuckets 按 range 切分时间桶：返回每个桶的时间标签与「时间→桶索引」映射。
-// today 返回 24 个整点小时桶；7d/30d/180d 返回逐日桶。均含零数据时段以保证连线连续。
+// today 是**滚动最近 24 小时**（不是本地零点起的自然日），返回 24 个整点小时桶；
+// 7d/30d/180d 返回逐日桶。均含零数据时段以保证连线连续。
+//
+// 改成滚动窗口的理由：零点锚定时，用户早上打开面板看的是昨天后半夜的流量，
+// 那半天的记录整段落在窗口外，Hero 会显示 0。滚动 24 小时让「刚才还在用的窗口」
+// 始终覆盖最近一段真实活动。
 func trendBuckets(rng string) ([]string, func(time.Time) int) {
 	now := time.Now()
 	loc := now.Location()
@@ -409,18 +414,21 @@ func trendBuckets(rng string) ([]string, func(time.Time) int) {
 			return int(dayStart.Sub(start) / (24 * time.Hour))
 		}
 		return ts, dayIdx
-	default: // today
-		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	default: // today：滚动最近 24 小时，桶起点对齐到整点
+		// 起于 23 小时前而非 24 小时前：24 个桶必须以「当前这一小时」收尾。
+		// 若从 24 小时前起排，最后一个桶是 [now-1h, now)，当前小时被排除，
+		// 刚发生的那批请求会整段落空——这正是滚动窗口要解决的问题本身。
+		start := now.Add(-23 * time.Hour).Truncate(time.Hour)
 		ts := make([]string, 24)
 		for i := 0; i < 24; i++ {
 			ts[i] = start.Add(time.Duration(i) * time.Hour).Format("2006-01-02T15:04")
 		}
 		return ts, func(t time.Time) int {
-			lt := t.In(loc)
-			if lt.Year() != now.Year() || lt.YearDay() != now.YearDay() {
+			i := int(t.In(loc).Sub(start) / time.Hour)
+			if i < 0 || i >= 24 {
 				return -1
 			}
-			return lt.Hour()
+			return i
 		}
 	}
 }
