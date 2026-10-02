@@ -424,8 +424,16 @@ func trendBuckets(rng string) ([]string, func(time.Time) int) {
 			ts[i] = start.Add(time.Duration(i) * time.Hour).Format("2006-01-02T15:04")
 		}
 		return ts, func(t time.Time) int {
-			i := int(t.In(loc).Sub(start) / time.Hour)
-			if i < 0 || i >= 24 {
+			// 必须显式判起点之前：Go 整数除法**向零截断**，
+			// start-30m 的 Sub 为 -30m，int(-30m/1h) == 0 而不是 -1，
+			// 于是「窗口起点之前最多整一小时」会全部落进 bucket 0。
+			// 只靠 i < 0 兜不住负数半区。
+			d := t.In(loc).Sub(start)
+			if d < 0 {
+				return -1
+			}
+			i := int(d / time.Hour)
+			if i >= 24 {
 				return -1
 			}
 			return i

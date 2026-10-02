@@ -138,7 +138,7 @@ input,select,textarea{font-family:inherit;color:inherit}
 .conn.offline .pulse::after{animation:none;background:var(--text-ter)}
 .mini{font-size:11px;letter-spacing:.02em;color:var(--text-sec);font-family:var(--mono);padding:0 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .main{flex:1;min-width:0;padding:32px 36px 72px;max-width:1280px}
-.topbar{display:flex;align-items:center;gap:12px;margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--border)}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--border);flex-wrap:wrap}/* flex-wrap：新增的「自动刷新」下拉让顶栏在窄屏横向溢出（实测 scrollWidth 441→469）。h1 自带 flex:1，所以换行时标题独占一行、控件聚在第二行。*/
 .topbar h1{font-size:20px;font-weight:700;letter-spacing:0;line-height:1.35;flex:1;display:flex;align-items:baseline;gap:10px}
 .topbar .crumb{font-size:12px;color:var(--text-ter);font-weight:500;letter-spacing:-.01em}
 
@@ -1821,7 +1821,7 @@ function clRenderNode(visible){
     '<table class="cl-tbl"><thead><tr><th>节点</th><th class="num">请求数</th><th class="num">成功率</th><th class="num">平均耗时</th><th class="num">异常/切换</th></tr></thead><tbody>'+rows.map(n=>{const rate=n.req?n.ok/n.req:0;const cls=rate>=0.9?'':rate>=0.5?'warn':'bad';return '<tr><td style="font-family:var(--mono);font-size:12px">'+esc(n.node)+'<span class="ratebar"><i class="'+cls+'" style="width:'+(rate*100)+'%"></i></span></td><td class="num">'+n.req+'</td><td class="num">'+Math.round(rate*100)+'%</td><td class="num">'+clFmtDur(Math.round(n.totalMs/n.req))+'</td><td class="num">'+n.issue+'</td></tr>'}).join('')+'</tbody></table>';
 }
 function clearCallLog(){
-  if(!confirm('确定清空全部调用日志？该操作不可恢复。'))return;
+  if(!confirm('确定清空全部调用日志？\n\n该操作不可恢复：调用日志文件会被删除，同时 Token 累计统计也会一并清零（两者现在是同一份数据的两个视图）。'))return;
   if(DEMO_MODE){callLogData=[];clRefreshView();showToast('日志已清空（演示）','success');return}
   fetch('/api/call-log',{method:'DELETE'}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status)}).then(()=>{callLogData=[];clRefreshView();showToast('调用日志已清空','success')}).catch(e=>showToast('清空失败: '+e.message,'error'));
 }
