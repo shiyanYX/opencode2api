@@ -24,6 +24,7 @@ opencode2api.exe
 
 # 测试仅保留本地，不提交到 GitHub
 *_test.go
+scripts/verify_ui.py
 
 # Editor and OS files
 .DS_Store
