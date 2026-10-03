@@ -147,7 +147,15 @@ func (s *callLogStore) append(rec CallRecord) {
 	if p == "" {
 		return
 	}
-	b, err := json.Marshal(rec)
+	// 落盘裁剪：Events 仅供内存环与面板日志页展示，磁盘侧的聚合查询
+	// （forEachBucketedCallRecord 及其三个调用方）只读 9 个标量字段，
+	// 从不访问 Events。实测 events 占全文件 38.8%，其中 73.1% 是
+	// detail 恒为空的 connect_ok，其信息已被同记录的 nodes[0]/node_names[0]
+	// 完全覆盖。
+	// 代价：重启后内存环里那批记录（约 12.9 小时的量）没有事件时间线。
+	diskRec := rec
+	diskRec.Events = nil
+	b, err := json.Marshal(diskRec)
 	if err != nil {
 		return
 	}
