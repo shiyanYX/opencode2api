@@ -1,9 +1,15 @@
 package main
 
-import "strconv"
+import (
+	"math"
+	"strconv"
+)
 
-// slimRec 只含磁盘侧聚合查询需要的 9 个字段（calllog.go:477/503/583 三个函数的
-// 回调只访问这些）。events / nodes / node_names / path / req_id /
+// slimRec 只含磁盘侧聚合查询需要的 9 个字段——真正读它们的是 calllog.go 的
+// forEachBucketedCallRecord / trendsFromCallLog / trendsByModelFromCallLog /
+// modelStatsFromCallLog 及其回调。（写函数名而不是 file:line：行号会随上游
+// 改动腐烂，之前注释里的 calllog.go:477/503/583 已经全部失准。）
+// events / nodes / node_names / path / req_id /
 // route_mode / duration_ms / err_msg / stream 从不被统计访问。
 type slimRec struct {
 	TS               string
@@ -19,9 +25,16 @@ type slimRec struct {
 
 // parseStatsLine 把一行 JSON 解析进 slimRec。
 //
-// 为什么不直接用 encoding/json：实测 100.4 MB 全量解析 1,628 ms，
-// 而本函数 331 ms（9.3 倍）。差额来自 encoding/json 的逐 token 反射，
-// 不是分配——换「瘦身结构体」只能快 1.4 倍，仍不够。
+// 为什么不直接用 encoding/json：同机同数据（/tmp/prod_log.jsonl，100.4 MB，
+// 186,212 行，-benchtime 10x）实测 encoding/json 2,009 ms，本函数 340 ms，
+// **5.9 倍**。注意别再写成「9.3 倍」——1,628/331 = 4.9，本来就算错；
+// 而且那两个数来自不同机器，倍率只有按同机数据报才有意义。
+//
+// 差额**主要来自分配，不是「只是反射」**：同一组数据下 encoding/json 每行新声明
+// 一个 CallRecord，分配 4,562,270 次 / 202.1 MB；本函数 1,132,217 次 / 18.4 MB。
+// 分配**次数**只差 4.0 倍，但分配的**字节数差 11.0 倍**——大头是每个字段值、每个
+// 字符串的堆拷贝。所以 jsonReadKey 那条「键不构造 string」的路径是主要收益来源
+// （改之前本函数是 3,526,334 次 / 44.1 MB，即 18.9 次/行 ≈ 键的个数）。
 //
 // 两条不可妥协的正确性约束：
 //  1. 浮点必须交给 strconv.ParseFloat。手写 f=f*10+digit 的舍入方式与它不同，
@@ -52,7 +65,7 @@ func parseStatsLine(line []byte, r *slimRec) bool {
 			return false
 		}
 
-		key, ni := jsonReadString(line, i)
+		key, ni := jsonReadKey(line, i)
 		if ni < 0 {
 			return false
 		}
@@ -93,21 +106,59 @@ func parseStatsLine(line []byte, r *slimRec) bool {
 		tok := line[i:e]
 		switch string(key) {
 		case "prompt_tokens":
-			r.PromptTokens, _ = strconv.ParseInt(string(tok), 10, 64)
+			r.PromptTokens = jsonInt(tok)
 		case "completion_tokens":
-			r.CompletionTokens, _ = strconv.ParseInt(string(tok), 10, 64)
+			r.CompletionTokens = jsonInt(tok)
 		case "cache_creation_tokens":
-			r.CacheCreation, _ = strconv.ParseInt(string(tok), 10, 64)
+			r.CacheCreation = jsonInt(tok)
 		case "cache_read_tokens":
-			r.CacheRead, _ = strconv.ParseInt(string(tok), 10, 64)
+			r.CacheRead = jsonInt(tok)
 		case "ttft_ms":
-			r.TTFTMs, _ = strconv.ParseInt(string(tok), 10, 64)
+			r.TTFTMs = jsonInt(tok)
 		case "output_speed":
-			// 必须委托 strconv：手写舍入会让 3.85% 的值位模式不同。
-			r.OutputSpeed, _ = strconv.ParseFloat(string(tok), 64)
+			r.OutputSpeed = jsonFloat(tok)
 		}
 		i = e
 	}
+}
+
+// jsonInt 解析一个 JSON 整数字段，失败一律返回 0。
+//
+// 判据是 err != nil，**不是**「值等于 MaxInt64 就丢」：ParseInt 对
+// 9223372036854775807 返回 (MaxInt64, nil)，encoding/json 也照收，
+// 按哨兵值过滤会把合法值误杀，同时放跑真正的越界输入。
+//
+// 为什么必须看 err：strconv 在 ErrRange 时返回**饱和值**而不是 0——
+// ParseInt("99999999999999999999") 给 MaxInt64，ParseFloat("1e999") 给 +Inf。
+// 把 err 丢掉等于把饱和值写进 slimRec，后果不是数字难看：下游桶聚合的
+// avg += (v-avg)/n 一旦吃到 +Inf，该模型的均值就被**永久**污染且全程不报错。
+// encoding/json 对同样的输入是报错 + 留零值；本函数为了「脏数值不中断整行」
+// 选择返回 true，那就必须同样留零值，否则与对拍基准分叉。
+//
+// 语法错（"prompt_tokens":"abc"、null、true）走同一个分支留 0，这是既定宽容
+// 行为：脏数值不中断整行，但不进统计。
+func jsonInt(tok []byte) int64 {
+	v, err := strconv.ParseInt(string(tok), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+// jsonFloat 解析一个 JSON 浮点字段，失败一律返回 0。
+//
+// 必须委托 strconv：手写 f=f*10+digit 的舍入方式与它不同，实测会让 3.85% 的
+// output_speed 位模式不一致。
+//
+// 光判 err 不够：ParseFloat 对 "Inf" / "+Inf" / "Infinity" / "NaN" 返回
+// (Inf|NaN, **nil**)——这几个都不是合法 JSON，但 strconv 照单全收。
+// 所以判据是 err == nil **且** 结果有限，两个条件缺一不可。
+func jsonFloat(tok []byte) float64 {
+	v, err := strconv.ParseFloat(string(tok), 64)
+	if err != nil || math.IsInf(v, 0) || math.IsNaN(v) {
+		return 0
+	}
+	return v
 }
 
 func skipJSONSpace(b []byte, i int) int {
@@ -117,8 +168,38 @@ func skipJSONSpace(b []byte, i int) int {
 	return i
 }
 
+// jsonReadKey 读取一个 JSON 键（b[i] == '"'），返回**原始字节**与结束位置。
+//
+// 和 jsonReadString 唯一的区别是返回 []byte 而不是 string：键只用来 switch
+// 匹配，从不需要留下来，构造 string 就是白拷一份。`switch string(key)` 会被
+// 编译器识别成免分配比较（只比字节不建串）。
+//
+// 生产日志实测平均 12.86 个顶层键/行，每个键省一次 string 拷贝 ≈ 每行省 12.9 次分配。
+// 编译器对**已是 string** 的值做 string(key) 不分配（老代码里那句写法本身没开销），
+// 对 []byte 才需要这条专门的读取路径——这才是真正的大头。
+//
+// 遇到转义就退回 jsonReadString：原始字节不等于逻辑键（"t\u0073" 的逻辑键是
+// "ts"）。键来自结构体 tag，生产日志里不会出现转义键，但保持正确不花代价。
+func jsonReadKey(b []byte, i int) ([]byte, int) {
+	start := i + 1 // 跳过起始引号
+	for i = start; i < len(b); i++ {
+		switch b[i] {
+		case '\\':
+			s, ni := jsonReadString(b, start-1)
+			if ni < 0 {
+				return nil, -1
+			}
+			return []byte(s), ni
+		case '"':
+			return b[start:i], i + 1
+		}
+	}
+	return nil, -1
+}
+
 // jsonReadString 读取从 i 开始的 JSON 字符串（line[i] == '"'），返回内容与结束位置。
-// 无转义时走零拷贝快路径；有转义时委托 strconv.Unquote 保证与 encoding/json 一致。
+// 无转义时走单次拷贝快路径（内容是子切片，仍要 string() 一次）；
+// 有转义时委托 strconv.Unquote 保证与 encoding/json 一致。
 func jsonReadString(b []byte, i int) (string, int) {
 	start := i
 	i++
@@ -146,9 +227,22 @@ func jsonReadString(b []byte, i int) (string, int) {
 
 // jsonSkipContainer 跳过 line[i] 处的 {...} 或 [...]。
 //
-// 必须跟踪字符串状态：朴素的括号深度在遇到字符串内不成对的括号时会损坏整行。
-// 实测生产数据里的 "dial tcp [2406::1]:443" 和 "[DONE]" 都是配对的，侥幸安全；
-// 但任何一条含游离 ] 的错误消息都会让该记录的 token 从统计里凭空消失且不报错。
+// 必须跟踪字符串状态，且**字符串内必须再跟踪 escaped**，两个状态缺一不可：
+//  1. 没有 inStr：字符串内的游离括号（"dial tcp [2406::1]:443"、"[DONE]"、
+//     或错误消息里的 "]")会被当成结构符号，容器提前截断，后面需要取值的字段
+//     整条从统计里消失且不报错。
+//  2. 没有 escaped：`\"` 会提前关闭字符串，同上把字符串内容里的括号算进深度。
+//
+// 这两条都**测不出来**，因为生产数据恰好两边都踩空：
+//   - 上面那些字符串内括号全部配对；
+//   - 全量 186,212 行里有 73,282 个 `\"`（10,649 行，全在 events[].detail 的
+//     错误消息里），但**没有任何一个**出现在同时含 {}[] 的字符串中——翻转字符串
+//     状态也不会误算任何结构字符，所以深度照样算对。
+//
+// 换句话说，现在的正确性靠的是「数据碰巧不含游离括号」，不是靠这段代码。
+// 能咬住这两条的用例见 statscan_test.go 的
+// TestParseStatsLineEscapedQuoteInContainerSkip 与
+// TestParseStatsLineStringAwareContainerSkip。
 func jsonSkipContainer(b []byte, i int) int {
 	depth := 0
 	inStr := false
