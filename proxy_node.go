@@ -601,7 +601,13 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 			ms, err := p.probeNode(pctx, n, probeURL)
 			if err != nil {
 				p.markProbeDead(n.Fingerprint, "probe: "+err.Error())
-				slog.Warn("node health probe failed", "node", n.Name, "error", err)
+				// 降 Debug：markProbeDead 已按「首次 / 重复 / exhausted」三级分级
+				// （Info / Debug / Debug，见 :650 / :634 / :628），重复失败的节流
+				// 已在它内部完成。这条无状态转移信息的重复记录不应再以 Warn 刷屏
+				// ——dead 节点每分钟复探一次，实测占应用日志 56.8%。
+				// 保留而不删除：markProbeDead 在 p.byID[fp] 已被 setNodes 换掉的
+				// 竞态下会提前 return，那条失败会完全无日志。
+				slog.Debug("node health probe failed", "node", n.Name, "error", err)
 			} else {
 				p.recordProbeSuccess(n.Fingerprint, ms)
 				slog.Debug("node health probe ok", "node", n.Name, "latency_ms", ms)
