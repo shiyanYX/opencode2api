@@ -134,23 +134,28 @@ var (
 	// 合并前比对，不一致则丢弃结果。**这是检测文件被重建的唯一可靠手段**：
 	// 实测 ext4 上连续 unlink+O_CREAT 200 次只产生 1 个唯一 inode，inode 完全复用。
 	statsGen uint64
-	// bucketsSeeded 表示「当前文件已有的字节全部被吸进桶」，即无需再 backfill。
+	// bucketsSeeded 表示「文件里已无未吸字节」，即 backfill 没有待办。
 	//
-	// 它守的是 parsedTo 的完整性。parsedTo 的含义是「已吸进桶的字节数」，
-	// backfill 从 [parsedTo, size) 续扫——可这只有在「已吸字节恰好构成文件前缀」时才对。
-	// 进程刚起时桶是空的、parsedTo=0，历史字节全都躺在待吸区间里；
-	// 此时若 append 一边 incr 桶、一边把 parsedTo 推到 A（= 本轮已写字节），
-	// 待吸区间就变成 [A, size)——它不再从文件头起，**必然错位**：
-	// A < S 时从旧文件中间起逐行切在半截处（那条静默丢弃），A > S 时落在本轮记录内部，
-	// 而本轮那 A 字节已被 incr 过一遍，backfill 会再计一次。
+	// 它只管一件事：**开机时那批存量历史**。parsedTo 的含义是
+	// 「已吸进桶的字节数」，backfill 从 [parsedTo, size) 续扫 —— 可这只有
+	// 在「已吸字节恰好构成文件前缀」时才对。进程刚起时桶是空的、parsedTo=0，
+	// 历史字节全都躺在待吸区间里；此时若 append 一边 incr、一边把 parsedTo
+	// 推到 A（= 本轮已写字节），待吸区间就变成 [A, size) —— 它不再从文件头起，
+	// **必然错位**：A < S 时从旧文件中间起逐行切在半截处（那条静默丢弃），
+	// A > S 时落在本轮记录内部，而那 A 字节已被 incr 过一遍，backfill 会再计一次。
+	// 开机到面板首次查询之间的流量必然落在这个窗口里，故这不是理论边界情况。
 	//
 	// 所以两条路径必须二选一、不能都做：backfill 待办期间 append 只写文件、**不** incr；
 	// 等 backfill 一次性把 [0, size) 全吸完并置位后，append 才切到 incr + 推进 parsedTo。
 	// 二者由同一把 callLog.mu 串行化，不存在交错窗口。
-	// 开机到面板首次查询之间的流量必然落在这个窗口里，故这不是理论边界情况。
 	//
-	// clear() 之后可以直接置 true：桶已清空、parsedTo=0、文件已被删除，
-	// 「已吸字节 == 文件大小 == 0」是可证的，不需要再 backfill。
+	// 本标志**不再**承担「在途写 vs 丢失写」的判别（曾经被塞过这个语义，是错的）：
+	// 落盘已移进 callLog.mu，写失败会截回文件、不 incr、不推进 parsedTo，
+	// 那两种情形现在根本不会发生。「已吸字节构成文件前缀」由 append 单独保证，
+	// 不依赖本标志。见 append 的落盘段。
+	//
+	// clear() 之后置 true 是可证的：append 的落盘同样在 s.mu 内，
+	// 故临界区内不可能有在途写入，函数返回时桶空、parsedTo=0、文件不存在。
 	//
 	// ⚠️ Task 7 实现 backfill 时**必须复用本标志**，不要另起一个：
 	// 重复声明会编译失败，语义分叉则会重演上面的错位。
@@ -196,8 +201,9 @@ func (a *hourModelAgg) add(r *slimRec) {
 // ---- 全局环形缓冲 + JSONL 落盘 ----
 
 type callLogStore struct {
-	// RWMutex 而非 Mutex：Task 8 起查询侧要并发读 hourBuckets/parsedTo/statsGen，
-	// 写侧（append/clear/load）仍走 Lock。
+	// RWMutex 而非 Mutex：纯读路径（latest / loadCallLogFromFile /
+	// forEachBucketedCallRecord）用 RLock，写路径（append/clear）用 Lock。
+	// Task 8 起查询侧读 hourBuckets 也走 RLock。
 	mu      sync.RWMutex
 	records []CallRecord
 	path    string
@@ -300,9 +306,9 @@ func tailReadLastLines(path string, n int) ([]byte, error) {
 }
 
 func loadCallLogFromFile() {
-	callLog.mu.Lock()
+	callLog.mu.RLock()
 	p := callLog.path
-	callLog.mu.Unlock()
+	callLog.mu.RUnlock()
 	if p == "" {
 		return
 	}
@@ -331,6 +337,54 @@ func loadCallLogFromFile() {
 	callLog.mu.Unlock()
 }
 
+// writeBytes 是 os.File.Write 的可注入包装，唯一目的是让测试能制造短写：
+// io.Writer 契约允许 n < len(b) 且 err == nil，而真实 fd 上内核要么写满、
+// 要么报错，短写根本不出现——可「短写必须当成失败并回滚」这条不变量
+// 只在它出现时才可见，不注入就只能靠注释声称覆盖了。
+var writeBytes = func(f *os.File, b []byte) (int, error) { return f.Write(b) }
+
+// truncateCallLog 把日志文件截回到 size。size < 0 表示「写入前大小未知」，
+// 此时什么都不做——按猜测截断会毁掉尚未 backfill 的存量字节。
+func truncateCallLog(path string, size int64) error {
+	if size < 0 {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	err = f.Truncate(size)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// writeCallLogLine 把一行 JSONL 追加落盘。
+// 返回值 sizeBefore 是写入前的文件大小；err 非 nil 表示整条写入失败
+// （OpenFile 失败 / f.Write 报错 / 短写，三者合一，调用方不区分）。
+func writeCallLogLine(path string, line []byte) (int64, error) {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return -1, err
+	}
+	// 写前先记下大小：写入失败时调用方要靠它把已落盘的部分字节截回去。
+	// 整条 append 都在 callLog.mu 内、全进程没有第二个写者，
+	// 故此刻的 size 就是本次写入前的 size。
+	sizeBefore := int64(-1)
+	if st, serr := f.Stat(); serr == nil {
+		sizeBefore = st.Size()
+	}
+	n, err := writeBytes(f, line)
+	if err == nil && n != len(line) {
+		err = io.ErrShortWrite
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return sizeBefore, err
+}
+
 func (s *callLogStore) append(rec CallRecord) {
 	s.mu.Lock()
 	s.records = append(s.records, rec)
@@ -345,27 +399,78 @@ func (s *callLogStore) append(rec CallRecord) {
 	// 完全覆盖。
 	// 代价：重启后内存环里那批记录（约 12.9 小时的量）没有事件时间线。
 	//
-	// Marshal 必须在锁内、桶 incr 之前：parsedTo 的增量 len(b)+1 必须与
-	// 真正落盘的字节是同一份，否则分两次算出的长度会不一致。
+	// Marshal 必须在锁内、且紧邻落盘：line 的长度就是 parsedTo 的增量，
+	// 两者必须是同一份字节，否则推进量与真正写下去的量会对不上。
 	diskRec := rec
 	diskRec.Events = nil
-	var b []byte
-	diskOK := false
+	var line []byte
 	if p != "" {
+		// Marshal 失败（OutputSpeed 为 NaN/±Inf）时 line 为 nil，
+		// 该记录仍留在内存环里供面板展示，只是不落盘 —— 与改动前同语义。
 		if mb, merr := json.Marshal(diskRec); merr == nil {
-			b, diskOK = mb, true
+			// +1 是行尾的 '\n'，line 即真正写下去的那份字节。
+			line = append(mb, '\n')
 		}
 	}
-	// 聚合桶 incr 必须在锁内。若放到锁外（跟着文件写一起），
-	// 并发查询读同一 map 会触发 Go 运行时的
+	if line == nil {
+		s.mu.Unlock()
+		return
+	}
+
+	// ---- 落盘 ----
+	//
+	// 🔴 落盘必须在 callLog.mu 内，与 incr、parsedTo 推进同处一个临界区。
+	// 这是「已吸字节恰好构成文件前缀」这条不变量能成立的**唯一**前提。
+	// 修复前写盘在 Unlock 之后，于是 clear() 删掉的文件会被这次
+	// O_CREATE 重建（实测 size=186、桶空、parsedTo=0、seeded=true），
+	// 下次 backfill 把幽灵吸回 —— 用户点「清空」后统计复活。
+	// 那时注释里「已吸字节 == 文件大小 == 0 是可证的」是假的：
+	// 锁挡得住「先读后删」，挡不住「在途写」。
+	//
+	// 代价（实测，3000 次 × 3 轮，tmpfs/页缓存热）：
+	// 单线程 12.5→14.7 µs/op（噪声内，无回归）；
+	// 8/64/256 并发下聚合吞吐 8.5 µs/op → 21 µs/op，约掉 2.4 倍——
+	// 串行成本没变，少的是「多条 append 的写并行」。
+	// 绝对值仍约 4.8 万次/秒，远高于本服务的请求上限。
+	// 真正的风险是**持锁期间 panel 的 latest()/clear() 会排在写盘后面**；
+	// 若日后要消除，让 append 走一条专用写协程 + 队列，
+	// 或在 store 里常开 *os.File 省掉每次 open/close（clear 时需重开）。
+	sizeBefore, werr := writeCallLogLine(p, line)
+	if werr != nil {
+		// 回滚，两件事：
+		//   1) 文件：把可能已落盘的部分字节截回写入前的大小。
+		//      不截的话，短写留下的半行会永久粘住下一条 O_APPEND 的内容，
+		//      那一行永久不可解析 —— 文件侧就永久丢了一条。
+		//      截不回（size<0 或 Truncate 本身失败）时只能让 parsedTo 停在原地，
+		//      残留的尾巴由 Task 7 的扫描路径容错（见报告 §遗留项）。
+		_ = truncateCallLog(p, sizeBefore)
+		//   2) 桶与 parsedTo：**什么都不做**。桶不 incr、parsedTo 不推进，
+		//      这条记录下一轮 backfill 会从 [parsedTo, size) 重新吸一遍。
+		//      注意这里不需要「减回去」——下面的 incr 被整个放在写成功之后，
+		//      失败时压根没加过。
+		//
+		//      （若把 incr 挪到写之前、回滚就必须逐一撤销 N/OK/Fail/PT/CT/
+		//      CC/CR/SpeedN/SpeedSum/TTFTN/TTFTSum 这 10 个字段，还得决定
+		//      新建的桶要不要从 map 里删掉；而 SpeedSum/TTFTSum 是 float64，
+		//      `x += v` 再 `x -= v` 在 IEEE754 下并不保证还原成 x，
+		//      每次写失败都会给均值带来一次永久的尾数漂移。
+		//      另外崩溃窗口也反过来：先 incr 后写，崩在中间就留下
+		//      parsedTo > size —— 正好触发「全量重建」那条恢复规则。
+		//      先写后 incr 崩在中间则是「文件有、桶没有、parsedTo 没推进」，
+		//      backfill 会自然补上，自愈。）
+		s.mu.Unlock()
+		return
+	}
+
+	// ---- 桶 incr（写成功之后）----
+	//
+	// incr 必须在锁内。若放到锁外，并发查询读同一 map 会触发 Go 运行时的
 	// fatal error: concurrent map read and map write —— 该错误 recover() 无效，直接杀进程。
 	//
-	// 锁边界定死为：Lock → records 追加 → 桶 incr → Unlock → 写文件。
-	//
-	// bucketsSeeded 为 false 时必须跳过整段：那批记录还躺在 backfill 的
+	// bucketsSeeded 为 false 时必须跳过：那批记录还躺在 backfill 的
 	// 待吸区间 [0, size) 里，此刻 incr 会让待吸区间从文件中间起、被双重计入。
 	// 详见 bucketsSeeded 的注释。
-	if diskOK && bucketsSeeded {
+	if bucketsSeeded {
 		if k, ok := hourKeyFor(rec.TS, rec.Model); ok {
 			if hourBuckets == nil {
 				hourBuckets = make(map[hourModelKey]*hourModelAgg)
@@ -382,8 +487,8 @@ func (s *callLogStore) append(rec CallRecord) {
 				TTFTMs: rec.TTFTMs, OutputSpeed: rec.OutputSpeed,
 			})
 			// 🔴 **必须同时推进 parsedTo**。
-			// 写侧 incr 变体里 append 已经把这条计进桶了；若 parsedTo 不跟着走，
-			// 下次 ensureBucketsUpToDate 会从 [parsedTo, size) 把刚写的字节**再扫一遍**，
+			// append 已经把这条计进桶了；若 parsedTo 不跟着走，
+			// 下次 backfill 会从 [parsedTo, size) 把刚写的字节**再扫一遍**，
 			// 于是每个请求被永久计两次，且单调发散、永不自愈。
 			//
 			// 实测（把 Task 6 Step 5 + Task 7 Step 3 逐字抄出来跑）：
@@ -392,32 +497,22 @@ func (s *callLogStore) append(rec CallRecord) {
 			//   第一次查询（+1 条）  → N=5（真值 4）  ← 已经错
 			//   第五次查询（+1 条）  → N=15（真值 8） ← 发散 2 倍
 			//
-			// +1 是行尾的 '\n'。b 是 json.Marshal(diskRec) 的结果，
-			// 与下面 f.Write(append(b, '\n')) 写出的字节逐字节同源。
-			//
-			// 乐观推进（不等 f.Write 的结果）是刻意的：文件写在锁外，
-			// 若改成「写完再拿锁推进」，两者之间的查询会把这段字节扫进桶 → 重复计数。
-			// 写失败时 parsedTo 领先于真实 size，多出的部分后续永远不会被重扫，
-			// 而桶里那条记录也已计入 —— 仍然不重复、不丢失。
-			parsedTo += int64(len(b)) + 1
+			// 推进量 = len(line) = len(json.Marshal(diskRec)) + 1，
+			// 与 writeCallLogLine 刚写下去的字节逐字节同源，且此刻
+			// 文件大小恰好也是这个数 —— parsedTo == size 恒成立，
+			// 「size < parsedTo → 全量重建」不再被稳态触发
+			// （修复前实测 400 次观测命中 83 次，21%）。
+			parsedTo += int64(len(line))
 		}
 	}
 	s.mu.Unlock()
-
-	if !diskOK {
-		return
-	}
-	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	f.Write(append(b, '\n'))
-	f.Close()
 }
 
 func (s *callLogStore) latest(max int) []CallRecord {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// 纯读路径：只拷 s.records，不写任何共享状态，故用 RLock。
+	// 写者（append/clear/load）持 Lock 排他，两者互斥关系不变。
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	n := len(s.records)
 	if max <= 0 || max > n {
 		max = n
@@ -433,8 +528,11 @@ func (s *callLogStore) clear() {
 	s.records = nil
 	hourBuckets = nil
 	parsedTo = 0
-	// 文件就在下面同一临界区里被删掉，删完「已吸字节 == 文件大小 == 0」可证，
-	// 故此处无需 backfill 即可重新切到 incr 路径。
+	// 置 true 的依据：append 的落盘现在也在 s.mu 内（见 append），
+	// 所以本临界区里不可能有在途写入。函数返回时桶为空、parsedTo=0、
+	// 文件不存在 —— 「已吸字节 == 文件大小 == 0」这次是真的可证。
+	// （修复前落盘在锁外，这句话是假的：在途 append 会在 os.Remove 之后
+	//  用 O_CREATE 把文件重建出来，那条幽灵记录会被下次 backfill 吸回。）
 	bucketsSeeded = true
 	statsGen++
 	// os.Remove 必须在同一临界区内。若放在锁外，其后若有查询进来，
@@ -711,9 +809,14 @@ func trendBuckets(rng string) ([]string, func(time.Time) int) {
 // forEachBucketedCallRecord 用给定的桶配置遍历落在区间内的调用记录，
 // fn 收到记录与桶索引。返回 false 表示日志文件不可读。
 func forEachBucketedCallRecord(ts []string, bidx func(time.Time) int, fn func(rec CallRecord, bucket int)) bool {
-	callLog.mu.Lock()
+	// 只读 path，用 RLock。
+	// ⚠️ fn 仍在 Unlock **之后**调用（下面那个循环里），顺序不能动：
+	// 回调归调用方所有，让它在锁内跑等于把调用方的耗时算进全局写锁，
+	// 而且 Task 8 起回调要读 hourBuckets —— 万一有回调回写共享状态，
+	// 在锁内执行会直接踩 "concurrent map writes"。
+	callLog.mu.RLock()
 	p := callLog.path
-	callLog.mu.Unlock()
+	callLog.mu.RUnlock()
 	data, err := os.ReadFile(p)
 	if err != nil {
 		return false
