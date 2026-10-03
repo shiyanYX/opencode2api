@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"math"
 	"strconv"
 )
@@ -103,7 +104,11 @@ func parseStatsLine(line []byte, r *slimRec) bool {
 		for e < len(line) && line[e] != ',' && line[e] != '}' {
 			e++
 		}
-		tok := line[i:e]
+		// 必须 TrimRight：合法 JSON 允许值与 ',' / '}' 之间有空白，
+		// 而 strconv.ParseInt/ParseFloat 对 "42 " 直接报错 → 静默留 0。
+		// 实测 {"prompt_tokens":42 } 会被读成 0，而 encoding/json 给 42。
+		// 代价：行尾的制表/换行同样被吃掉，而那些已被 skipJSONSpace 处理。
+		tok := bytes.TrimRight(line[i:e], " \t")
 		switch string(key) {
 		case "prompt_tokens":
 			r.PromptTokens = jsonInt(tok)
