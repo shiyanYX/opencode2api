@@ -198,6 +198,278 @@ func (a *hourModelAgg) add(r *slimRec) {
 	}
 }
 
+// ---- backfill：把日志文件里未吸的字节吸收进桶 ----
+
+// absorbMu 给 backfill 做 single-flight。
+//
+// RWMutex 挡不住并发 map 写：两个请求同时进入 ensureBucketsUpToDate，
+// 各自在锁外建 staged、再在锁内往同一张 map 写，会触发
+// fatal error: concurrent map writes —— 该错误 recover() 无效，直接杀进程。
+//
+// 🔴 第二个调用者必须**等待**，而不是「发现有人在干就跳过」：
+// 跳过会让它读到尚未建立的空桶，把零值当真实统计返回给面板。
+var absorbMu sync.Mutex
+
+// backfillAfterStat 是测试注入点，生产为空实现（可内联掉，零开销）。
+// 存在的唯一理由：「必须按快照 size 提交 parsedTo」这条约束，
+// 其反例只发生在「Stat 之后、提交之前」这个窗口里，而那个窗口窄到
+// 只能靠概率撞上 —— 没有这个钩子就没有能稳定复现它的测试，
+// 改错了也不会有人发现。
+var backfillAfterStat = func() {}
+
+// markBucketsSeededIfFullyAbsorbed 在**持有 callLog.mu 写锁**时置 bucketsSeeded。
+//
+// 为什么必须锁内重新 Stat，不能复用调用方在锁外拿到的那个 size：
+// append 的「写盘 + 推进 parsedTo」整体在同一临界区内，而「锁外 Stat」
+// 与「本函数取锁」之间存在窗口 ——
+//
+//	· Stat 之后、append 落盘之前取到旧值，本函数在 append 之后取锁：
+//	  此刻 parsedTo 与文件大小同步前进，用旧值判等会**误判**成「已吸干净」
+//	· 反过来，Stat 之后又来了新字节（落盘发生在我们取锁之前）：
+//	  此刻文件大小已超过 parsedTo，说明还有字节没吸，必须不置位
+//
+// 只有锁内观测到的 fileSize==parsedTo 才能证明「文件里已无未吸字节」，
+// 而这正是 bucketsSeeded 的定义。不满足时**什么都不做**（保持 false）。
+func markBucketsSeededIfFullyAbsorbed(p string) {
+	if p == "" {
+		return
+	}
+	st, err := os.Stat(p)
+	if err != nil || st.Size() != parsedTo {
+		return
+	}
+	bucketsSeeded = true
+}
+
+// handleBackfillOpenError 处理日志文件打不开的情况。
+//
+// 🔴 **必须判 os.IsNotExist，不能只判「Stat 是否成功」**。
+// 接手时这里写的是 `if _, err := os.Stat(p); err == nil { return }` ——
+// 与自述的「只在确实不存在时才清桶」并不等价：Stat 自己也会失败，
+// 而它的失败原因与 open 失败的原因可以毫无关系（父目录 EACCES、
+// 软链自环 ELOOP、fd 耗尽 EMFILE/ENFILE……）。
+// 那种情形下桶会被整个清空：面板瞬间闪回 0，日志文件却一直好好地在那儿。
+//
+// 必须在锁内复核文件是否仍不存在：open 失败与取锁之间可能有一个在途 append
+// 刚用 O_CREATE 重建了文件并 incr 了桶。此刻若照着过期的 IsNotExist 清空，
+// 就会把它刚计入的那一条抹掉 —— 而那条记录已经在文件里，永远补不回来。
+//
+// ⚠️ Go 把 ENOTDIR 也归进 ErrNotExist（路径查找语义），所以「父级不是目录」
+// 仍会被当成「文件不存在」而清桶。这与 os.Stat 的既有语义一致，
+// 不在这里另立一套判定。
+//
+// 置 bucketsSeeded=true 的依据与 clear() 同构：函数返回时桶为空、parsedTo=0、
+// 文件不存在，「已吸字节构成文件前缀」是可证的平凡事实。
+func handleBackfillOpenError(p string, gen uint64) {
+	callLog.mu.Lock()
+	defer callLog.mu.Unlock()
+	if statsGen != gen {
+		return // 期间 clear 过，不动它的结论
+	}
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		return // 文件还在（或只是打不开，不是不存在）：桶一个字节都不许动
+	}
+	hourBuckets = nil
+	parsedTo = 0
+	bucketsSeeded = true
+}
+
+// ensureBucketsUpToDate 把 [parsedTo, EOF) 区间吸收进桶。无新增时立即返回。
+// 幂等：重复调用不会重复累加。并发调用时第二个**等待**而非跳过。
+//
+// **必须惰性调用**：绝不能放进 initCallLog —— backfill 会把启动耗时
+// 从 50ms 推到 1.9s，直接违反「启动 <50ms」验收。
+// 调用方是 Task 8 的三个查询函数（进查询前调一次）。
+//
+// 🔴 **绝不能持有 callLog.mu 做全量解析**：那会让每个在途代理请求的收尾
+// （callLog.append）阻塞整个解析时长 —— 比现在更糟：现在只是面板慢。
+// 因此这里锁外读取与解析、锁内合并。合并段是纯内存 O(桶数) 操作。
+func ensureBucketsUpToDate() {
+	// single-flight：进入即取锁，第二个调用者在这里排队等待。
+	absorbMu.Lock()
+	defer absorbMu.Unlock()
+
+	// ---- 锁外快照：路径、起点、generation ----
+	callLog.mu.RLock()
+	p := callLog.path
+	from := parsedTo
+	gen := statsGen
+	seeded := bucketsSeeded
+	callLog.mu.RUnlock()
+	if p == "" {
+		return
+	}
+
+	f, err := os.Open(p)
+	if err != nil {
+		handleBackfillOpenError(p, gen)
+		return
+	}
+	defer f.Close()
+
+	st, err := f.Stat()
+	if err != nil {
+		return
+	}
+	// 🔴🔴 size 是**快照**，parsedTo 必须按它提交，绝不能改用此刻的文件大小。
+	// 见合并段那段注释（那里写了为什么改用当前大小会永久丢字节）。
+	size := st.Size()
+	if size < from {
+		// 文件被截短（轮转/重建）：全量重吸。
+		// bucketsSeeded 必须置回 **false**：此刻 [0, size) 是待吸区间，
+		// 置位会让 append 从这个区间的**中间**起 incr 并推进 parsedTo，
+		// 下一轮扫描便从记录内部开始切行 —— 静默丢记录且不报错。
+		// statsGen 比对是为了不和 clear() 抢结论：期间 clear 过就整个退出。
+		callLog.mu.Lock()
+		if statsGen != gen {
+			callLog.mu.Unlock()
+			return
+		}
+		hourBuckets = nil
+		parsedTo = 0
+		bucketsSeeded = false
+		callLog.mu.Unlock()
+		from = 0
+	}
+	if size == from {
+		// 没有新字节。稳态（已 seeded）下 parsedTo 恒等于文件大小，
+		// 于是查询路径每次都落到这里，且**一次锁都不用再取**。
+		// 尚未 seeded 时（刚开机、或上一轮撞上解析期间有写入）才复核一次。
+		if !seeded {
+			callLog.mu.Lock()
+			markBucketsSeededIfFullyAbsorbed(p)
+			callLog.mu.Unlock()
+		}
+		return
+	}
+
+	// ---- 以下全部在锁外 ----
+	// 只读 [from, size)：长度由**快照** size 决定，多出来的并发写入字节
+	// 留给下一轮。短读（外部截断）时只认实际读到的字节。
+	want := size - from
+	buf := make([]byte, want)
+	got, err := f.ReadAt(buf, from)
+	if err != nil && err != io.EOF {
+		return
+	}
+	buf = buf[:got]
+
+	staged := make(map[hourModelKey]*hourModelAgg, 512)
+	consumed := from
+	for pos := 0; pos < len(buf); {
+		rel := bytes.IndexByte(buf[pos:], '\n')
+		if rel < 0 {
+			break // 尾部没有换行 —— 撕裂的半行，留到下一轮
+		}
+		line := buf[pos : pos+rel]
+		pos += rel + 1
+		// 🔴 坏行**也必须**推进 consumed：不推进的话每次查询都从这行重扫，
+		// 而下面的 += 会把它重复累加，且单调发散、永不自愈。
+		consumed = from + int64(pos)
+
+		var r slimRec
+		if !parseStatsLine(line, &r) {
+			// 注意：parseStatsLine 比 encoding/json 宽容，**返回 true 不代表
+			// 这行是好的** —— 尾随垃圾、数值写成字符串、+7 / 01 这类非法数字
+			// 它都收（见 statscan.go）。所以 false 只代表「结构性截断」，
+			// 不能拿来当坏行判据；宽容行按扫描器的既定行为计数，与查询侧同源。
+			continue
+		}
+		// 必须走 hourKeyFor：它内部做 t.In(time.Local) 归一。生产日志混存
+		// 185,722 行 +08:00 与 490 行 Z（本进程换过 TZ），自己解析 ts 会让
+		// 那 490 条进错 8 小时的桶。
+		k, ok := hourKeyFor(r.TS, r.Model)
+		if !ok {
+			continue
+		}
+		b := staged[k]
+		if b == nil {
+			b = &hourModelAgg{}
+			staged[k] = b
+		}
+		b.add(&r)
+	}
+
+	backfillAfterStat() // 测试注入点，见上方注释
+
+	// ---- 锁内合并 ----
+	callLog.mu.Lock()
+	if statsGen != gen {
+		// 期间发生过 clear：本次结果作废（桶已被清空），丢弃，下轮从头来。
+		callLog.mu.Unlock()
+		return
+	}
+	// 🔴🔴 **交接校验：此刻 parsedTo 必须仍等于 from，否则整批丢弃。**
+	//
+	// 这条不是防御性编程，是修一个实测稳定复现的重复计数：
+	//
+	//	from = parsedTo 在 RLock 下快照，之后**锁外**才 f.Stat() 拿 size。
+	//	中间落进一个 append，且此刻 bucketsSeeded == true →
+	//	它「写盘 + incr 进桶 + 推进 parsedTo」三件事一起做，
+	//	于是 size > from，backfill 认定 [from, size) 是待吸区间，
+	//	把 append 刚计过的那几条**又吸一遍**。
+	//
+	// 实测（4 核、单写者 goroutine 压满、2000 轮）：
+	//	落盘 4,685 条 → 桶内 7,435 条（+58%）；
+	//	更大压力下 10,472 条 → 18,686 条（+78%）。
+	//	parsedTo 精确等于文件大小，所以「吸干净了」的收尾断言照样全绿，
+	//	面板上的请求数 / token / 速度均值却永久虚高、单调发散、永不自愈。
+	//
+	// 为什么判 parsedTo 就够：parsedTo 只会变大，唯一的增大者是
+	// bucketsSeeded 为真时的 append，而那种 append 必然同时 incr 了桶 ——
+	// 正好就是「我们要重复计入的那几条」。而 bucketsSeeded 为假时
+	// append 只写文件、不碰 parsedTo、不碰桶（本函数整个解析段都是安全的），
+	// clear() 推进的 gen 已被上一行拦掉。
+	//
+	// 丢弃是安全且廉价的：这批字节没被吸、parsedTo 也没推进，
+	// 下一次调用会从同一个 from 重来。收敛性有保证 ——
+	// seeded 为真时 size > from **只可能**是窗口自身造成的，
+	// 待吸增量就是那一条 append 的长度（约 180 字节），
+	// 窗口又是微秒级，所以下次调用几乎必然走 size == from 的提前返回。
+	// 真正的大批量补吸发生在 seeded == false 期间，
+	// 那期间 parsedTo 根本不会动，100% 一次成功。
+	if parsedTo != from {
+		callLog.mu.Unlock()
+		return
+	}
+	if hourBuckets == nil {
+		hourBuckets = make(map[hourModelKey]*hourModelAgg, len(staged))
+	}
+	for k, v := range staged {
+		b := hourBuckets[k]
+		if b == nil {
+			hourBuckets[k] = v
+			continue
+		}
+		// 🔴 必须是 += ：生产日志 38.6% 乱序，新记录会落进**已存在**的小时桶
+		// （实测 610 条落进已结束的桶，最大回退 46 分钟）。
+		// 「不存在则新建并赋值」在新建分支正确、在命中分支会把旧值整个抹掉。
+		b.N += v.N
+		b.OK += v.OK
+		b.Fail += v.Fail
+		b.PT += v.PT
+		b.CT += v.CT
+		b.CC += v.CC
+		b.CR += v.CR
+		b.SpeedSum += v.SpeedSum
+		b.SpeedN += v.SpeedN
+		b.TTFTSum += v.TTFTSum
+		b.TTFTN += v.TTFTN
+	}
+	// 🔴🔴 **按快照 size 提交**，而不是「此刻的文件大小」。
+	//
+	// 反例（审查实测丢 1 条）：
+	//   Stat 得到 S → 锁外解析 [from, S) → 期间 append 又写了新字节（落在 S 之后）
+	//   → 若此刻重新 Stat 并把 parsedTo 提交成新的 size，那段字节
+	//     **既没被解析、又扫不到**（parsedTo 已越过它），永久丢失且不报错。
+	//
+	// consumed 的上界就是 from+len(buf) == S（只会因尾部半行而更小），
+	// 天然满足这条要求。注意那一小段撕裂半行正是靠「不越过换行」留给下轮的。
+	parsedTo = consumed
+	markBucketsSeededIfFullyAbsorbed(p)
+	callLog.mu.Unlock()
+}
+
 // ---- 全局环形缓冲 + JSONL 落盘 ----
 
 type callLogStore struct {
