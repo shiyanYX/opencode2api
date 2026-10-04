@@ -1423,6 +1423,11 @@ func normalizeTrendRange(rng string) string {
 // tokenStats 的 TokenStatsData 一致，但数字来自调用日志而非内存计数器——
 // 内存计数器没有时间窗，前端切时间下拉时顶部数字不会变。
 //
+// ⚠️ **生产路径已不走本函数**：/api/stats?range= 改走
+// statsRangeResponseFor(main.go)，因为它要与 trends_by_model 共用同一份窗口。
+// 本函数保留下来是给单元测试当被测入口的（生产调用方为零，别把它当热路径）。
+// 与 trendsByModelFromCallLog 不同，后者仍被 /api/stats/trends?group=model 调用。
+//
 // 窗口边界完全复用 trendBuckets(rng)：与 /api/stats/trends 是同一套边界，
 // 故同一 rng 下「本函数的逐字段求和」与「趋势桶求和」必然相等。
 //
