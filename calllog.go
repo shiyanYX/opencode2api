@@ -470,6 +470,187 @@ func ensureBucketsUpToDate() {
 	callLog.mu.Unlock()
 }
 
+// ---- 查询侧：把小时桶折叠成窗口内的统计 ----
+//
+// 🔴 三个查询函数（trendsFromCallLog / trendsByModelFromCallLog /
+// modelStatsFromCallLog）从这里开始，全部改读内存桶，**不再 os.ReadFile 日志文件**。
+// 唯一还在读文件的是 ensureBucketsUpToDate，且它只读「上次之后新增的那一段」。
+
+// callLogFileExists 报告调用日志文件是否存在。
+// 用途：trendsFromCallLog 需要区分「文件不存在」与「文件为空」——
+// 前者必须返回 nil（handler 转成 []），否则冷进程上热力图会拿到 180 个零值点。
+func callLogFileExists() bool {
+	callLog.mu.RLock()
+	p := callLog.path
+	callLog.mu.RUnlock()
+	if p == "" {
+		return false
+	}
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// sortedBucketKeysLocked 返回按 (Hour, Model) 升序排好的全部桶键。
+// 调用方必须持有 callLog.mu（读或写锁皆可）。
+//
+// 🔴 **必须排序**：Go 的 map 遍历顺序是随机化的。直接 `for k := range hourBuckets`
+// 会让同一份数据两次查询的浮点累加顺序不同 → 同一请求连发两次的
+// avg_ttft_ms / avg_output_speed 不一致，「逐字节相同」在浮点字段上永远不成立。
+// 排序把累加顺序钉死成「小时升序、模型名升序」，与文件里的行序无关，因而可复现。
+func sortedBucketKeysLocked() []hourModelKey {
+	keys := make([]hourModelKey, 0, len(hourBuckets))
+	for k := range hourBuckets {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Hour != keys[j].Hour {
+			return keys[i].Hour < keys[j].Hour
+		}
+		return keys[i].Model < keys[j].Model
+	})
+	return keys
+}
+
+// bucketIndexOf 把「本地整点」的桶键还原成窗口内的桶下标；窗口外返回 -1。
+//
+// 🔴 窗口边界**只由 bidx 决定**，这里绝不复制 dayIdx / today 那套算式。
+// dayIdx 依赖本地零点 + 24 小时除法，把它的算式抄一份就等于埋一个分叉：
+// 改 TZ 或遇 DST 时两份算式会各自演化，最终 models 与 trends_by_model 落进不同窗口。
+// hourModelKey.Hour 是「本地整点」，time.Unix 还原回该本地时刻后交回 bidx 判定，
+// 边界语义与改造前逐字一致（改造前喂给 bidx 的是记录的时间戳，
+// 而记录所属的小时键正是由同一个 hourKeyFor 截到整点得到的）。
+//
+// 已知边界（真实但有界）：today 是滚动 24h，start 由 time.Truncate(time.Hour)
+// 得到，而 Truncate 截的是**绝对时间**，在 UTC 偏移不是整小时的时区
+// （+05:30 / +05:45 等）会与本地整点网格错开半个 / 四分之三小时。
+// 那种时区里，[HH:30, HH+1:00) 的记录会被归到前一个桶下标。
+// 7d/30d/180d 不受影响：日桶边界是本地零点，本地整点永远不会跨过本地零点。
+// 本项目部署时区为 +08:00（整小时偏移），不落在该边界内。
+func bucketIndexOf(hour int64, n int, bidx func(time.Time) int) int {
+	i := bidx(time.Unix(hour, 0).Local())
+	if i < 0 || i >= n {
+		return -1
+	}
+	return i
+}
+
+// mergeAggTo 把源桶累加进目标桶。字段逐字对齐 hourModelAgg。
+func mergeAggTo(dst *hourModelAgg, s *hourModelAgg) {
+	dst.N += s.N
+	dst.OK += s.OK
+	dst.Fail += s.Fail
+	dst.PT += s.PT
+	dst.CT += s.CT
+	dst.CC += s.CC
+	dst.CR += s.CR
+	dst.SpeedSum += s.SpeedSum
+	dst.SpeedN += s.SpeedN
+	dst.TTFTSum += s.TTFTSum
+	dst.TTFTN += s.TTFTN
+}
+
+// foldBuckets 把小时桶折叠进 trendBuckets 给定的窗口，返回每个桶索引的聚合值。
+//
+// 本函数**自己调 ensureBucketsUpToDate**：任何读桶之前必须先把未吸的字节吸进来。
+// 反过来做（先折叠、末尾才 ensure）会让冷启动首次查询拿到空模型表。
+func foldBuckets(ts []string, bidx func(time.Time) int) map[int]*hourModelAgg {
+	ensureBucketsUpToDate()
+
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+
+	out := make(map[int]*hourModelAgg)
+	for _, k := range sortedBucketKeysLocked() {
+		i := bucketIndexOf(k.Hour, len(ts), bidx)
+		if i < 0 {
+			continue
+		}
+		dst := out[i]
+		if dst == nil {
+			dst = &hourModelAgg{}
+			out[i] = dst
+		}
+		mergeAggTo(dst, hourBuckets[k])
+	}
+	return out
+}
+
+// foldBucketsByModel 保留模型维度地折叠小时桶：模型名 → 桶索引 → 聚合值。
+//
+// 为什么不复用 foldBuckets：那个函数把模型维度折叠掉了，
+// 而这里必须逐模型输出整张网格（否则前端折线断裂）。
+//
+// 🔴 本函数**不调 ensureBucketsUpToDate**，调用方必须自己先调。
+// （早先版本里它靠「trendsFromCallLog 恰好也调了 foldBuckets」被顺带喂活，
+//
+//	那掩盖了这个洞：一旦只有本函数被调用就会返回空。）
+func foldBucketsByModel(ts []string, bidx func(time.Time) int) map[string]map[int]*hourModelAgg {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+
+	out := make(map[string]map[int]*hourModelAgg)
+	for _, k := range sortedBucketKeysLocked() {
+		i := bucketIndexOf(k.Hour, len(ts), bidx)
+		if i < 0 {
+			continue
+		}
+		m := out[k.Model]
+		if m == nil {
+			m = make(map[int]*hourModelAgg)
+			out[k.Model] = m
+		}
+		dst := m[i]
+		if dst == nil {
+			dst = &hourModelAgg{}
+			m[i] = dst
+		}
+		mergeAggTo(dst, hourBuckets[k])
+	}
+	return out
+}
+
+// sortedModelsInWindow 返回窗口内出现过请求的模型名（升序）。
+// 等价于改造前在 callback 内建键的行为（先过滤窗口再建键）。
+//
+// 注意 model == "" 是合法键，**不要过滤**——过滤会让面板的
+// 「新增输入 + Output + 命中 == 真实消耗」这条闭合不变量红。
+func sortedModelsInWindow(ts []string, bidx func(time.Time) int) []string {
+	callLog.mu.RLock()
+	set := make(map[string]bool)
+	for k := range hourBuckets {
+		if bucketIndexOf(k.Hour, len(ts), bidx) < 0 {
+			continue
+		}
+		set[k.Model] = true
+	}
+	callLog.mu.RUnlock()
+	out := make([]string, 0, len(set))
+	for m := range set {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// foldOneModel 把某模型的所有窗口内桶合并成一个值。
+//
+// 🔴 遍历顺序按 (Hour, Model) 排序而非 map 随机序，理由同 sortedBucketKeysLocked。
+func foldOneModel(name string, ts []string, bidx func(time.Time) int) *hourModelAgg {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	var dst hourModelAgg
+	for _, k := range sortedBucketKeysLocked() {
+		if k.Model != name {
+			continue
+		}
+		if bucketIndexOf(k.Hour, len(ts), bidx) < 0 {
+			continue
+		}
+		mergeAggTo(&dst, hourBuckets[k])
+	}
+	return &dst
+}
+
 // ---- 全局环形缓冲 + JSONL 落盘 ----
 
 type callLogStore struct {
@@ -1080,6 +1261,16 @@ func trendBuckets(rng string) ([]string, func(time.Time) int) {
 
 // forEachBucketedCallRecord 用给定的桶配置遍历落在区间内的调用记录，
 // fn 收到记录与桶索引。返回 false 表示日志文件不可读。
+//
+// ⚠️ **Task 8 起本函数不再有任何生产调用方**：三个聚合函数已改读内存小时桶。
+// 它被保留下来有两层作用：
+//  1. **测试基准**——对拍用例（TestBucketsMatchLegacyScan 等）用它算出「旧实现」的真值，
+//     再与读桶的结果逐字段比对。它是改造前后唯一能同时跑通的参照系。
+//  2. 它仍是**扫文件语义的唯一在册实现**：若日后要改窗口边界，
+//     改桶路径之前可以先用它确认旧语义没有被理解错。
+//
+// 别把它当生产热路径，也别顺手删掉——删了对拍用例就失去基准。
+// 若将来确认对拍用例也已迁移完毕，删除前请先确认没有任何测试再引用它。
 func forEachBucketedCallRecord(ts []string, bidx func(time.Time) int, fn func(rec CallRecord, bucket int)) bool {
 	// 只读 path，用 RLock。
 	// ⚠️ fn 仍在 Unlock **之后**调用（下面那个循环里），顺序不能动：
@@ -1116,24 +1307,34 @@ func forEachBucketedCallRecord(ts []string, bidx func(time.Time) int, fn func(re
 }
 
 // 路径未初始化或文件缺失时返回空数组
+//
+// Task 8：数据来源从「扫文件」换成「读小时桶」，与改造前逐字段等价。
 func trendsFromCallLog(rng string) []TrendsPoint {
 	ts, bidx := trendBuckets(rng)
 	buckets := make([]TrendsPoint, len(ts))
 	for i, label := range ts {
 		buckets[i] = TrendsPoint{TS: label}
 	}
-	if !forEachBucketedCallRecord(ts, bidx, func(rec CallRecord, i int) {
-		buckets[i].Requests++
-		if rec.Status == "ok" {
-			buckets[i].OK++
-		} else {
-			buckets[i].Fail++
+	// foldBuckets 内部先 ensureBucketsUpToDate 再读桶，顺序不能调换。
+	for i, a := range foldBuckets(ts, bidx) {
+		if i < 0 || i >= len(buckets) {
+			continue
 		}
-		buckets[i].PromptTokens += rec.PromptTokens
-		buckets[i].CompletionTokens += rec.CompletionTokens
-		buckets[i].CacheCreation += rec.CacheCreation
-		buckets[i].CacheRead += rec.CacheRead
-	}) {
+		buckets[i].Requests += a.N
+		buckets[i].OK += a.OK
+		buckets[i].Fail += a.Fail
+		buckets[i].PromptTokens += a.PT
+		buckets[i].CompletionTokens += a.CT
+		buckets[i].CacheCreation += a.CC
+		buckets[i].CacheRead += a.CR
+	}
+	// 日志文件缺失时返回 nil，交给 handler 的 `if pts == nil` 转成 []。
+	//
+	// 为什么必须保留这个分支：冷进程上 /api/stats/trends?range=180d 会得到
+	// 180 个全零对象，前端热力图会画出一条「全 0」的假曲线。
+	// 桶化后「文件不存在」与「文件为空」在桶层面确实不可区分，
+	// 所以判定必须直接看文件在不在，而不是看桶空不空。
+	if !callLogFileExists() {
 		return nil
 	}
 	return buckets
@@ -1142,37 +1343,52 @@ func trendsFromCallLog(rng string) []TrendsPoint {
 // trendsByModelFromCallLog 在 trendsFromCallLog 的切分基础上按模型再分一层。
 // 对区间内出现过请求的每个模型输出全部桶（无数据填零），保证该模型的折线
 // 覆盖整个区间而非只在有流量的几天出现。输出顺序：模型名升序，桶索引升序。
+//
+// Task 8：数据来源从「扫文件」换成「读小时桶」，与改造前逐字段等价。
+//
+// 模型键集的判定与改造前等价：只在窗口内的桶里出现过才输出
+// （改造前是在 callback 内先按窗口过滤再建键）。
+// 注意 model == "" 是合法键，不要过滤——过滤会让
+// 「新增输入+Output+命中 == 真实消耗」这条闭合不变量红。
+//
+// ⚠️ 本函数与 modelStatsFromCallLog 各自调一次 trendBuckets，而它内部取 time.Now()。
+// 跨整点时，同一个 /api/stats?range= 响应里 models 与 trends_by_model
+// 会落在不同窗口（改造前两者相隔约一次全量扫描 ~1.9s；Task 8 后相隔约 50µs，
+// 概率降到约 1.4e-8/次，但仍非零）。
+// 彻底消除需要让两者共用同一份窗口，那要在 main.go 的 adminStatsHandler 里
+// 合并成一趟 —— 超出本任务「只改 calllog.go」的范围，故只在此标注。
+// 其可观测后果（两字段互相矛盾）由 TestTodayRangeResponseModelsAndTrendsAgree 守着。
 func trendsByModelFromCallLog(rng string) []ModelTrendPoint {
+	// 🔴 必须在读桶之前 ensure。foldBucketsByModel 自己不调 ensure。
+	ensureBucketsUpToDate()
 	ts, bidx := trendBuckets(rng)
-	idx := make(map[string][]ModelTrendPoint)
-	forEachBucketedCallRecord(ts, bidx, func(rec CallRecord, i int) {
-		row, ok := idx[rec.Model]
-		if !ok {
-			row = make([]ModelTrendPoint, len(ts))
-			for j, label := range ts {
-				row[j] = ModelTrendPoint{TS: label, Model: rec.Model}
-			}
-			idx[rec.Model] = row
-		}
-		row[i].Requests++
-		if rec.Status == "ok" {
-			row[i].OK++
-		} else {
-			row[i].Fail++
-		}
-		row[i].PromptTokens += rec.PromptTokens
-		row[i].CompletionTokens += rec.CompletionTokens
-		row[i].CacheCreation += rec.CacheCreation
-		row[i].CacheRead += rec.CacheRead
-	})
-	models := make([]string, 0, len(idx))
-	for m := range idx {
-		models = append(models, m)
+	per := foldBucketsByModel(ts, bidx)
+
+	models := make([]string, 0, len(per))
+	for name := range per {
+		models = append(models, name)
 	}
 	sort.Strings(models)
+
 	out := make([]ModelTrendPoint, 0, len(models)*len(ts))
-	for _, m := range models {
-		out = append(out, idx[m]...)
+	for _, name := range models {
+		row := make([]ModelTrendPoint, len(ts))
+		for j, label := range ts {
+			row[j] = ModelTrendPoint{TS: label, Model: name}
+		}
+		for bi, a := range per[name] {
+			if bi < 0 || bi >= len(row) {
+				continue
+			}
+			row[bi].Requests += a.N
+			row[bi].OK += a.OK
+			row[bi].Fail += a.Fail
+			row[bi].PromptTokens += a.PT
+			row[bi].CompletionTokens += a.CT
+			row[bi].CacheCreation += a.CC
+			row[bi].CacheRead += a.CR
+		}
+		out = append(out, row...)
 	}
 	return out
 }
@@ -1222,32 +1438,54 @@ func normalizeTrendRange(rng string) string {
 // 日志文件不可读（全新安装尚未落盘、或被 DELETE 清掉）时返回**非 nil** 的空结构：
 // 返回 nil 指针会序列化成 "models":null，前端 renderStats 直接炸
 // （本项目在 69ab7dd 踩过一次）。
+//
+// Task 8：数据来源从「扫文件」换成「读小时桶」，与改造前逐字段等价。
 func modelStatsFromCallLog(rng string) *TokenStatsData {
+	// ⚠️ 必须在这里、且在读桶【之前】调用。
+	// sortedModelsInWindow 与 foldOneModel 都要读桶，而冷启动时桶是空的
+	// （要等第一次查询才 backfill）。若把 ensure 放在末尾，
+	// out.Models 会是空的而 out.TotalRequests 正常——
+	// API 返回 {"models":{},"total_requests":186212}，
+	// 数字在、模型全空、不报错、面板一片空白。
+	ensureBucketsUpToDate()
 	rng = normalizeTrendRange(rng)
 	ts, bidx := trendBuckets(rng)
 	out := &TokenStatsData{Models: map[string]*ModelStats{}}
-	if !forEachBucketedCallRecord(ts, bidx, func(rec CallRecord, _ int) {
-		ms, ok := out.Models[rec.Model]
-		if !ok {
-			ms = &ModelStats{}
-			out.Models[rec.Model] = ms
+
+	for _, name := range sortedModelsInWindow(ts, bidx) {
+		a := foldOneModel(name, ts, bidx)
+		ms := &ModelStats{
+			RequestCount:       a.N,
+			PromptTokens:       a.PT,
+			CompletionTokens:   a.CT,
+			TotalTokens:        a.PT + a.CT,
+			CacheReadTokens:    a.CR,
+			CacheCreatedTokens: a.CC,
+			StreamReqCount:     a.SpeedN,
 		}
-		out.TotalRequests++
-		ms.RequestCount++
-		ms.PromptTokens += rec.PromptTokens
-		ms.CompletionTokens += rec.CompletionTokens
-		ms.TotalTokens += rec.PromptTokens + rec.CompletionTokens
-		ms.CacheReadTokens += rec.CacheRead
-		ms.CacheCreatedTokens += rec.CacheCreation
-		if rec.Model == "" || rec.OutputSpeed <= 0 {
-			return
+		// 速度均值用 Σsum/Σn，**不是**各桶平均的平均——
+		// 后者过度加权小桶（实测 space-bunny-free 在 30d 窗口偏 -23.67%）。
+		// 与 recordModelSpeed 的增量均值数学等价但浮点不逐位相等（相对差 ~1e-16），
+		// UI 显示到 0.1 t/s 不可见。**不可修**：逐位一致要按桶顺序重放增量平均，
+		// 复杂度回到 O(记录数)，与 O(桶数) 的目标冲突。
+		//
+		// 两个计数各自判零（hourModelAgg.add 里 SpeedN 与 TTFTN 恒同步增减，
+		// 但不必依赖这条不变式）：写成同一个 if 时一旦两者发散就是 0/0 = NaN，
+		// 而 encoding/json 遇 NaN 直接报错，整个 /api/stats?range= 响应变 500。
+		if a.SpeedN > 0 {
+			ms.AvgOutputSpeed = a.SpeedSum / float64(a.SpeedN)
 		}
-		ms.StreamReqCount++
-		n := float64(ms.StreamReqCount)
-		ms.AvgTTFTMs += (float64(rec.TTFTMs) - ms.AvgTTFTMs) / n
-		ms.AvgOutputSpeed += (rec.OutputSpeed - ms.AvgOutputSpeed) / n
-	}) {
-		return &TokenStatsData{Models: map[string]*ModelStats{}}
+		if a.TTFTN > 0 {
+			ms.AvgTTFTMs = a.TTFTSum / float64(a.TTFTN)
+		}
+		out.Models[name] = ms
+		// 🔴 total_requests 与 models 取自**同一个 a**，不是再独立折叠一遍。
+		// 两者数值恒等（都是窗口内按模型切分的同一批桶的请求数之和），
+		// 但独立折叠要多一趟全桶扫描，且中间还夹着一次加解锁——
+		// 并发 append 正好落在两次取锁之间时，Σmodel.request_count 与
+		// total_requests 会差一条，面板上「合计对不上分项」。
+		// 从同一个 a 累加让这条不变式变成构造上成立，不依赖任何时刻的巧合。
+		out.TotalRequests += a.N
 	}
 	return out
 }
