@@ -6884,6 +6884,39 @@ type statsRangeResponse struct {
 	TrendsByModel []ModelTrendPoint `json:"trends_by_model"`
 }
 
+// statsRangeResponseFor 组装 GET /api/stats?range=X 的响应。
+//
+// 🔴 存在的唯一理由是**只取一次窗口**：models 与 trends_by_model 是同一份
+// 响应里的两个字段，若各自调 trendBuckets（内部取 time.Now()），两次取窗口之间
+// 跨过整点/午夜就会让两者落在不同窗口——面板上「合计」与「分项之和」互相矛盾，
+// 而且不报错。实测（把时钟每次调用推进 2 小时）：同一响应里
+// Σmodels=24 而 Σtrends_by_model=22，差 2。
+//
+// 所以这里只调**一次** trendBuckets，把同一份 ts/bidx 喂给两个内核。
+// ensureBucketsUpToDate 也只在这里调一次（幂等，少调一次不改变语义）；
+// 绝不能把它删掉——冷启动时桶是空的，删了会返回
+// {"models":{},"total_requests":N}：数字在、模型全空、不报错、面板一片空白。
+//
+// ⚠️ 这里共享的是**窗口**而不是**快照**：两个内核各自取 RLock 读桶，
+// 中间落进一次 callLog.append 仍会让两半对不上。要根治需单快照折叠
+// （一次 RLock 内把桶拷出来、两个折叠都从副本算）——那是延后决策，不在本次范围。
+func statsRangeResponseFor(rng string) statsRangeResponse {
+	// ⚠️ 必须在这里、且在读桶【之前】调用。理由见上方注释。
+	ensureBucketsUpToDate()
+	// 窗口外的记录一律不计；rng 归一规则与 adminTrendsHandler 一致
+	rng = normalizeTrendRange(rng)
+	ts, bidx := trendBuckets(rng)
+
+	out := statsRangeResponse{
+		TokenStatsData: *modelStatsWithBuckets(ts, bidx),
+		TrendsByModel:  trendsByModelWithBuckets(ts, bidx),
+	}
+	if out.TrendsByModel == nil {
+		out.TrendsByModel = []ModelTrendPoint{}
+	}
+	return out
+}
+
 // adminStatsHandler 令牌用量统计。
 // GET 不带 range 时逐字返回内存累计计数器（向后兼容红线，勿改 json.Marshal 那一段）；
 // 带 ?range=today|7d|30d|180d 时改由调用日志按窗口重算，数字随时间窗变化。
@@ -6891,15 +6924,7 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		if rng := r.URL.Query().Get("range"); rng != "" {
-			// 窗口外的记录一律不计；rng 归一规则与 adminTrendsHandler 一致
-			rng = normalizeTrendRange(rng)
-			out := statsRangeResponse{
-				TokenStatsData: *modelStatsFromCallLog(rng),
-				TrendsByModel:  trendsByModelFromCallLog(rng),
-			}
-			if out.TrendsByModel == nil {
-				out.TrendsByModel = []ModelTrendPoint{}
-			}
+			out := statsRangeResponseFor(rng)
 			data, err := json.Marshal(out)
 			if err != nil {
 				http.Error(w, `{"error":"marshal error"}`, http.StatusInternalServerError)

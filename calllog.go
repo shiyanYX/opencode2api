@@ -1352,16 +1352,29 @@ func trendsFromCallLog(rng string) []TrendsPoint {
 // 「新增输入+Output+命中 == 真实消耗」这条闭合不变量红。
 //
 // ⚠️ 本函数与 modelStatsFromCallLog 各自调一次 trendBuckets，而它内部取 time.Now()。
-// 跨整点时，同一个 /api/stats?range= 响应里 models 与 trends_by_model
-// 会落在不同窗口（改造前两者相隔约一次全量扫描 ~1.9s；Task 8 后相隔约 50µs，
-// 概率降到约 1.4e-8/次，但仍非零）。
-// 彻底消除需要让两者共用同一份窗口，那要在 main.go 的 adminStatsHandler 里
-// 合并成一趟 —— 超出本任务「只改 calllog.go」的范围，故只在此标注。
-// 其可观测后果（两字段互相矛盾）由 TestTodayRangeResponseModelsAndTrendsAgree 守着。
+// 单看任一个函数都无从察觉，但把两者放进**同一个响应**就会露馅：
+// 两次取窗口之间若跨过整点/午夜，同一份 /api/stats?range= 响应里 models 与
+// trends_by_model 会落在不同窗口，两个数字互相矛盾且不报错。
+//
+// 这条路径已修：adminStatsHandler 走 statsRangeResponseFor（main.go），
+// 两个折叠共用同一份 ts/bidx。本函数保留给 /api/stats/trends?group=model
+// 那条独立路径——那条路径只出一个字段，不存在「同响应两半互相矛盾」。
+//
+// ⚠️ 修法只共享了**窗口**，不是**快照**：即便共用 ts/bidx，一次并发的
+// callLog.append 仍会让两半对不上（P ≈ append 速率 × models 折叠耗时）。
+// 根治要单快照折叠（一次 RLock 内把桶拷出来、两个折叠都从副本算），属延后决策。
 func trendsByModelFromCallLog(rng string) []ModelTrendPoint {
 	// 🔴 必须在读桶之前 ensure。foldBucketsByModel 自己不调 ensure。
 	ensureBucketsUpToDate()
 	ts, bidx := trendBuckets(rng)
+	return trendsByModelWithBuckets(ts, bidx)
+}
+
+// trendsByModelWithBuckets 是 trendsByModelFromCallLog 的内核：
+// 接收**已经算好的**窗口配置，自己不再取 time.Now()。
+// 这是让同一响应的两个折叠共用同一份窗口的前提——只要有一方自己调
+// trendBuckets，「同窗」就无从保证。
+func trendsByModelWithBuckets(ts []string, bidx func(time.Time) int) []ModelTrendPoint {
 	per := foldBucketsByModel(ts, bidx)
 
 	models := make([]string, 0, len(per))
@@ -1450,6 +1463,14 @@ func modelStatsFromCallLog(rng string) *TokenStatsData {
 	ensureBucketsUpToDate()
 	rng = normalizeTrendRange(rng)
 	ts, bidx := trendBuckets(rng)
+	return modelStatsWithBuckets(ts, bidx)
+}
+
+// modelStatsWithBuckets 是 modelStatsFromCallLog 的内核：
+// 接收**已经算好的**窗口配置，自己不再取 time.Now()，也不再调 ensure。
+// 与 trendsByModelWithBuckets 成对存在，让 statsRangeResponseFor
+// 能把同一份窗口喂给两个折叠（见该函数的注释）。
+func modelStatsWithBuckets(ts []string, bidx func(time.Time) int) *TokenStatsData {
 	out := &TokenStatsData{Models: map[string]*ModelStats{}}
 
 	for _, name := range sortedModelsInWindow(ts, bidx) {
