@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -160,7 +161,72 @@ var (
 	// ⚠️ Task 7 实现 backfill 时**必须复用本标志**，不要另起一个：
 	// 重复声明会编译失败，语义分叉则会重演上面的错位。
 	bucketsSeeded bool
+
+	// absorbedRecords 是「已吸收的记录条数」，**只在消费字节的地方**自增，
+	// 与 parsedTo 同一处语句、同一临界区。它是**消费侧**的账
+	//（「我们从文件里读掉了多少行」）；hourBuckets 是**计数侧**的账
+	// （「桶里说有多少条」）。两条账在不同的语句里推进，
+	// 「Σ N == absorbedRecords - unabsorbedRecords」才不是恒等式。
+	//
+	// 🔴 **绝不能把自增挪到 add() 旁边**：那样就退化成
+	// 「桶加了什么、计数器就加了什么」，恒等式恒成立，什么都检不出。
+	// 锚点必须是「字节被消费」——那也正是 parsedTo 的锚点。
+	absorbedRecords int64
+	// unabsorbedRecords 是 absorbedRecords 里**消费了但没有 add 进桶**的条数：
+	// 结构性截断的坏行、以及 ts 解析不出整点的行。
+	//
+	// 它存在的原因是判据必须容许「合法的不等」：backfill 对坏行的既定行为是
+	// 「推进 parsedTo、跳过 add」（见解析段的注释），那条行从此不再被重扫。
+	// 若把它算作损坏，一个含坏行的文件会让**每次查询**都触发一次全量重扫。
+	unabsorbedRecords int64
+	// bucketRebuilds 累计自愈重建次数（诊断用：暴露「桶到底坏没坏过」）。
+	// bucketRebuildNotBefore 是下一次允许重建的最早时刻（退避窗口的末端）。
+	//
+	// 两者写于 rebuildBucketsIfDue 的写锁内，而**唯一的读点也在
+	// ensureBucketsUpToDate 内部**（那里持着 absorbMu），故实际受
+	// absorbMu + callLog.mu 双重保护；任何新的读点都必须同样待在 absorbMu 内，
+	// 否则 -race 会报。
+	bucketRebuilds         uint64
+	bucketRebuildNotBefore time.Time
 )
+
+// bucketNSumLocked 返回 Σ N over hourBuckets。
+// 调用方必须持有 callLog.mu（读或写锁皆可）。
+//
+// 🔴 **遍历 map 必须在锁内**：RWMutex 挡不住并发 map 写，
+// 无锁遍历时落进一个 append 就是
+// fatal error: concurrent map iteration and map write —— recover() 无效，直接杀进程。
+func bucketNSumLocked() int64 {
+	var n int64
+	for _, a := range hourBuckets {
+		n += a.N
+	}
+	return n
+}
+
+// checkBucketConservation 是守恒检查本体：返回 (Σ N, absorbed, unabsorbed, 是否守恒)。
+//
+// 它在**自己的读锁内**完成遍历与取数，不要求调用方持锁 —— 调用方（查询路径）
+// 此刻并没有锁，硬塞进去反而要求把整条查询链包进锁里。
+//
+// 判据 `Σ N == absorbedRecords - unabsorbedRecords`：
+//   - absorbedRecords 数「从文件里消费掉的完整行」，是**消费侧**的账；
+//   - Σ N 是「桶里说的条数」，是**计数侧**的账；
+//   - unabsorbedRecords 数其中「消费了但没进桶」的（坏行 / ts 解析失败），
+//     它把**合法的不等**从判据里扣掉。
+//
+// unabsorbed <= absorbed 由构造保证（每个 skip 必有一个 consume），
+// 显式判一次是为了让「计数器自身被写坏」也走重建，而不是算出个巨大差值。
+//
+// 实测成本（673 个桶，-benchtime 2s）：8580 ns/op（8.6 µs，含读锁），
+// 而一次 /api/stats 查询本身 ~170 µs —— 占 5%，故**每次查询都做，不节流**。
+func checkBucketConservation() (sum, absorbed, unabsorbed int64, ok bool) {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	sum = bucketNSumLocked()
+	return sum, absorbedRecords, unabsorbedRecords,
+		unabsorbedRecords <= absorbedRecords && sum == absorbedRecords-unabsorbedRecords
+}
 
 // hourKeyFor 由记录时间戳算出桶键。解析失败返回 false。
 func hourKeyFor(ts string, model string) (hourModelKey, bool) {
@@ -241,6 +307,21 @@ func markBucketsSeededIfFullyAbsorbed(p string) {
 	bucketsSeeded = true
 }
 
+// resetAbsorbedStateLocked 把「已吸收」的全局状态整体清零。
+// 调用方必须持有 callLog.mu **写锁**；bucketsSeeded 由调用方自己定
+// （clear/open 失败后置 true，截短与自愈重建后置 false —— 见各处注释）。
+//
+// 🔴 **凡是 parsedTo = 0 的地方都必须走它**，漏掉任何一处都会让下一次查询
+// 必然判不一致 → 触发一次全量重扫（真实数据 ~350ms）。
+// 用户每点一次「清空」就吃一发，且重建把 bucketsSeeded 打回 false 之后
+// append 会退回「只写文件不 incr」，统计还要再晚一轮才对。
+func resetAbsorbedStateLocked() {
+	hourBuckets = nil
+	parsedTo = 0
+	absorbedRecords = 0
+	unabsorbedRecords = 0
+}
+
 // handleBackfillOpenError 处理日志文件打不开的情况。
 //
 // 🔴 **必须判 os.IsNotExist，不能只判「Stat 是否成功」**。
@@ -269,9 +350,55 @@ func handleBackfillOpenError(p string, gen uint64) {
 	if _, err := os.Stat(p); !os.IsNotExist(err) {
 		return // 文件还在（或只是打不开，不是不存在）：桶一个字节都不许动
 	}
-	hourBuckets = nil
-	parsedTo = 0
+	resetAbsorbedStateLocked()
 	bucketsSeeded = true
+}
+
+// bucketRebuildBackoff 是两次自愈重建之间的最小间隔。
+//
+// 定 30s 的理由：重建 = 一次全量重扫，真实数据实测 ~350ms。
+// 30s 把「持续损坏」的最坏开销压到 350ms/30s ≈ 1.2%；再短的话，
+// 面板一次刷新并发拉 3 个 stats 接口就可能连续触发重建，
+// 于是**自愈机制本身变成故障放大器** —— 桶一坏，服务就彻底不可用。
+//
+// ⚠️ **状态恢复之后不许把这个窗口清零**：清零会让
+// 「重建 → 修好 → 立刻又坏」退化成每次查询一次全量重扫，正是上面要防的。
+const bucketRebuildBackoff = 30 * time.Second
+
+// rebuildBucketsIfDue 在**持有 callLog.mu 写锁**时复核不变量；
+// 确实不一致、且退避窗口已过，才整体丢弃旧桶、把吸收状态归零。
+// 返回是否真的重建了。调用方必须持有 absorbMu（故不存在并发的 backfill）。
+//
+// 为什么是**重建**而不是「回退到第二套查询实现」：
+// 回退会让**检测能力在降级那一刻自我摧毁** —— 桶错了所以改用旧实现，
+// 可旧实现无人验证、下一次对拍因为「桶不可信」而无法运行，
+// 于是再没有任何东西能发现它也已经错了。重建没有这个问题：
+// 下一次吸收走的是**已经被冷启动跑过无数次的同一条 backfill 路径**，
+// 不需要新代码、不需要新语义，吸收完自动回到可检验状态。
+//
+// 🔴 重建是**整体丢弃**旧桶（resetAbsorbedStateLocked 把 map 置 nil），
+// 绝不与新桶 +=：+= 会把已经错了的数字原样带进新桶，错误被永久固化
+// 且此后每次重建都再叠一层。
+//
+// 🔴 写锁内**只做内存操作**，全量重扫在锁外由调用方重跑 absorbOnce 完成
+// （持写锁重扫会让每个在途代理请求的收尾阻塞 350ms）。
+func rebuildBucketsIfDue() bool {
+	callLog.mu.Lock()
+	defer callLog.mu.Unlock()
+	// 复核：checkBucketConservation 的读锁与此刻之间可能落进一个 clear()，
+	// 它把状态清成自洽的 0/0。此时重建纯属自伤 —— 白吃一次全量重扫，
+	// 还把 bucketsSeeded 打回 false，让 append 退回「只写文件不 incr」。
+	if n := bucketNSumLocked(); n != absorbedRecords-unabsorbedRecords {
+		if time.Now().Before(bucketRebuildNotBefore) {
+			return false
+		}
+		bucketRebuildNotBefore = time.Now().Add(bucketRebuildBackoff)
+		resetAbsorbedStateLocked()
+		bucketsSeeded = false
+		bucketRebuilds++
+		return true
+	}
+	return false
 }
 
 // ensureBucketsUpToDate 把 [parsedTo, EOF) 区间吸收进桶。无新增时立即返回。
@@ -284,10 +411,59 @@ func handleBackfillOpenError(p string, gen uint64) {
 // 🔴 **绝不能持有 callLog.mu 做全量解析**：那会让每个在途代理请求的收尾
 // （callLog.append）阻塞整个解析时长 —— 比现在更糟：现在只是面板慢。
 // 因此这里锁外读取与解析、锁内合并。合并段是纯内存 O(桶数) 操作。
+//
+// 本函数同时是**守恒检查的唯一入口**：每次查询顺手做，零启动成本。
+//
+// 为什么检查放在这里、且每次查询都做（不节流）：
+//   - 覆盖面：它是每个 stats 查询的必经之路（statsRangeResponseFor 只调它一次，
+//     trends / trendsByModel / modelStats 三条路都经过它），且**在吸收之后**，
+//     于是写入侧 incr 路径也一并被检验 —— 这正是「启动时全量对拍」做不到的
+//     （对拍只在 backfill 之后跑，而 backfill 期间 append 只写文件不碰桶，
+//     对写入侧的覆盖率是 0）。
+//   - 成本：实测 673 个桶 8.6 µs/次（-benchtime 2s），一次 /api/stats 查询
+//     本身 ~170 µs，占 5%。为它加节流只会多引入一个「什么时候漏检」的分支。
+//   - 检查在锁**外**：checkBucketConservation 自己取读锁遍历 map。
+//     放在调用方的锁里既做不到（读锁不可重入），也没必要 —— 它遍历的是
+//     已提交的稳定状态，而 absorbMu 已经把并发 backfill 排开了。
 func ensureBucketsUpToDate() {
 	// single-flight：进入即取锁，第二个调用者在这里排队等待。
 	absorbMu.Lock()
 	defer absorbMu.Unlock()
+
+	// 守恒 → 不守恒就重建 → **本函数自己再吸收一轮**。
+	// 重建后不立刻重吸的话，这次查询会拿全零桶去折叠，
+	// 面板先闪一轮 0，得等下一次刷新才对 —— 自愈不该让用户看见中间态。
+	// 循环至多两轮：第二轮仍不一致就只报不重建（退避窗口也是这么兜底的）。
+	for rebuilt := false; ; rebuilt = true {
+		absorbOnce()
+		sum, absorbed, unabsorbed, ok := checkBucketConservation()
+		if ok {
+			return
+		}
+		if rebuilt || !rebuildBucketsIfDue() {
+			// WARN 而不是 ERROR：桶坏了面板数字会错，但代理转发本身好好的。
+			// 日志在**锁外**打 —— 持写锁做同步 I/O 会连带阻塞在途 append。
+			slog.Warn("calllog: hour buckets inconsistent, stats may be wrong",
+				"buckets_n", sum, "expected_n", absorbed-unabsorbed,
+				"absorbed", absorbed, "unabsorbed", unabsorbed,
+				"rebuilds", bucketRebuilds, "backoff", bucketRebuildBackoff,
+				"path", callLogFilePath())
+			return
+		}
+		// 重建了：回到循环头再吸收一轮（锁外全量重扫，不阻塞在途 append）
+	}
+}
+
+// callLogFilePath 只读 path 供日志用。
+func callLogFilePath() string {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	return callLog.path
+}
+
+// absorbOnce 是 ensureBucketsUpToDate 的吸收本体（不含 single-flight 与守恒检查）。
+// 调用方**必须持有 absorbMu**。
+func absorbOnce() {
 
 	// ---- 锁外快照：路径、起点、generation ----
 	callLog.mu.RLock()
@@ -325,8 +501,7 @@ func ensureBucketsUpToDate() {
 			callLog.mu.Unlock()
 			return
 		}
-		hourBuckets = nil
-		parsedTo = 0
+		resetAbsorbedStateLocked()
 		bucketsSeeded = false
 		callLog.mu.Unlock()
 		from = 0
@@ -356,6 +531,10 @@ func ensureBucketsUpToDate() {
 
 	staged := make(map[hourModelKey]*hourModelAgg, 512)
 	consumed := from
+	// lines 记本轮真正被消费的**完整行数**，skipped 记其中「消费了却没进桶」的条数。
+	// 两者都只在本轮成功提交时才并进全局（见下方提交段）。
+	lines := int64(0)
+	skipped := int64(0)
 	for pos := 0; pos < len(buf); {
 		rel := bytes.IndexByte(buf[pos:], '\n')
 		if rel < 0 {
@@ -366,9 +545,11 @@ func ensureBucketsUpToDate() {
 		// 🔴 坏行**也必须**推进 consumed：不推进的话每次查询都从这行重扫，
 		// 而下面的 += 会把它重复累加，且单调发散、永不自愈。
 		consumed = from + int64(pos)
+		lines++
 
 		var r slimRec
 		if !parseStatsLine(line, &r) {
+			skipped++
 			// 注意：parseStatsLine 比 encoding/json 宽容，**返回 true 不代表
 			// 这行是好的** —— 尾随垃圾、数值写成字符串、+7 / 01 这类非法数字
 			// 它都收（见 statscan.go）。所以 false 只代表「结构性截断」，
@@ -380,6 +561,7 @@ func ensureBucketsUpToDate() {
 		// 那 490 条进错 8 小时的桶。
 		k, ok := hourKeyFor(r.TS, r.Model)
 		if !ok {
+			skipped++
 			continue
 		}
 		b := staged[k]
@@ -466,6 +648,15 @@ func ensureBucketsUpToDate() {
 	// consumed 的上界就是 from+len(buf) == S（只会因尾部半行而更小），
 	// 天然满足这条要求。注意那一小段撕裂半行正是靠「不越过换行」留给下轮的。
 	parsedTo = consumed
+	// 🔴 absorbedRecords / unabsorbedRecords **必须与 parsedTo 同一处提交**，
+	// 且记的是**行数**不是字节数（判据的一端是 Σ N —— 条数）。
+	// 放在解析段里逐行加是不行的：上面两个丢弃分支（gen 变了、parsedTo 被抢）
+	// 都在解析之后才判定，那时计数已经加过了、桶却没并进来 ——
+	// 留下「计数比桶多」的永久不等，于是**每次**查询都误判不一致。
+	// 反过来把提交放在锁外也一样：并发读锁持有者会看到
+	// 「计数已进、桶还没进」的瞬时不一致。
+	absorbedRecords += lines
+	unabsorbedRecords += skipped
 	markBucketsSeededIfFullyAbsorbed(p)
 	callLog.mu.Unlock()
 }
@@ -956,6 +1147,10 @@ func (s *callLogStore) append(rec CallRecord) {
 			// 「size < parsedTo → 全量重建」不再被稳态触发
 			// （修复前实测 400 次观测命中 83 次，21%）。
 			parsedTo += int64(len(line))
+			// 🔴 absorbedRecords 必须与 parsedTo 在**同一处**推进（边界情况③）。
+			// 落盘失败的两条回滚路径都在上面 return 了，到不了这里 ——
+			// 于是「parsedTo 没动但计数动了」不可能发生，两者的差恒为 0。
+			absorbedRecords++
 		}
 	}
 	s.mu.Unlock()
@@ -979,8 +1174,7 @@ func (s *callLogStore) clear() {
 	s.mu.Lock()
 	p := s.path
 	s.records = nil
-	hourBuckets = nil
-	parsedTo = 0
+	resetAbsorbedStateLocked()
 	// 置 true 的依据：append 的落盘现在也在 s.mu 内（见 append），
 	// 所以本临界区里不可能有在途写入。函数返回时桶为空、parsedTo=0、
 	// 文件不存在 —— 「已吸字节 == 文件大小 == 0」这次是真的可证。
