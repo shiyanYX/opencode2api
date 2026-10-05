@@ -1,0 +1,261 @@
+package main
+
+// 两项行为变更：
+// ① today 从「本地零点起的自然日」改为「滚动最近 24 小时」
+// ② 没有数据时模型下拉不给选项（不再回退 free_models）
+//
+// ①的理由：自建网关的用户早上打开面板看的是昨天后半夜的流量，
+// 零点锚定的「当天」把这些流量整段排除，Hero 直接显示 0。
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"testing"
+	"time"
+)
+
+// 必须带时区偏移：forEachBucketedCallRecord 用 time.RFC3339 解析，
+// 不带偏移的会被解析失败静默跳过。真实日志的格式见 .uidemo/call_log.jsonl。
+func tsAt(d time.Duration) string {
+	return time.Now().Add(d).Format(time.RFC3339)
+}
+
+// 「最近 24 小时」按整点分 24 个桶、当前小时收尾，实际覆盖 23~24 小时。
+// 这里用 22 小时前（在窗口内）与 2 分钟前（当前小时）作为正样本，
+// 验证刚发生的请求不会被漏掉——这正是从零点锚定改过来的目的。
+func TestTodayRangeIncludesRecordFromCurrentHour(t *testing.T) {
+	rec := func(d time.Duration, p int64) string {
+		return `{"ts":"` + tsAt(d) + `","model":"m1","status":"ok",` +
+			`"prompt_tokens":` + fmt.Sprint(p) + `,"completion_tokens":10,` +
+			`"cache_read_tokens":5,"ttft_ms":50,"output_speed":10}`
+	}
+	// 22 小时前：零点锚定时会落在「昨天」，被排除；现在应在窗口内
+	body := rec(-22*time.Hour, 100) + "\n" + rec(-2*time.Minute, 200) + "\n"
+	// ⚠️ 必须走 useTempCallLogRaw：Task 8 起 modelStatsFromCallLog 读**全局桶**，
+	// 而手工换 callLog.path 不重置 hourBuckets/parsedTo/bucketsSeeded，
+	// 跨用例的桶残留会让本用例看到别的测试的数据。裸 setup 曾被有意推迟到 Task 8。
+	useTempCallLogRaw(t, body)
+
+	got := modelStatsFromCallLog("today")
+	if got.TotalRequests != 2 {
+		t.Errorf("TotalRequests = %d，期望 2——22 小时前与 2 分钟前的记录都应落在「最近 24 小时」内",
+			got.TotalRequests)
+	}
+	for _, m := range got.Models {
+		if m.PromptTokens != 300 {
+			t.Errorf("PromptTokens = %d，期望 300（100+200）", m.PromptTokens)
+		}
+	}
+}
+
+// today 必须排除 25 小时之前 / 1 分钟之后的记录
+func TestTodayRangeExcludesRecordsOutsideRollingWindow(t *testing.T) {
+	far := `{"ts":"` + tsAt(-30*time.Hour) + `","model":"m1","status":"ok",` +
+		`"prompt_tokens":999,"completion_tokens":99,"cache_read_tokens":0,"ttft_ms":1,"output_speed":1}`
+	// 未来 2 小时：明确落在最后一个桶之后。（未来 1 分钟会与当前时刻同属一个
+	// 整点桶而被计入——这是整点分桶的固有取整，旧实现同样如此，不算回归。）
+	future := `{"ts":"` + tsAt(2*time.Hour) + `","model":"m1","status":"ok",` +
+		`"prompt_tokens":888,"completion_tokens":88,"cache_read_tokens":0,"ttft_ms":1,"output_speed":1}`
+	inside := `{"ts":"` + tsAt(-2*time.Hour) + `","model":"m1","status":"ok",` +
+		`"prompt_tokens":100,"completion_tokens":10,"cache_read_tokens":0,"ttft_ms":1,"output_speed":1}`
+	useTempCallLogRaw(t, far+"\n"+future+"\n"+inside+"\n")
+
+	got := modelStatsFromCallLog("today")
+	if got.TotalRequests != 1 {
+		t.Errorf("TotalRequests = %d，期望 1（30 小时前与 2 小时后的记录都应被排除）",
+			got.TotalRequests)
+	}
+	for _, m := range got.Models {
+		if m.PromptTokens != 100 {
+			t.Errorf("PromptTokens = %d，期望 100", m.PromptTokens)
+		}
+	}
+}
+
+// 桶标签必须是滚动的小时，且升序、恰好 24 个
+func TestTodayBucketsAre24RollingHourlyLabels(t *testing.T) {
+	ts, idx := trendBuckets("today")
+	if len(ts) != 24 {
+		t.Fatalf("桶数 = %d，期望 24", len(ts))
+	}
+	// 标签由 start.Format 生成，start 是本地时间；解析也必须用本地时区，
+	// 否则 time.Parse 默认按 UTC，会整整差一个 UTC 偏移。
+	first, err := time.ParseInLocation("2006-01-02T15:04", ts[0], time.Local)
+	if err != nil {
+		t.Fatalf("桶标签格式不对 %q：%v", ts[0], err)
+	}
+	// 用 time.Since（now-first）：首桶是过去，值为正。
+	// 曾误用 time.Until，它是 first-now，过去时为负，方向反了。
+	off := time.Since(first)
+	// 24 个桶以当前小时收尾 → 首桶在 23..24 小时前
+	wantMin, wantMax := 23*time.Hour, 24*time.Hour
+	if off < wantMin || off > wantMax {
+		t.Errorf("首个桶距今 %v，期望在 %v..%v 之间（滚动 24 小时，不是零点锚定）",
+			off.Round(time.Minute), wantMin, wantMax)
+	}
+	for i := 1; i < len(ts); i++ {
+		if ts[i] <= ts[i-1] {
+			t.Fatalf("桶标签非升序：%q 之后是 %q", ts[i-1], ts[i])
+		}
+	}
+	if idx(time.Now()) < 0 {
+		t.Error("当前时刻应落在某个桶内")
+	}
+}
+
+// 桶索引必须按滚动窗口定位，而不是按「小时数 0..23」
+func TestTodayBucketIndexFollowsRollingWindow(t *testing.T) {
+	_, idx := trendBuckets("today")
+	// 23 小时前：零点锚定会归 -1（不在今天），滚动窗口应给出有效索引
+	got := idx(time.Now().Add(-23 * time.Hour))
+	if got < 0 || got >= 24 {
+		t.Errorf("23 小时前的桶索引 = %d，期望 0..23", got)
+	}
+}
+
+// 日桶不受影响
+func TestDayBucketsUnchangedByRollingToday(t *testing.T) {
+	ts, _ := trendBuckets("30d")
+	if len(ts) != 30 {
+		t.Fatalf("30d 桶数 = %d，期望 30", len(ts))
+	}
+	for _, s := range ts {
+		if _, err := time.Parse("2006-01-02", s); err != nil {
+			t.Fatalf("30d 桶标签应为日期格式，实际 %q", s)
+		}
+	}
+}
+
+// 趋势序列的桶标签必须与聚合用同一套（否则图上会出现图例有、线上没有的桶）
+func TestTodayTrendsAndStatsShareSameBucketLabels(t *testing.T) {
+	useTempCallLogRaw(t, "")
+
+	want, _ := trendBuckets("today")
+	got := trendsFromCallLog("today")
+	if len(got) != len(want) {
+		t.Fatalf("trends 桶数 = %d，trendBuckets = %d，必须一致", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].TS != want[i] {
+			t.Errorf("桶 %d 标签 = %q，期望 %q", i, got[i].TS, want[i])
+		}
+	}
+}
+
+// 响应里的 trends_by_model 与聚合必须同窗
+func TestTodayRangeResponseModelsAndTrendsAgree(t *testing.T) {
+	line := `{"ts":"` + tsAt(-2*time.Hour) + `","model":"m1","status":"ok",` +
+		`"prompt_tokens":100,"completion_tokens":10,"cache_read_tokens":0,"ttft_ms":1,"output_speed":1}`
+	useTempCallLogRaw(t, line+"\n")
+
+	w := httptest.NewRecorder()
+	adminStatsHandler(w, httptest.NewRequest(http.MethodGet, "/api/stats?range=today", nil))
+
+	var got struct {
+		TotalRequests int64 `json:"total_requests"`
+		TrendsByModel []struct {
+			Requests     int64 `json:"requests"`
+			PromptTokens int64 `json:"prompt_tokens"`
+		} `json:"trends_by_model"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("响应解析失败：%v", err)
+	}
+	var sumReq, sumPrompt int64
+	for _, r := range got.TrendsByModel {
+		sumReq += r.Requests
+		sumPrompt += r.PromptTokens
+	}
+	if sumReq != got.TotalRequests {
+		t.Errorf("trends_by_model 请求数合计 %d ≠ total_requests %d", sumReq, got.TotalRequests)
+	}
+	if sumPrompt != 100 {
+		t.Errorf("trends_by_model prompt 合计 %d，期望 100", sumPrompt)
+	}
+}
+
+// 演示数据里 today 不再为空（前端要据此确认下拉有真实选项）
+// 演示数据 .uidemo/call_log.jsonl 是**一次性快照**，它相对 now 的年龄只增不减。
+// 原实现在 TotalRequests==0 时 t.Skip —— 实测 2026-10-03 21:26 时
+// 演示数据最后一条已是 26.2 小时前，这条测试**正在静默 skip**：
+// go test 仍报 ok，覆盖悄悄消失且没有任何信号。
+//
+// 改为：数据过期就让测试明确失败。演示数据是本地 fixture（不入库），
+// 跑它的人本来就该准备新鲜的；要让这条测试失效，应当删掉它而不是让它悄悄跳过。
+// 同一语义已由 TestTodayRangeIncludesRecordFromCurrentHour 用构造数据覆盖。
+func TestTodayRangeNonEmptyOnDemoData(t *testing.T) {
+	const demo = ".uidemo/call_log.jsonl"
+	st, err := os.Stat(demo)
+	if err != nil {
+		t.Skip("演示数据不在，跳过")
+	}
+
+	// 先算出演示数据相对 now 的年龄，避免下面的统计再读一遍整个文件
+	last := lastLogTimestamp(t, demo)
+	age := time.Since(last)
+	if age > 24*time.Hour {
+		lb, _ := os.ReadFile(demo)
+		lines := bytes.Count(lb, []byte{'\n'})
+		t.Fatalf("演示数据已过期（最后一条 %s，距今 %.1f 小时，共 %d 行）。\n"+
+			"  请重新生成 .uidemo/call_log.jsonl；不要让这条测试静默 skip。\n"+
+			"  文件修改时间：%s", last.Format(time.RFC3339), age.Hours(), lines,
+			st.ModTime().Format(time.RFC3339))
+	}
+
+	old := callLog.path
+	callLog.path = demo
+	callLog.records = nil
+	defer func() { callLog.path = old }()
+	// 演示数据非空：Task 8 起 modelStatsFromCallLog 读**全局桶**，
+	// 必须重置；且 bucketsSeeded 要置回 false（useTempCallLogRaw 置的 true
+	// 只在空文件下自洽），这才是冷启动的真实状态。
+	resetHourBuckets(t)
+	markBackfillPending(t)
+
+	got := modelStatsFromCallLog("today")
+	if got.TotalRequests == 0 {
+		t.Fatalf("演示数据在最近 24 小时内（最后一条 %s，距今 %.1f 小时）应有记录，却算出 0",
+			last.Format(time.RFC3339), age.Hours())
+	}
+	t.Logf("演示数据 today 请求数: %d", got.TotalRequests)
+}
+
+// lastLogTimestamp 读出日志文件里最后一条记录的 ts。
+func lastLogTimestamp(t *testing.T, path string) time.Time {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读取 %s: %v", path, err)
+	}
+	for i := len(data) - 1; i >= 0; i-- {
+		if data[i] != '\n' {
+			continue
+		}
+		line := data[:i]
+		if j := bytes.LastIndexByte(line, '\n'); j >= 0 {
+			line = line[j+1:]
+		} else {
+			line = nil
+		}
+		if len(line) == 0 {
+			continue
+		}
+		var rec struct {
+			TS string `json:"ts"`
+		}
+		if json.Unmarshal(line, &rec) != nil {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, rec.TS)
+		if err != nil {
+			continue
+		}
+		return ts
+	}
+	t.Fatalf("%s 里找不到可解析的 ts", path)
+	return time.Time{}
+}

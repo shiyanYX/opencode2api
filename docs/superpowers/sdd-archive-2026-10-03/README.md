@@ -25,7 +25,7 @@
 ## 怎么用
 
 ```sh
-cp docs/superpowers/sdd-archive-2026-10-03/*_test.go .   # 恢复到工作区
+cp docs/superpowers/sdd-archive-2026-10-03/*_test.go.txt . && for f in *_test.go.txt; do mv "$f" "${f%.txt}"; done  # 恢复到工作区
 go test ./...
 ```
 

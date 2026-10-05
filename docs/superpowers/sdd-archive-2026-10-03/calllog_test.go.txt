@@ -1,0 +1,100 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// append 落盘时必须裁掉 Events（占全文件 38.8%，其中 73.1% 是 detail 为空的
+// connect_ok），但内存环里必须保留——面板的日志页读的是内存环，不读 JSONL。
+func TestAppendDropsEventsOnDiskButKeepsInMemory(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "call_log.jsonl")
+
+	callLog.mu.Lock()
+	oldPath, oldRecs := callLog.path, callLog.records
+	callLog.path = p
+	callLog.records = nil
+	callLog.mu.Unlock()
+	t.Cleanup(func() {
+		callLog.mu.Lock()
+		callLog.path, callLog.records = oldPath, oldRecs
+		callLog.mu.Unlock()
+	})
+
+	rec := CallRecord{
+		ReqID:     "r1",
+		TS:        "2026-10-03T12:00:00.000+08:00",
+		Model:     "m",
+		Status:    "ok",
+		Path:      "/v1/chat/completions",
+		Nodes:     []string{"node-a"},
+		NodeNames: []string{"节点甲"},
+		Events: []CallEvent{
+			{Type: "connect_ok", Node: "node-a", NodeName: "节点甲"},
+			{Type: "upstream_error", Node: "node-b", Detail: "boom"},
+		},
+	}
+	callLog.append(rec)
+
+	data, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"events"`) {
+		t.Fatalf("落盘不应包含 events，实际: %s", data)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["model"] != "m" || got["status"] != "ok" || got["req_id"] != "r1" {
+		t.Fatalf("其它标量字段丢失: %s", data)
+	}
+	for _, k := range []string{"nodes", "node_names", "path", "ts"} {
+		if _, ok := got[k]; !ok {
+			t.Fatalf("%s 必须保留: %s", k, data)
+		}
+	}
+
+	callLog.mu.Lock()
+	defer callLog.mu.Unlock()
+	if len(callLog.records) != 1 {
+		t.Fatalf("内存环应有 1 条，实际 %d", len(callLog.records))
+	}
+	if got := callLog.records[0].Events; len(got) != 2 {
+		t.Fatalf("内存环必须保留 2 条 Events，实际 %d", len(got))
+	}
+	if callLog.records[0].Events[1].Detail != "boom" {
+		t.Fatalf("内存环的 Events 内容被破坏: %+v", callLog.records[0].Events)
+	}
+}
+
+// 裁剪不得改内存环里那条记录的其它字段（用副本裁，不是清空原记录）。
+func TestAppendTrimDoesNotMutateCallerRecord(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "call_log.jsonl")
+
+	callLog.mu.Lock()
+	oldPath, oldRecs := callLog.path, callLog.records
+	callLog.path = p
+	callLog.records = nil
+	callLog.mu.Unlock()
+	t.Cleanup(func() {
+		callLog.mu.Lock()
+		callLog.path, callLog.records = oldPath, oldRecs
+		callLog.mu.Unlock()
+	})
+
+	rec := CallRecord{ReqID: "r", TS: "t", Model: "m", Status: "ok"}
+	callLog.append(rec)
+
+	// append 收到的是值拷贝，调用方持有的 rec 不应被裁剪逻辑影响
+	if len(rec.Events) != 0 {
+		t.Fatalf("调用方的记录被改动了: %+v", rec.Events)
+	}
+}

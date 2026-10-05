@@ -1,0 +1,169 @@
+package main
+
+import (
+	"testing"
+	"time"
+)
+
+// writeCallLog 把测试记录写入临时 call_log.jsonl 并接管 callLog.path。
+// 委托 useTempCallLog：它额外重置了聚合桶全局状态，
+// 否则其余测试会因跨用例的桶残留而互相污染。
+func writeCallLog(t *testing.T, recs []CallRecord) {
+	t.Helper()
+	useTempCallLog(t, recs)
+}
+
+// dayAt 返回 n 天前第 h 小时的整点（本地时区）。
+func dayAt(n, h int) time.Time {
+	now := time.Now()
+	d := now.AddDate(0, 0, n)
+	return time.Date(d.Year(), d.Month(), d.Day(), h, 0, 0, 0, now.Location())
+}
+
+func TestTrendsByModelZeroFillAndSplit(t *testing.T) {
+	// 记录时间戳不能用 dayAt(0, 10) / dayAt(0, 11) 这类「今天的固定小时」：
+	// 在 00:00-10:00 之间运行时它们落在**未来**，而本测试断言的是这些记录
+	// 出现在标签为今天（即 trendBuckets 看到的那个本地日）的桶里——
+	// 一旦跨过午夜，fixture 已按旧的「今天」写好、而 trendBuckets 已翻页，
+	// m1/m2 会双双落进「非今天的桶」并被零填充断言判死。
+	// dayAt(0, 0) 是本地零点：永远属于今天、且永远不晚于当前时刻。
+	midnight := dayAt(0, 0).Format(time.RFC3339)
+	now := time.Now().Format(time.RFC3339)
+
+	writeCallLog(t, []CallRecord{
+		{ReqID: "a", TS: midnight, Model: "m1", Status: "ok", PromptTokens: 100, CompletionTokens: 10, CacheRead: 40},
+		{ReqID: "b", TS: now, Model: "m1", Status: "ok", PromptTokens: 200, CompletionTokens: 20, CacheRead: 60},
+		{ReqID: "c", TS: now, Model: "m2", Status: "error"},
+	})
+
+	got := trendsByModelFromCallLog("7d")
+	if len(got) != 14 { // 2 个模型 × 7 个桶
+		t.Fatalf("want 14 rows (2 models x 7 buckets), got %d", len(got))
+	}
+
+	today := time.Now().Format("2006-01-02")
+	var m1, m2 ModelTrendPoint
+	for _, r := range got {
+		if r.TS != today {
+			// 零桶策略：非今天的桶必须存在且全零
+			if r.Requests != 0 || r.PromptTokens != 0 || r.OK != 0 || r.Fail != 0 {
+				t.Errorf("zero-fill broken: %+v", r)
+			}
+			continue
+		}
+		if r.Model == "m1" {
+			m1 = r
+		}
+		if r.Model == "m2" {
+			m2 = r
+		}
+	}
+
+	if m1.Requests != 2 || m1.OK != 2 || m1.Fail != 0 {
+		t.Errorf("m1: requests=%d ok=%d fail=%d; want 2/2/0", m1.Requests, m1.OK, m1.Fail)
+	}
+	if m1.PromptTokens != 300 || m1.CompletionTokens != 30 || m1.CacheRead != 100 {
+		t.Errorf("m1 tokens: prompt=%d completion=%d cache_read=%d; want 300/30/100",
+			m1.PromptTokens, m1.CompletionTokens, m1.CacheRead)
+	}
+	if m2.Requests != 1 || m2.Fail != 1 || m2.OK != 0 {
+		t.Errorf("m2: requests=%d fail=%d ok=%d; want 1/1/0", m2.Requests, m2.Fail, m2.OK)
+	}
+
+	// 顺序：模型名升序，每模型桶索引升序
+	if got[0].Model != "m1" || got[7].Model != "m2" {
+		t.Errorf("expected model-major order, got [0]=%s [7]=%s", got[0].Model, got[7].Model)
+	}
+}
+
+func TestTrendsByModelSumsToAggregate(t *testing.T) {
+	writeCallLog(t, []CallRecord{
+		{ReqID: "a", TS: dayAt(0, 9).Format(time.RFC3339), Model: "m1", Status: "ok", PromptTokens: 100, CompletionTokens: 10, CacheCreation: 5, CacheRead: 40},
+		{ReqID: "b", TS: dayAt(0, 9).Format(time.RFC3339), Model: "m2", Status: "ok", PromptTokens: 300, CompletionTokens: 20, CacheCreation: 7, CacheRead: 60},
+		// dayAt(n, h) 是【n 天后】（不是前）的第 h 点整。
+		// 第三条记录必须用 n=-1（昨天）——用 dayAt(1,9) 会是明天 09:00，
+		// 而 7d 窗口的桶索引只有 0..6，dayIdx(明天)=7 恰好越界，
+		// 那条记录会被**静默丢弃**，使本测试声称的「逐桶对账」退化成只对账 1 个桶。
+		{ReqID: "c", TS: dayAt(-1, 9).Format(time.RFC3339), Model: "m2", Status: "error", PromptTokens: 1, CompletionTokens: 2, CacheCreation: 3, CacheRead: 4},
+	})
+
+	agg := trendsFromCallLog("7d")
+	per := trendsByModelFromCallLog("7d")
+
+	sum := map[string]*ModelTrendPoint{}
+	for _, r := range per {
+		if s, ok := sum[r.TS]; ok {
+			s.Requests += r.Requests
+			s.OK += r.OK
+			s.Fail += r.Fail
+			s.PromptTokens += r.PromptTokens
+			s.CompletionTokens += r.CompletionTokens
+			s.CacheCreation += r.CacheCreation
+			s.CacheRead += r.CacheRead
+		} else {
+			c := r
+			sum[r.TS] = &c
+		}
+	}
+
+	if len(agg) != len(sum) {
+		t.Fatalf("bucket count mismatch: aggregate=%d perModel=%d", len(agg), len(sum))
+	}
+	for _, a := range agg {
+		s := sum[a.TS]
+		if s == nil {
+			t.Fatalf("no per-model rows for bucket %s", a.TS)
+		}
+		if a.Requests != s.Requests || a.OK != s.OK || a.Fail != s.Fail ||
+			a.PromptTokens != s.PromptTokens || a.CompletionTokens != s.CompletionTokens ||
+			a.CacheCreation != s.CacheCreation || a.CacheRead != s.CacheRead {
+			t.Errorf("bucket %s mismatch:\n  aggregate=%+v\n  perModel =%+v", a.TS, a, *s)
+		}
+	}
+}
+
+// TestTrendsFromCallLogReturnsNilWhenLogMissing 锁定契约层行为：
+// 日志文件缺失时，/api/stats/trends 的响应必须是 []，而不是 n 行零值对象。
+//
+// 桶化后「文件不存在」与「文件为空」在桶层面不可区分，trendsFromCallLog 恒能
+// 拼出 len(ts) 个零值桶；但 handler 会把它们原样序列化成 n 行零值对象，
+// 那会让前端趋势图出现一条全是 0 的假曲线。所以判定必须直接看文件在不在
+// （calllog.go 里 callLogFileExists() 那个分支），不能看桶空不空。
+//
+// ⚠️ 本断言在桶化完成（Task 8）后就是绿的——它防的是**后来者把那个分支删掉**。
+// 判别力已用变异体验证：移除 callLogFileExists 分支后本测试立刻红
+// （返回 7 个零值桶而非 nil）。见台账 progress.md 的变异实验记录。
+func TestTrendsFromCallLogReturnsNilWhenLogMissing(t *testing.T) {
+	pointCallLogAtMissing(t)
+	ensureBucketsUpToDate()
+
+	// 必须返回 nil —— adminTrendsHandler 的 `if pts == nil` 靠它转成 []。
+	// 若返回 7 个零值对象，冷进程上热力图会拿到 7 个全 0 的点，
+	// 前端画出一条假曲线。这正是本函数原注释要防的事。
+	if got := trendsFromCallLog("7d"); got != nil {
+		t.Fatalf("日志文件缺失时必须返回 nil，实际返回了 %d 个点: %+v", len(got), got)
+	}
+
+	// 按模型分组那条路径的契约相反：必须返回**非 nil** 的空切片（序列化成 []，
+	// 而不是 null）——保留自重构前的断言，brief 的替换稿把它整段丢了，
+	// 那是既有覆盖，删掉等于静默降覆盖。
+	per := trendsByModelFromCallLog("7d")
+	if per == nil {
+		t.Error("trendsByModelFromCallLog on unreadable log = nil; want non-nil empty slice (marshals to [])")
+	} else if len(per) != 0 {
+		t.Errorf("trendsByModelFromCallLog on unreadable log: want len 0, got %d rows", len(per))
+	}
+
+	// 桶建起来之后仍应输出完整网格（与非 nil 路径不同，见上）
+	ts := time.Now().Format(time.RFC3339Nano)
+	useTempCallLogRaw(t, statsLine(ts, "m", "ok", 1, 1, 0, 1, 0, 0))
+	ensureBucketsUpToDate()
+	labels, _ := trendBuckets("7d")
+	got := trendsFromCallLog("7d")
+	if got == nil {
+		t.Fatal("文件存在时不得返回 nil")
+	}
+	if len(got) != len(labels) {
+		t.Fatalf("文件存在时应返回 %d 个点，实际 %d", len(labels), len(got))
+	}
+}

@@ -1,0 +1,201 @@
+package main
+
+import (
+	"bytes"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+)
+
+// Task 7 性能验收。
+//
+// ⚠️ 为什么断言是**比值**而不是绝对毫秒数：
+// 上一版写死 `d > 400ms` 就 t.Errorf，单独跑 372ms 过、全量跑 406ms 挂 ——
+// 机器一有负载就红，而它守的东西跟负载毫无关系。这不是回归，是判据本身
+// 不便携（<400ms 是**这台机器**的一次观测，不是可移植的门限）。
+//
+// 换成的判据全部按同进程内测出来的地板归一，负载同时抬高分子分母时比值不变：
+//
+//	① 地板 T_split：只用 bytes.IndexByte 把 100MB 切成行，不解析任何东西。
+//	   任何正确实现都得先做这一步，所以它是「这台机器此刻扫一遍 100MB 要多久」，
+//	   拿来当速度标尺。实测本机 9.7ms。
+//	② 全量吸收 T_full 不得 > 150 × T_split。
+//	   实测本机：手写扫描器 356ms ≈ **37×**；换回 encoding/json 是
+//	   2236ms ≈ **231×**。150 落在中间，两侧各留 4 倍与 1.5 倍余量。
+//	   这条正是原用例想抓的回归（误用 encoding/json），且换台机器照样成立。
+//	③ 增量吸收 T_delta 不得 > T_full / 20。
+//	   这才是这次改动的**验收目标**：面板查询的成本必须 O(新增字节) 而不是
+//	   O(整个文件)。实测 T_full ≈ 370ms、T_delta ≈ 0.05ms，比值约 7000×。
+//	④ 仍然保留一条绝对上限（5 轮取中位数、1.2s），但只当兜底：
+//	   比 encoding/json 的 2.24s 更紧，另有 3.4 倍于实测值的余量，
+//	   单轮 10~50% 的负载抖动不足以触发它（5 轮取中位数进一步压掉尖峰）。
+//
+// 行数与 parsedTo 的正确性断言每一轮都跑 —— 性能判据不能替代它们。
+func TestBackfillTiming(t *testing.T) {
+	src := "/tmp/prod_log.jsonl"
+	f, err := os.Open(src)
+	if err != nil {
+		t.Skip("无生产日志")
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	// 只复制一次：复制 5 遍光 io.Copy 的垃圾就够把后面的计时搅黄。
+	p := filepath.Join(t.TempDir(), "call_log.jsonl")
+	dst, err := os.Create(p)
+	if err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(dst, f); err != nil {
+		f.Close()
+		dst.Close()
+		t.Fatal(err)
+	}
+	f.Close()
+	dst.Close()
+	total := fi.Size()
+	t.Logf("文件 %d 字节", total)
+
+	// 接管 callLog.path（不复制、不 reset —— 下面每轮自己重置，
+	// 这样 5 轮量的是同一条路径上的重复吸收，而不是 5 个不同目录的冷启动）。
+	callLog.mu.Lock()
+	oldPath := callLog.path
+	callLog.path = p
+	callLog.mu.Unlock()
+	t.Cleanup(func() {
+		callLog.mu.Lock()
+		callLog.path = oldPath
+		hourBuckets = nil
+		parsedTo = 0
+		statsGen = 0
+		bucketsSeeded = true
+		callLog.mu.Unlock()
+	})
+
+	// ---- 地板：只切行 ----
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tSplit := time.Since(func() time.Time {
+		st := time.Now()
+		for pos := 0; pos < len(raw); {
+			rel := bytesIndexNewline(raw[pos:])
+			if rel < 0 {
+				break
+			}
+			pos += rel + 1
+		}
+		return st
+	}())
+	raw = nil
+
+	// ---- 全量吸收，跑 5 轮 ----
+	//
+	// ⚠️ -race 构建下只跑 1 轮且不做任何计时断言，原因实测过：
+	// race detector 只插桩 Go 代码，bytes.IndexByte 是 runtime 里的
+	// SIMD 汇编、**不被插桩**。于是分子涨 8.8 倍（370ms → 3152ms）、
+	// 分母几乎不动（9.7ms → 11.0ms），比值从 37× 变成 287× ——
+	// 判据的前提（负载同比例抬高分子分母）在 race 构建下不成立。
+	// 正确性断言照跑：那 18.6 万行正好让 race detector 去查真实数据。
+	rounds := 5
+	if raceEnabled {
+		rounds = 1
+	}
+	var ds []time.Duration
+	var nRows, parsedToAfter int64
+	for i := 0; i < rounds; i++ {
+		callLog.mu.Lock()
+		hourBuckets = nil
+		parsedTo = 0
+		bucketsSeeded = false // 模拟刚开机、存量历史尚未吸进桶
+		callLog.mu.Unlock()
+
+		start := time.Now()
+		ensureBucketsUpToDate()
+		d := time.Since(start)
+		ds = append(ds, d)
+
+		nRows, parsedToAfter = bucketSnapshot()
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if nRows != 186212 {
+			t.Fatalf("第 %d 轮行数不对: %d", i+1, nRows)
+		}
+		if parsedToAfter != st.Size() {
+			t.Fatalf("第 %d 轮 parsedTo=%d 未吸干净（文件 %d 字节）",
+				i+1, parsedToAfter, st.Size())
+		}
+	}
+	t.Logf("全量 %d 字节 / %d 行，%d 轮 = %v，中位数 %v", total, nRows, rounds, ds, medianDuration(ds))
+	if raceEnabled {
+		t.Log("-race 构建：跳过全部计时断言（正确性断言已执行）")
+		return
+	}
+	t.Logf("地板 T_split = %v → T_full = %.0f×T_split", tSplit,
+		float64(medianDuration(ds))/float64(tSplit))
+
+	// ---- 增量吸收：只追加一小段 ----
+	var extra strings.Builder
+	for i := 0; i < 5; i++ {
+		extra.WriteString(statsLine(time.Now().Format(time.RFC3339Nano), "m", "ok", 1, 1, 0, 0, 0, 0))
+	}
+	appendRawLines(t, p, extra.String())
+
+	deltas := make([]time.Duration, 0, rounds)
+	for i := 0; i < rounds; i++ {
+		start := time.Now()
+		ensureBucketsUpToDate()
+		deltas = append(deltas, time.Since(start))
+		appendRawLines(t, p, extra.String()) // 每轮再补一段，保证下一轮真有增量可吸
+	}
+	t.Logf("增量吸收 %d 轮 = %v，中位数 %v", rounds, deltas, medianDuration(deltas))
+
+	// ---- ① 正确性（上面每轮已查）与三条判据 ----
+	tFull := medianDuration(ds)
+	if tFull > 150*tSplit {
+		t.Errorf("全量吸收 %v 超过地板的 150 倍（地板 %v）—— "+
+			"疑似回退到 encoding/json（实测为地板的 231 倍）", tFull, tSplit)
+	}
+	tDelta := medianDuration(deltas)
+	if tDelta*20 > tFull {
+		t.Errorf("增量吸收 %v 没有比全量 %v 快 20 倍以上："+
+			"backfill 的成本必须 O(新增字节) 而不是 O(整个文件)", tDelta, tFull)
+	}
+	if tFull > 1200*time.Millisecond {
+		t.Errorf("全量吸收中位数 %v 超过 1200ms 兜底上限（实测约 370ms，"+
+			"encoding/json 约 2236ms）", tFull)
+	}
+}
+
+func medianDuration(ds []time.Duration) time.Duration {
+	if len(ds) == 0 {
+		return 0
+	}
+	c := append([]time.Duration(nil), ds...)
+	sort.Slice(c, func(i, j int) bool { return c[i] < c[j] })
+	return c[len(c)/2]
+}
+
+func bytesIndexNewline(b []byte) int {
+	// 必须用 bytes.IndexByte（SIMD），不能用逐字节循环：
+	// 逐字节版扫 100MB 要 71ms，是真地板（9.7ms）的 7 倍，
+	// 会把「150× 地板」这条判据的分辨率从 37× / 231× 压成 5× / 31× ——
+	// 那样换回 encoding/json 的回归反而能通过。
+	return bytes.IndexByte(b, '\n')
+}
+
+func callLogPathForTest() string {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	return callLog.path
+}

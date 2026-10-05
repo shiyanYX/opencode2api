@@ -1,0 +1,52 @@
+package main
+
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+// 断言 proxy_node.go 里「node health probe failed」没有挂在 Warn 级别上。
+//
+// 为什么不写行为测试：那条 slog 调用在 checkFiltered 的 goroutine 里，
+// 单测无法触达；而任何「抽个 helper 再测 helper」的做法都会漏掉
+// 生产代码被改回 Warn 的情况。对源码文本下断言是唯一确定性的形式。
+//
+// 背景：markProbeDead 内部已按「首次 / 重复 / exhausted」三级分级
+// （Info / Debug / Debug，见 proxy_node.go:628/634/650），
+// checkFiltered 里那条无条件 Warn 把重复失败从 Debug 抬回了 Warn，
+// 导致 57 个 dead 节点每分钟各刷一次，实测占应用日志 56.8%。
+func TestHealthProbeFailureNotLoggedAtWarn(t *testing.T) {
+	src, err := os.ReadFile("proxy_node.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(src), "\n") {
+		if !strings.Contains(line, `"node health probe failed"`) {
+			continue
+		}
+		if strings.Contains(line, "slog.Warn") {
+			t.Fatalf("探测失败日志挂在 Warn 上，会刷屏：\n  %s\n"+
+				"  应为 slog.Debug——重复失败的节流已在 markProbeDead 内部完成", strings.TrimSpace(line))
+		}
+		if !strings.Contains(line, "slog.Debug") {
+			t.Fatalf("找不到探测失败日志行，或级别不是 Debug：\n  %s", strings.TrimSpace(line))
+		}
+		return
+	}
+	t.Fatal("proxy_node.go 里找不到 \"node health probe failed\" 这行日志")
+}
+
+// 确认节流的三级分级仍在（防止有人「顺手」把 Debug 全删了）。
+func TestMarkProbeDeadStillGradesRepeatFailures(t *testing.T) {
+	src, err := os.ReadFile("proxy_node.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(src)
+	for _, want := range []string{"node marked dead by health check", "node still dead (re-probe failed)"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("丢失了分级日志 %q——重复失败的节流靠它，不要删", want)
+		}
+	}
+}

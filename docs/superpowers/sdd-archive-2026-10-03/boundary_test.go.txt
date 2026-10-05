@@ -1,0 +1,137 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+// today 的索引函数对「窗口起点之前」返回了有效下标：Go 整数除法向零截断，
+// start-30m / 1h == 0，于是通过了 i>=0 的下界检查。
+// 结果是最近 24 小时窗口最多多吞整整一小时。
+func TestTodayIndexRejectsTimesBeforeWindowStart(t *testing.T) {
+	ts, bidx := trendBuckets("today")
+	start, err := time.ParseInLocation("2006-01-02T15:04", ts[0], time.Local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, off := range []time.Duration{
+		-time.Second, -time.Minute, -30 * time.Minute, -59 * time.Minute,
+	} {
+		if got := bidx(start.Add(off)); got != -1 {
+			t.Errorf("起点前 %v 的时刻索引 = %d，期望 -1（起点=%v）",
+				off, got, start.Format("15:04"))
+		}
+	}
+}
+
+// 端到端：窗口起点之前的记录不得进入统计
+func TestTodayStatsExcludeRecordJustBeforeWindowStart(t *testing.T) {
+	ts, _ := trendBuckets("today")
+	start, _ := time.ParseInLocation("2006-01-02T15:04", ts[0], time.Local)
+
+	rec := func(t time.Time, p int) string {
+		return `{"ts":"` + t.Format(time.RFC3339) + `","model":"m1","status":"ok",` +
+			`"prompt_tokens":` + itoa(p) + `,"completion_tokens":1,` +
+			`"cache_read_tokens":0,"ttft_ms":1,"output_speed":1}`
+	}
+	before := start.Add(-30 * time.Minute) // 窗口外 30 分钟
+	inside := start.Add(30 * time.Minute)  // 窗口内
+	// ⚠️ 必须走 useTempCallLogRaw：Task 8 起查询读全局桶，裸换 path 不重置桶，
+	// 会看到上一个用例残留的统计。裸 setup 曾被有意推迟到 Task 8 处理。
+	useTempCallLogRaw(t, rec(before, 777)+"\n"+rec(inside, 100)+"\n")
+
+	got := modelStatsFromCallLog("today")
+	if got.TotalRequests != 1 {
+		t.Errorf("TotalRequests = %d，期望 1——起点前 30 分钟的记录不该计入", got.TotalRequests)
+	}
+	for _, m := range got.Models {
+		if m.PromptTokens != 100 {
+			t.Errorf("PromptTokens = %d，期望 100（777 属于窗口外）", m.PromptTokens)
+		}
+	}
+}
+
+// 日桶是整天粒度：起点当天 00:00 之前的时间属于**前一天**，本就应被排除。
+// 这条是断言方向的自查——审查员说日桶有「同款多吞一整天」的缺陷，
+// 实测后确认**不成立**：日桶算的是 dayStart.Sub(start)，整除后不会有负数半区。
+func TestDayBucketIndexExcludesDayBeforeWindowStart(t *testing.T) {
+	for _, rng := range []string{"7d", "30d", "180d"} {
+		ts, bidx := trendBuckets(rng)
+		start, err := time.ParseInLocation("2006-01-02", ts[0], time.Local)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := bidx(start.Add(-time.Second)); got != -1 {
+			t.Errorf("%s：起点前一天的时刻索引 = %d，期望 -1", rng, got)
+		}
+		if got := bidx(start); got != 0 {
+			t.Errorf("%s：起点当天的索引 = %d，期望 0", rng, got)
+		}
+		if got := bidx(start.Add(23 * time.Hour)); got != 0 {
+			t.Errorf("%s：起点当天 23 点的索引 = %d，期望 0（整天同属一个桶）", rng, got)
+		}
+	}
+}
+
+// 窗口末尾之后的时间必须被排除。
+// 日桶的 dayIdx 本身不判上界（会返回 len(ts)），是由调用方
+// forEachBucketedCallRecord 的 `i >= len(ts)` 兜住的；today 的索引函数自己判。
+// 所以这里断言**实际效果**而不是返回值。
+func TestRecordsAfterWindowEndAreExcluded(t *testing.T) {
+	for _, rng := range []string{"today", "7d", "30d", "180d"} {
+		ts, _ := trendBuckets(rng)
+		lastLabel := ts[len(ts)-1]
+		var last time.Time
+		if len(lastLabel) > 10 {
+			last, _ = time.ParseInLocation("2006-01-02T15:04", lastLabel, time.Local)
+		} else {
+			last, _ = time.ParseInLocation("2006-01-02", lastLabel, time.Local)
+		}
+
+		line := `{"ts":"` + last.Add(36*time.Hour).Format(time.RFC3339) + `","model":"m1","status":"ok",` +
+			`"prompt_tokens":999,"completion_tokens":1,"cache_read_tokens":0,"ttft_ms":1,"output_speed":1}`
+		// 每轮都要换 fixture：桶是全局的，上一轮吸进去的东西必须清掉。
+		useTempCallLogRaw(t, line+"\n")
+
+		got := modelStatsFromCallLog(rng)
+		if got.TotalRequests != 0 {
+			t.Errorf("%s：窗口末尾 36 小时后的记录被计入，TotalRequests=%d", rng, got.TotalRequests)
+		}
+	}
+}
+
+// 响应层面同样不能带进窗口外记录
+func TestRangeResponseExcludesRecordBeforeTodayWindow(t *testing.T) {
+	ts, _ := trendBuckets("today")
+	start, _ := time.ParseInLocation("2006-01-02T15:04", ts[0], time.Local)
+	line := `{"ts":"` + start.Add(-45*time.Minute).Format(time.RFC3339) + `","model":"m1","status":"ok",` +
+		`"prompt_tokens":555,"completion_tokens":5,"cache_read_tokens":0,"ttft_ms":1,"output_speed":1}`
+	useTempCallLogRaw(t, line+"\n")
+
+	w := httptest.NewRecorder()
+	adminStatsHandler(w, httptest.NewRequest(http.MethodGet, "/api/stats?range=today", nil))
+	var got struct {
+		TotalRequests int64 `json:"total_requests"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.TotalRequests != 0 {
+		t.Errorf("total_requests = %d，期望 0", got.TotalRequests)
+	}
+}
+
+func itoa(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var b []byte
+	for i > 0 {
+		b = append([]byte{byte('0' + i%10)}, b...)
+		i /= 10
+	}
+	return string(b)
+}

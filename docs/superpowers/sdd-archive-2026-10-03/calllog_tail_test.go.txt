@@ -1,0 +1,201 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+func TestTailReadLastLines(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "log.jsonl")
+
+	var sb strings.Builder
+	for i := 0; i < 5000; i++ {
+		sb.WriteString("{\"n\":" + strconv.Itoa(i) + "}\n")
+	}
+	if err := os.WriteFile(p, []byte(sb.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := tailReadLastLines(p, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	if !strings.HasPrefix(got, "{\"n\":3000}") {
+		t.Fatalf("首行应是第 3000 条，实际开头 %.40q", got)
+	}
+	if n := strings.Count(got, "\n"); n != 2000 {
+		t.Fatalf("应恰好 2000 个换行，实际 %d", n)
+	}
+	if !strings.HasSuffix(got, "{\"n\":4999}\n") {
+		t.Fatalf("末行应是最后一条，实际结尾 %q", got[max(0, len(got)-40):])
+	}
+	// 每行都必须可解析——只数换行符不足以发现「前导半行没裁」
+	for _, line := range strings.Split(strings.TrimRight(got, "\n"), "\n") {
+		var v map[string]int
+		if err := json.Unmarshal([]byte(line), &v); err != nil {
+			t.Fatalf("取回的记录不是合法 JSON（前导半行未裁）: %v\n%.120q", err, line)
+		}
+	}
+}
+
+// 单块就能读完时（文件远小于 chunk）也必须截断到 n 行。
+// 这一条专门锁「读够 n 个换行就停，但从不裁剪」这个缺陷——
+// 5000 行只要 60KB，一个 256KiB 块就装得下，不裁就会返回整个文件。
+func TestTailReadTruncatesWhenSingleChunkSufficies(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "log.jsonl")
+	os.WriteFile(p, []byte(strings.Repeat("x\n", 100)), 0644)
+
+	raw, err := tailReadLastLines(p, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(raw), "\n"); n != 10 {
+		t.Fatalf("单块场景仍须截断到 10 行，实际 %d 行", n)
+	}
+}
+
+func TestTailReadFileSmallerThanRequest(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "log.jsonl")
+	os.WriteFile(p, []byte("{\"a\":1}\n{\"b\":2}\n"), 0644)
+	raw, err := tailReadLastLines(p, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "{\"a\":1}\n{\"b\":2}\n" {
+		t.Fatalf("小文件应原样返回: %q", raw)
+	}
+}
+
+func TestTailReadTornTailKeepsPartialLine(t *testing.T) {
+	// 文件末尾没有换行（崩溃残留半行）——它应被丢弃，且不得与前一条拼接。
+	dir := t.TempDir()
+	p := filepath.Join(dir, "log.jsonl")
+	os.WriteFile(p, []byte("{\"a\":1}\n{\"b\":2}\n{\"partial\""), 0644)
+	raw, err := tailReadLastLines(p, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "partial") {
+		t.Fatalf("撕裂的半行必须丢弃: %q", raw)
+	}
+	if !strings.HasSuffix(string(raw), "{\"b\":2}\n") {
+		t.Fatalf("应停在最后一个完整换行后: %q", raw)
+	}
+}
+
+// 单条记录大于 chunk：必须跨多块取回，且首块的前导半行要裁掉。
+func TestTailReadSingleRecordLargerThanChunk(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "log.jsonl")
+	big := `{"x":"` + strings.Repeat("A", 300*1024) + `"}` + "\n"
+	want := `{"y":1}` + "\n" + big
+	os.WriteFile(p, []byte(want), 0644)
+
+	raw, err := tailReadLastLines(p, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 必须逐字节相等。只数换行符会漏掉「忘了裁前导半行」——
+	// 那会得到 `{"n":1234{"y":1}\n...`，换行数仍是 2 但首条已损坏。
+	if string(raw) != want {
+		t.Fatalf("巨条场景返回了错误内容：长度 got=%d want=%d\n开头 %.60q\n开头 want %.60q",
+			len(raw), len(want), raw[:min(80, len(raw))], want[:80])
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(raw), "\n"), "\n") {
+		var v map[string]any
+		if err := json.Unmarshal([]byte(line), &v); err != nil {
+			t.Fatalf("取回的记录不是合法 JSON: %v\n%.120q", err, line)
+		}
+	}
+}
+
+// 多块场景下已收集的数据不得被后续 ReadAt 原地覆盖
+// （append 别名缺陷：首轮 buf 为 nil 时 append 不拷贝，buf 会别名 chunk）。
+func TestTailReadNoAliasingAcrossChunks(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "log.jsonl")
+
+	// 造一个远超 3 个 chunk 的文件，确保触发多轮 ReadAt
+	var sb strings.Builder
+	want := make([]string, 0, 20000)
+	for i := 0; i < 20000; i++ {
+		line := "{\"n\":" + strconv.Itoa(i) + ",\"pad\":\"" + strings.Repeat("P", 60) + "\"}\n"
+		sb.WriteString(line)
+		want = append(want, strings.TrimSuffix(line, "\n"))
+	}
+	os.WriteFile(p, []byte(sb.String()), 0644)
+
+	raw, err := tailReadLastLines(p, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(got) != 2000 {
+		t.Fatalf("应取回 2000 行，实际 %d", len(got))
+	}
+	for i, line := range got {
+		if line != want[20000-2000+i] {
+			t.Fatalf("第 %d 行内容错乱（缓冲区被覆盖）:\n got %.90q\nwant %.90q", i, line, want[20000-2000+i])
+		}
+	}
+}
+
+func TestTailReadEmptyAndMissing(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "log.jsonl")
+	os.WriteFile(p, nil, 0644)
+	raw, err := tailReadLastLines(p, 2000)
+	if err != nil || len(raw) != 0 {
+		t.Fatalf("空文件应返回空且无错，实际 %q %v", raw, err)
+	}
+	if _, err := tailReadLastLines(filepath.Join(dir, "nope.jsonl"), 2000); err == nil {
+		t.Fatal("文件不存在应返回错误")
+	}
+}
+
+// 倒读路径必须填出与全量解析完全相同的 2000 条。
+func TestTailReadFillsRingIdenticallyToFullScan(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "call_log.jsonl")
+	var sb strings.Builder
+	for i := 0; i < 20000; i++ {
+		b, _ := json.Marshal(CallRecord{
+			ReqID: "r" + strconv.Itoa(i), Model: "m", Status: "ok",
+			Nodes: []string{"n"}, NodeNames: []string{"节点"},
+			Events: []CallEvent{{Type: "connect_ok"}},
+		})
+		sb.Write(b)
+		sb.WriteByte('\n')
+	}
+	os.WriteFile(p, []byte(sb.String()), 0644)
+
+	callLog.mu.Lock()
+	oldPath := callLog.path
+	callLog.path = p
+	callLog.records = nil
+	callLog.mu.Unlock()
+	t.Cleanup(func() {
+		callLog.mu.Lock()
+		callLog.path = oldPath
+		callLog.mu.Unlock()
+	})
+
+	loadCallLogFromFile()
+
+	callLog.mu.Lock()
+	defer callLog.mu.Unlock()
+	if len(callLog.records) != callLogCapacity {
+		t.Fatalf("应填 %d 条，实际 %d", callLogCapacity, len(callLog.records))
+	}
+	if callLog.records[0].ReqID != "r18000" || callLog.records[callLogCapacity-1].ReqID != "r19999" {
+		t.Fatalf("起止不对: %s .. %s", callLog.records[0].ReqID, callLog.records[callLogCapacity-1].ReqID)
+	}
+}
