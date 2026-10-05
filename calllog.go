@@ -219,8 +219,17 @@ func bucketNSumLocked() int64 {
 // unabsorbed <= absorbed 由构造保证（每个 skip 必有一个 consume），
 // 显式判一次是为了让「计数器自身被写坏」也走重建，而不是算出个巨大差值。
 //
-// 实测成本（673 个桶，-benchtime 2s）：8580 ns/op（8.6 µs，含读锁），
-// 而一次 /api/stats 查询本身 ~170 µs —— 占 5%，故**每次查询都做，不节流**。
+// 实测成本（673 个桶，-benchtime 2000x，本机）：7.8~9.0 µs/op，中位 8.5 µs（含读锁，0 分配）。
+//
+// ⚠️ 「一次 /api/stats 查询本身 ~170 µs」这个分母**已过期**，不要沿用。
+// 重测端到端（取窗口 → 两个折叠内核 → json.Marshal，稳态下
+// ensureBucketsUpToDate 是 no-op 故不计入；673 桶 / 17 模型 / 30d 窗口）：
+//
+//	修复前（每模型重排）3.33 ms/op、512 KB/op
+//	修复后（提排序）    0.80 ms/op、246 KB/op
+//
+// 所以占比是 **~1.1%**，不是 5%。结论不变但更宽裕：
+// **每次查询都做，不节流**。
 func checkBucketConservation() (sum, absorbed, unabsorbed int64, ok bool) {
 	callLog.mu.RLock()
 	defer callLog.mu.RUnlock()
@@ -801,46 +810,53 @@ func foldBucketsByModel(ts []string, bidx func(time.Time) int) map[string]map[in
 	return out
 }
 
-// sortedModelsInWindow 返回窗口内出现过请求的模型名（升序）。
-// 等价于改造前在 callback 内建键的行为（先过滤窗口再建键）。
+// foldModelsInWindow 一把读锁、一份键快照，折叠出窗口内按模型切分的全部聚合值。
 //
-// 注意 model == "" 是合法键，**不要过滤**——过滤会让面板的
+// 🔴 **为什么不能「每个模型折一次」**：旧实现是 sortedModelsInWindow +
+// 循环里的 foldOneModel(name)，而 foldOneModel 每次都调 sortedBucketKeysLocked()
+// —— **每个模型把全桶键重排一遍**。生产规模 673 桶 / 17 模型 = 17 次排序；
+// 稠密上界 73,440 桶 × 17 模型 ≈ 1.25 M 个 hourModelKey（24 字节）
+// ≈ 28.7 MB/op、508 ms/op。提排序后实测 ~1.7 MB/op、33 ms/op。
+//
+// 🔴 **遍历顺序仍必须按 (Hour, Model) 排序**，理由同 sortedBucketKeysLocked：
+// map 随机序会让同一份数据两次查询的浮点累加顺序不同。
+// 每个模型各自的累加顺序仍是「小时升序」—— 与修复前逐字相同，
+// 所以 avg_ttft_ms / avg_output_speed 不发生任何逐位变化。
+// 这正是「按 k.Model 分发」而不是「为每个模型各折一遍」必须保留的性质：
+// 两种写法下每个模型各自的累加顺序相同，整体结果才逐位相同。
+//
+// 🔴 **同一份键快照天然消掉一处账目分叉**：修复前 17 个模型在不同时刻各排
+// 一次序，落在两次排序之间的新桶会被「后面的模型」算上；若它属于已经折过
+// 的那个模型，就两边都不算 —— 那条请求从整张模型表里静默消失。
+// 单快照让「窗口内每个桶恰好被计一次」在构造上成立。
+//
+// model == "" 是合法键，**不要过滤**——过滤会让面板的
 // 「新增输入 + Output + 命中 == 真实消耗」这条闭合不变量红。
-func sortedModelsInWindow(ts []string, bidx func(time.Time) int) []string {
-	callLog.mu.RLock()
-	set := make(map[string]bool)
-	for k := range hourBuckets {
-		if bucketIndexOf(k.Hour, len(ts), bidx) < 0 {
-			continue
-		}
-		set[k.Model] = true
-	}
-	callLog.mu.RUnlock()
-	out := make([]string, 0, len(set))
-	for m := range set {
-		out = append(out, m)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// foldOneModel 把某模型的所有窗口内桶合并成一个值。
-//
-// 🔴 遍历顺序按 (Hour, Model) 排序而非 map 随机序，理由同 sortedBucketKeysLocked。
-func foldOneModel(name string, ts []string, bidx func(time.Time) int) *hourModelAgg {
+func foldModelsInWindow(ts []string, bidx func(time.Time) int) ([]string, map[string]*hourModelAgg) {
 	callLog.mu.RLock()
 	defer callLog.mu.RUnlock()
-	var dst hourModelAgg
+
+	aggs := make(map[string]*hourModelAgg, 64)
 	for _, k := range sortedBucketKeysLocked() {
-		if k.Model != name {
-			continue
-		}
 		if bucketIndexOf(k.Hour, len(ts), bidx) < 0 {
 			continue
 		}
-		mergeAggTo(&dst, hourBuckets[k])
+		a := aggs[k.Model]
+		if a == nil {
+			a = &hourModelAgg{}
+			aggs[k.Model] = a
+		}
+		mergeAggTo(a, hourBuckets[k])
 	}
-	return &dst
+	names := make([]string, 0, len(aggs))
+	for m := range aggs {
+		names = append(names, m)
+	}
+	// 仍然排序：等价于旧 sortedModelsInWindow「升序返回」的契约。
+	// map 遍历顺序随机化；整数求和可交换所以 TotalRequests 不受影响，
+	// 但保持升序让这条路径的行为与修复前可逐字对照。
+	sort.Strings(names)
+	return names, aggs
 }
 
 // ---- 全局环形缓冲 + JSONL 落盘 ----
@@ -1683,7 +1699,7 @@ func normalizeTrendRange(rng string) string {
 // Task 8：数据来源从「扫文件」换成「读小时桶」，与改造前逐字段等价。
 func modelStatsFromCallLog(rng string) *TokenStatsData {
 	// ⚠️ 必须在这里、且在读桶【之前】调用。
-	// sortedModelsInWindow 与 foldOneModel 都要读桶，而冷启动时桶是空的
+	// foldModelsInWindow 要读桶，而冷启动时桶是空的
 	// （要等第一次查询才 backfill）。若把 ensure 放在末尾，
 	// out.Models 会是空的而 out.TotalRequests 正常——
 	// API 返回 {"models":{},"total_requests":186212}，
@@ -1701,8 +1717,9 @@ func modelStatsFromCallLog(rng string) *TokenStatsData {
 func modelStatsWithBuckets(ts []string, bidx func(time.Time) int) *TokenStatsData {
 	out := &TokenStatsData{Models: map[string]*ModelStats{}}
 
-	for _, name := range sortedModelsInWindow(ts, bidx) {
-		a := foldOneModel(name, ts, bidx)
+	names, aggs := foldModelsInWindow(ts, bidx)
+	for _, name := range names {
+		a := aggs[name]
 		ms := &ModelStats{
 			RequestCount:       a.N,
 			PromptTokens:       a.PT,
