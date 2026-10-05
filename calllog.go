@@ -1037,17 +1037,45 @@ func (s *callLogStore) append(rec CallRecord) {
 		s.records = s.records[len(s.records)-callLogCapacity:]
 	}
 	p := s.path
-	// 落盘裁剪：Events 仅供内存环与面板日志页展示，磁盘侧的聚合查询
-	// （forEachBucketedCallRecord 及其三个调用方）只读 9 个标量字段，
-	// 从不访问 Events。实测 events 占全文件 38.8%，其中 73.1% 是
-	// detail 恒为空的 connect_ok，其信息已被同记录的 nodes[0]/node_names[0]
-	// 完全覆盖。
-	// 代价：重启后内存环里那批记录（约 12.9 小时的量）没有事件时间线。
+	// ---- 落盘裁 Events：只裁「干净」记录 ----
+	//
+	// Events 占落盘体积的大头（b3555de 实测 95.7 MB → 58.6 MB，−38.7%），
+	// 其中 73.1% 是 detail 恒为空的 connect_ok，信息已被同记录的
+	// nodes[0]/node_names[0] 完全覆盖。但**无条件**裁掉是错的：恢复记录
+	// 的用户在重启后会看到日志页空掉一大块——徽章（clHasIssue）、标签文字
+	// （clIssueLabel）、事件时间线、以及时段表和节点表两列「异常/切换」
+	// 全都读 events。面板默认 ?limit=500，实测该窗口内 p50 只有 19 条、
+	// p90 有 146 条记录带 events，所以这不是「偶尔丢一条」而是日常可见。
+	//
+	// 判据用 CallRecord.HasIssue()：它的类型集合与 static/admin.html 的
+	// CL_ISSUE_TYPES 逐项相同，与 clHasIssue 同判。88.84% 的记录
+	// HasIssue 为假，对它们 events 在 UI 上永远不会被显示一行，
+	// 落盘是纯浪费。
+	//
+	// ⚠️ **修不回历史**：call_log.jsonl 无轮转机制，磁盘上已有的存量
+	// （实测 95.7 MB，约 7 周）本来就是当前构建写的，从来就没有 events。
+	// 这条只对部署后新写入的记录生效。
+	//
+	// ⚠️ **体积数字要按实测报，别沿用 −38.7% 那个标题数字**：
+	// 生产 100.4 MB 完整日志上实测，无条件裁 58.6 MB（−38.7%），
+	// 本方案 72.5~78.3 MB（−22% ~ −24%）——保住约 57%~63% 的原收益。
+	// 而 −38.7% 那个数字落到实际只有 5.9 ms 启动 + 37 MB 磁盘：查询早已
+	// 不读文件（Task 7 改成读小时桶），所以省下的字节对查询零影响。
+	//
+	// ⚠️ **本方案依赖的是前端约定，不是后端不变量**：
+	//   - 前端保证只对 clHasIssue 为真的记录渲染时间线（admin.html 的
+	//     `if(issue&&exp)` 与 `const chev=issue?(exp?'▾':'▸'):''`）。
+	//     **若将来前端要给成功记录也加展开视图，这一条必须重估。**
+	//   - /api/call-log 对「干净记录」不再返回 events。本项目 UI 无感知
+	//     （前端一律 `(r.events||[])`），但若有第三方消费者读这个接口，
+	//     它会看到字段消失。
 	//
 	// Marshal 必须在锁内、且紧邻落盘：line 的长度就是 parsedTo 的增量，
 	// 两者必须是同一份字节，否则推进量与真正写下去的量会对不上。
 	diskRec := rec
-	diskRec.Events = nil
+	if !diskRec.HasIssue() {
+		diskRec.Events = nil
+	}
 	var line []byte
 	if p != "" {
 		// Marshal 失败（OutputSpeed 为 NaN/±Inf）时 line 为 nil，
