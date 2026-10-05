@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1689,14 +1690,35 @@ func modelStatsWithBuckets(ts []string, bidx func(time.Time) int) *TokenStatsDat
 		// UI 显示到 0.1 t/s 不可见。**不可修**：逐位一致要按桶顺序重放增量平均，
 		// 复杂度回到 O(记录数)，与 O(桶数) 的目标冲突。
 		//
-		// 两个计数各自判零（hourModelAgg.add 里 SpeedN 与 TTFTN 恒同步增减，
-		// 但不必依赖这条不变式）：写成同一个 if 时一旦两者发散就是 0/0 = NaN，
-		// 而 encoding/json 遇 NaN 直接报错，整个 /api/stats?range= 响应变 500。
+		// 判据要挡**两种**非有限结果，缺一不可：
+		//  1. 0/0 = NaN。两个计数各自判零即可（hourModelAgg.add 里 SpeedN 与
+		//     TTFTN 恒同步增减，但不必依赖这条不变式）——写成同一个 if 时一旦
+		//     两者发散就是 0/0。
+		//  2. 分子本身非有限。add 是裸 `x += v`，两条 1e308 就把 SpeedSum 顶成
+		//     +Inf（MaxFloat64 ≈ 1.798e308）；除以任何正数仍是 +Inf。
+		//
+		// 为什么第 2 种也必须挡：encoding/json 遇 **+Inf 与 NaN 同样**返回
+		// 「空输出 + error」（json: unsupported value: +Inf），不是把它序列化成
+		// null —— 于是整个 /api/stats?range= 变 500，而不是只脏一个字段。
+		//
+		// ⚠️ 这是**防御纵深，不是活 bug**。可达性已复核：
+		//   - add 只在 OutputSpeed > 0 时累加 → NaN 进不来（NaN > 0 为假）；
+		//   - jsonFloat 把 Inf/NaN **字面量**归零 → 字面量进不来；
+		//   - 生产实测 output_speed ∈ [1.804, 215152]，两条相加溢出需每条
+		//     ≥ 8.99e307，差 300 个数量级；写入侧上界
+		//     int64 completionTok / 最小正 genSec ≈ 9.2e27，同样够不着；
+		//   - TTFTSum 每项是 float64(int64)，要堆到 1.8e308 需约 1e289 行。
+		// 唯一可达路径是**日志文件被手工编辑 / 损坏 / 另一个写入端产出荒谬值**。
+		// 留着的理由是代价为零（每次查询两个 IsInf/IsNaN），而漏掉的代价是 500。
 		if a.SpeedN > 0 {
-			ms.AvgOutputSpeed = a.SpeedSum / float64(a.SpeedN)
+			if v := a.SpeedSum / float64(a.SpeedN); !math.IsInf(v, 0) && !math.IsNaN(v) {
+				ms.AvgOutputSpeed = v
+			}
 		}
 		if a.TTFTN > 0 {
-			ms.AvgTTFTMs = a.TTFTSum / float64(a.TTFTN)
+			if v := a.TTFTSum / float64(a.TTFTN); !math.IsInf(v, 0) && !math.IsNaN(v) {
+				ms.AvgTTFTMs = v
+			}
 		}
 		out.Models[name] = ms
 		// 🔴 total_requests 与 models 取自**同一个 a**，不是再独立折叠一遍。
