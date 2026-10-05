@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"math"
 	"strconv"
 )
@@ -205,6 +206,27 @@ func jsonReadKey(b []byte, i int) ([]byte, int) {
 // jsonReadString 读取从 i 开始的 JSON 字符串（line[i] == '"'），返回内容与结束位置。
 // 无转义时走单次拷贝快路径（内容是子切片，仍要 string() 一次）；
 // 有转义时委托 strconv.Unquote 保证与 encoding/json 一致。
+//
+// 🔴 **兜底 json.Unmarshal 不是可选优化，是正确性的一部分。**
+//
+// 原因不在「扫描器该更宽容」，而在**参照系用错了**：strconv.Unquote 的
+// 语法是 **Go 字符串字面量**，不是 JSON。它拒绝 \uD800-\uDFFF 是因为 Go 源码里
+// 不允许裸代理字符，而**在 JSON 语境下成对代理恰恰合法**（encoding/json 照收，
+// 解成 1 个 rune）。所以 Unquote 失败既可能是「真的非法 JSON」，也可能只是
+// 「合法但非 Go 字面量」。两种情况都被压成 ("", -1)，parseStatsLine 随之返回
+// false —— **整条合法记录从所有统计里静默消失**。实测 18 万行生产日志里
+// 代理对出现 0 次，所以这个洞从未被数据触发过，只是一直在。
+//
+// 边界必须分开看，别混成一句「比 encoding/json 宽容」：
+//   - **数值上刻意更宽**：饱和值归零（jsonInt/jsonFloat）、脏数值不中断整行，
+//     这是 Task 5 有意为之的偏离。
+//   - **字符串上必须正好等于 encoding/json**：本文件声称的一致性基准就是它，
+//     超出或达不到都会让 18 万行对拍的分叉无法解释。孤立代理（\uD83d、\uDE00
+//     单独出现）encoding/json 一律折成 U+FFFD，本函数现在也如此。
+//
+// 热路径代价为零：这条兜底只在 Unquote **已经失败**时才进。生产 186,212 行里
+// 走转义慢路径的只有 2 次，且 json.Marshal 不转义非 ASCII，所以两次都是零收益
+// 也不亏。全量日志里高代理（\uD800-\uDBFF）出现 0 次。
 func jsonReadString(b []byte, i int) (string, int) {
 	start := i
 	i++
@@ -220,6 +242,12 @@ func jsonReadString(b []byte, i int) (string, int) {
 				return string(b[start+1 : i-1]), i
 			}
 			if s, err := strconv.Unquote(string(b[start:i])); err == nil {
+				return s, i
+			}
+			// Unquote 说「不是 Go 字面量」。这**不等于**「不是合法 JSON 字符串」——
+			// 代理对转义正是如此。改问真正的参照系。
+			var s string
+			if err := json.Unmarshal(b[start:i], &s); err == nil {
 				return s, i
 			}
 			return "", -1
