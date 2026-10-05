@@ -1,0 +1,120 @@
+package main
+
+import (
+	"bytes"
+	"os"
+	"testing"
+	"time"
+)
+
+// 临时归因基准（跑完即删）：把 backfill 的四个阶段拆开计时，
+// 用来判断 791ms 里有多少是 Task 5 扫描器本身的地板、有多少是 backfill 的锅。
+func TestBackfillAttribution(t *testing.T) {
+	raw, err := os.ReadFile("/tmp/prod_log.jsonl")
+	if err != nil {
+		t.Skip("无生产日志")
+	}
+	buf := raw
+
+	// 阶段 1：只切行（bytes.IndexByte），不解析
+	t0 := time.Now()
+	lines := 0
+	for pos := 0; pos < len(buf); {
+		rel := bytes.IndexByte(buf[pos:], '\n')
+		if rel < 0 {
+			break
+		}
+		pos += rel + 1
+		lines++
+	}
+	dSplit := time.Since(t0)
+
+	// 阶段 2：切行 + parseStatsLine
+	t0 = time.Now()
+	for pos := 0; pos < len(buf); {
+		rel := bytes.IndexByte(buf[pos:], '\n')
+		if rel < 0 {
+			break
+		}
+		var r slimRec
+		parseStatsLine(buf[pos:pos+rel], &r)
+		pos += rel + 1
+	}
+	dParse := time.Since(t0)
+
+	// 阶段 3：+ hourKeyFor（time.Parse + In(time.Local)）
+	t0 = time.Now()
+	for pos := 0; pos < len(buf); {
+		rel := bytes.IndexByte(buf[pos:], '\n')
+		if rel < 0 {
+			break
+		}
+		var r slimRec
+		if parseStatsLine(buf[pos:pos+rel], &r) {
+			hourKeyFor(r.TS, r.Model)
+		}
+		pos += rel + 1
+	}
+	dKey := time.Since(t0)
+
+	// 阶段 4：+ staged map + add（= backfill 的 CPU 部分）
+	t0 = time.Now()
+	staged := make(map[hourModelKey]*hourModelAgg, 512)
+	for pos := 0; pos < len(buf); {
+		rel := bytes.IndexByte(buf[pos:], '\n')
+		if rel < 0 {
+			break
+		}
+		var r slimRec
+		if parseStatsLine(buf[pos:pos+rel], &r) {
+			if k, ok := hourKeyFor(r.TS, r.Model); ok {
+				b := staged[k]
+				if b == nil {
+					b = &hourModelAgg{}
+					staged[k] = b
+				}
+				b.add(&r)
+			}
+		}
+		pos += rel + 1
+	}
+	dFull := time.Since(t0)
+
+	// 阶段 5：纯 time.Parse 的成本（hourKeyFor 的主体）
+	var recs []slimRec
+	for pos := 0; pos < len(buf); {
+		rel := bytes.IndexByte(buf[pos:], '\n')
+		if rel < 0 {
+			break
+		}
+		var r slimRec
+		if parseStatsLine(buf[pos:pos+rel], &r) {
+			recs = append(recs, r)
+		}
+		pos += rel + 1
+	}
+	t0 = time.Now()
+	for i := range recs {
+		hourKeyFor(recs[i].TS, recs[i].Model)
+	}
+	dHourKey := time.Since(t0)
+
+	// 阶段 6：纯 ReadAt（读 100MB）
+	f, err := os.Open("/tmp/prod_log.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := make([]byte, len(buf))
+	t0 = time.Now()
+	f.ReadAt(dst, 0)
+	dRead := time.Since(t0)
+	f.Close()
+
+	t.Logf("行数            = %d", lines)
+	t.Logf("1 切行          = %v", dSplit)
+	t.Logf("2 +parseStatsLine = %v  (+%v)", dParse, dParse-dSplit)
+	t.Logf("3 +hourKeyFor     = %v  (+%v)", dKey, dKey-dParse)
+	t.Logf("4 +staged/add     = %v  (+%v)  <- backfill 的 CPU 部分", dFull, dFull-dKey)
+	t.Logf("  其中 hourKeyFor 单独 = %v", dHourKey)
+	t.Logf("5 ReadAt %d 字节 = %v", len(buf), dRead)
+}

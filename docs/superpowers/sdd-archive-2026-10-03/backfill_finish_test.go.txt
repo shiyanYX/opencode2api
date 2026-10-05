@@ -1,0 +1,449 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// 本文件是 Task 7 收尾时补的用例，覆盖「接手到的实现」里前一轮没测到的路径。
+//
+// 命名沿用 bucket_test.go 的约定：断言的是**行为**，失败信息必须能指出
+// 「哪几个模型、各几条」，而不是只丢一个总数（brief 里的「算术恰好对上」假绿）。
+
+// ---- 缺陷 1：并发 append 与 backfill 的交接窗口会重复计数 ----
+
+// backfill 在 RLock 下快照 from = parsedTo，随后**在锁外**才 f.Stat() 拿 size。
+// 这中间若落进一个 append，且此刻 bucketsSeeded == true，那条 append 会
+// 「写盘 + incr 进桶 + 推进 parsedTo」三件事一起做 —— 于是 size > from，
+// backfill 认定 [from, size) 是待吸区间，**把 append 刚计过的那条又吸一遍**。
+//
+// 实测（接手时的实现，4 核 / 单写者 goroutine 压满）：
+//
+//	落盘 10,472 条 → 桶内 18,686 条（+78%），且 parsedTo 精确等于文件大小
+//
+// 即面板上的请求数、token、速度均值会**永久虚高且单调发散**，永不自愈。
+// 这不是「理论上可能」，是稳定复现。
+//
+// 判据取「写盘条数 + 种子条数 == 桶内条数」的精确相等：不能放宽成
+// 「差值小于某个百分比」—— 那正是让这类 bug 溜过去的写法。
+// 写者停手后的最后一次 backfill 必须把剩余字节吸干净，所以这个判据是确定的。
+func TestEnsureBucketsDoesNotDoubleCountConcurrentAppends(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	var sb strings.Builder
+	for i := 0; i < 50; i++ {
+		sb.WriteString(statsLine(ts, "seed", "ok", 1, 1, 0, 0, 0, 0))
+	}
+	useTempCallLogRaw(t, sb.String())
+	markBackfillPending(t)
+
+	ensureBucketsUpToDate() // 吸掉种子，并置位 bucketsSeeded → 进入 incr 稳态
+	if n, _ := bucketSnapshot(); n != 50 {
+		t.Fatalf("前置条件不成立：种子 50 条，实际 %d", n)
+	}
+
+	var written int64
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			callLog.append(CallRecord{ReqID: "r", TS: ts, Model: "hot", Status: "ok", PromptTokens: 1})
+			atomic.AddInt64(&written, 1)
+		}
+	}()
+
+	// 反复触发「快照 → 解析 → 合并」的交接窗口。
+	for i := 0; i < 2000; i++ {
+		ensureBucketsUpToDate()
+	}
+	close(stop)
+	wg.Wait()
+
+	// 写者已停：此时任何一次 backfill 都必须把剩下的字节吸干净且不多算。
+	ensureBucketsUpToDate()
+
+	n, pt := bucketSnapshot()
+	want := 50 + atomic.LoadInt64(&written)
+	st, err := os.Stat(callLogPathForTest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt != st.Size() {
+		t.Fatalf("parsedTo(%d) 应等于文件大小 %d（还有字节没吸干净）", pt, st.Size())
+	}
+	if n != want {
+		t.Fatalf("重复计数：落盘 %d 条 + 种子 50 条 = %d，桶内却是 %d（多出 %d）",
+			want-50, want, n, n-want)
+	}
+}
+
+// 约束 ③的强度版：并发 append × 并发 backfill，在 -race 下不得报 race，
+// 且**每个在途 append 都不被 backfill 阻塞**。
+//
+// 上一轮的 TestEnsureBucketsDoesNotHoldLogLockDuringParse 用「钩子卡住解析段」
+// 精确验证了单个 append 不被阻塞；这条把它放到真实并发下，顺带让 -race
+// 有机会看到 map 与 parsedTo 的并发访问。
+//
+// 阻塞上限取 5s：远大于正常 append 的 ~15µs，远小于任何「真的持锁做全量解析」
+// 的实现（那会是几百毫秒到几秒，且随文件增长）。
+func TestAppendNotBlockedByConcurrentBackfill(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	var sb strings.Builder
+	for i := 0; i < 3000; i++ {
+		sb.WriteString(statsLine(ts, "m", "ok", 1, 1, 0, 0, 0, 0))
+	}
+	useTempCallLogRaw(t, sb.String())
+	markBackfillPending(t)
+
+	stop := make(chan struct{})
+	var backfills, blocked atomic.Int64
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			ensureBucketsUpToDate()
+			backfills.Add(1)
+		}
+	}()
+
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				done := make(chan struct{})
+				go func() {
+					callLog.append(CallRecord{ReqID: "r", TS: ts, Model: "m", Status: "ok", PromptTokens: 1})
+					close(done)
+				}()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					// 不 Fatal：先把阻塞次数记下来，让 goroutine 收尾后再断言，
+					// 否则 t.Fatal 会在后台 goroutine 还在跑时直接终止进程。
+					blocked.Add(1)
+					<-done
+				}
+			}
+		}()
+	}
+
+	// 让并发跑够时间再停。
+	time.Sleep(1500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	if b := blocked.Load(); b != 0 {
+		t.Fatalf("有 %d 次 append 超过 5s 未返回：backfill 持 callLog.mu 做了全量解析", b)
+	}
+	if backfills.Load() == 0 {
+		t.Fatal("backfill 一次都没跑起来，前置条件不成立")
+	}
+	t.Logf("并发窗口内 backfill 跑了 %d 轮，无一次 append 被阻塞", backfills.Load())
+
+	// 收尾：吸干净，计数必须精确。
+	ensureBucketsUpToDate()
+	if _, pt := bucketSnapshot(); pt != 0 {
+		if st, err := os.Stat(callLogPathForTest()); err == nil && pt != st.Size() {
+			t.Fatalf("收尾后 parsedTo=%d != 文件大小 %d", pt, st.Size())
+		}
+	}
+}
+
+// ---- 缺陷 2：handleBackfillOpenError 没有真的判 fs.ErrNotExist ----
+
+// 函数自述「只在确实不存在时才清桶」，但代码只判断「Stat 是否成功」。
+// 两者不等价：Stat 自己也会失败，且失败原因与 open 失败的原因可以完全无关
+// （fd 耗尽 EMFILE/ENFILE、路径里的某一段不是目录 ENOTDR、权限 EACCES……）。
+// 那种情形下桶会被**整个清空** —— 面板瞬间闪回 0，而日志文件一直好好地在那儿。
+//
+// ENOTDIR 用不了：Go 把 ENOTDIR 也归进 ErrNotExist，用例会测不到东西。
+// 真正能把「Stat 失败」与「文件不存在」拆开的是这两条路：
+//
+//   - 父目录没有 x 权限 → open 与 Stat 都是 EACCES，两者都不是 ErrNotExist
+//   - 符号链接自环      → open 与 Stat 都是 ELOOP
+//
+// 复现不了 root 语义，所以 EACCES 那一支按 uid 跳过。
+func TestHandleBackfillOpenErrorKeepsBucketsWhenNotReallyMissing(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root 无视权限位，本用例不适用")
+	}
+	ts := time.Now().Format(time.RFC3339Nano)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "call_log.jsonl"),
+		[]byte(statsLine(ts, "m", "ok", 1, 1, 0, 0, 0, 0)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "call_log.jsonl")
+
+	// 父目录去掉 x：路径根本走不进去，open 与 Stat 都失败，
+	// 且失败原因**不是**「不存在」。
+	if err := os.Chmod(dir, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0755) })
+
+	if _, err := os.Open(p); err == nil {
+		t.Skip("当前环境能穿过 0000 目录，本用例不适用")
+	}
+	if _, err := os.Stat(p); err == nil {
+		t.Skip("Stat 竟然成功了，构不成前置条件")
+	}
+
+	setPathAndSeedBuckets(t, p, 42)
+
+	ensureBucketsUpToDate()
+
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	var n int64
+	for _, v := range hourBuckets {
+		n += v.N
+	}
+	if n != 42 {
+		t.Fatalf("打开失败的原因不是「文件不存在」时，桶不得被清空；实际桶内 %d 条", n)
+	}
+	if parsedTo != 1000 {
+		t.Fatalf("parsedTo 不得被重置，实际 %d", parsedTo)
+	}
+	if !bucketsSeeded {
+		t.Fatal("bucketsSeeded 不得被改写")
+	}
+}
+
+// setPathAndSeedBuckets 把 callLog.path 指向 p，并预置一批「已经吸进桶」的统计，
+// 供 handleBackfillOpenError 的用例断言「桶没被清掉」。
+func setPathAndSeedBuckets(t *testing.T, p string, n int64) {
+	t.Helper()
+	callLog.mu.Lock()
+	old := callLog.path
+	callLog.path = p
+	hourBuckets = map[hourModelKey]*hourModelAgg{
+		{Hour: 1, Model: "m"}: {N: n, OK: n},
+	}
+	parsedTo = 1000
+	statsGen = 0
+	bucketsSeeded = true
+	callLog.mu.Unlock()
+	t.Cleanup(func() {
+		callLog.mu.Lock()
+		callLog.path = old
+		hourBuckets = nil
+		parsedTo = 0
+		statsGen = 0
+		bucketsSeeded = true
+		callLog.mu.Unlock()
+	})
+}
+
+// 同样场景的另一种触发方式：文件还在，只是整条路径读不了。
+// 桶同样不得被清空 —— 文件还在，下一轮就能吸回来。
+// 用自环软链（ELOOP）而非权限位：不依赖 uid，且 Stat 同样失败。
+func TestHandleBackfillOpenErrorKeepsBucketsOnSymlinkLoop(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "loop")
+	if err := os.Symlink(p, p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); err == nil {
+		t.Skip("当前内核能解析自环软链，本用例不适用")
+	} else if os.IsNotExist(err) {
+		return // Go 把 ELOOP 也归进 ErrNotExist，本用例在此不成立
+	}
+
+	setPathAndSeedBuckets(t, p, 7)
+	ensureBucketsUpToDate()
+
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	var n int64
+	for _, v := range hourBuckets {
+		n += v.N
+	}
+	if n != 7 {
+		t.Fatalf("ELOOP 时桶不得被清空；实际桶内 %d 条", n)
+	}
+}
+
+// 真正「文件不存在」时清桶这条路径仍要保留：清空 = 文件没了 + 桶也该没。
+func TestHandleBackfillOpenErrorClearsBucketsWhenFileReallyMissing(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	p := useTempCallLogRaw(t, statsLine(ts, "m", "ok", 1, 1, 0, 0, 0, 0))
+	markBackfillPending(t)
+	ensureBucketsUpToDate()
+	if n, _ := bucketSnapshot(); n != 1 {
+		t.Fatalf("前置条件不成立：桶内 %d 条", n)
+	}
+
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+
+	ensureBucketsUpToDate()
+
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	var n int64
+	for _, v := range hourBuckets {
+		n += v.N
+	}
+	if n != 0 || parsedTo != 0 {
+		t.Fatalf("文件确实不存在时桶与 parsedTo 都该清空：n=%d parsedTo=%d", n, parsedTo)
+	}
+	if !bucketsSeeded {
+		t.Fatal("桶已清空、文件不存在，此刻 bucketsSeeded 必须为 true")
+	}
+}
+
+// ---- 约束 ② 的另一半：clear() 之后立刻 append，再 backfill ----
+
+// bucketsSeeded 的「复用」在 clear() 这条路上才最容易错：
+// clear 置 true 并删掉文件，紧接着 append 会用 O_CREATE 重建文件，
+// incr 进桶并把 parsedTo 推到「刚写的那一行」为止。
+// 此时 backfill 若从 parsedTo 起吸 —— 正确；
+// 若从 0 起吸（把 parsedTo 当成「上次的进度」），那条记录就会被计两次。
+//
+// 另一半方向：若 clear 之后**没有**置位，append 不 incr，
+// 统计会永久滞后一轮。两侧一起断言。
+func TestEnsureBucketsAfterClearThenAppendDoesNotDoubleCount(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	useTempCallLogRaw(t, statsLine(ts, "old", "ok", 9, 9, 0, 0, 0, 0))
+	markBackfillPending(t)
+	ensureBucketsUpToDate()
+	if n, _ := bucketSnapshot(); n != 1 {
+		t.Fatalf("前置条件不成立：clear 之前应有 1 条，实际 %d", n)
+	}
+
+	callLog.clear() // 桶清空 / parsedTo=0 / bucketsSeeded=true / 删文件 / gen++
+
+	// clear 之后的第一条：走 incr 路径，当场就该在桶里。
+	callLog.append(CallRecord{ReqID: "r1", TS: ts, Model: "new", Status: "ok", PromptTokens: 2})
+	callLog.append(CallRecord{ReqID: "r2", TS: ts, Model: "new", Status: "ok", PromptTokens: 2})
+
+	n0, pt0 := bucketSnapshot()
+	if n0 != 2 {
+		t.Fatalf("clear 之后 append 必须立刻走 incr，桶内应立刻有 2 条，实际 %d"+
+			"（clear 之后 bucketsSeeded 没被置位，统计会永久滞后一轮）", n0)
+	}
+
+	ensureBucketsUpToDate()
+	ensureBucketsUpToDate()
+
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	var n int64
+	models := map[string]int64{}
+	for k, v := range hourBuckets {
+		n += v.N
+		models[k.Model] += v.N
+	}
+	if n != 2 {
+		t.Fatalf("backfill 后仍是 2 条，实际 %d（重复计入或幽灵统计复活）", n)
+	}
+	if models["old"] != 0 {
+		t.Fatalf("clear 前的数据不得复活，键集=%v", models)
+	}
+	if models["new"] != 2 {
+		t.Fatalf("新数据应恰好 2 条，实际 %d", models["new"])
+	}
+	// parsedTo 必须精确等于文件大小 —— 这正是 append 的 incr 与 backfill
+	// 的扫描区不重叠的唯一可观测证据。
+	st, err := os.Stat(callLog.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pt0 != st.Size() {
+		t.Fatalf("append 之后 parsedTo=%d 应等于文件大小 %d", pt0, st.Size())
+	}
+}
+
+// ---- 乱序：落进**已结束**的小时桶必须 += ----
+
+// TestEnsureBucketsIncrementalAddsToExistingHour 用的是同一个 ts，
+// 咬住的是「同一桶」。生产里真正棘手的是**乱序**：
+// 38.6% 的记录落盘顺序 ≠ 时间顺序，实测 610 条落进已经结束的小时桶，
+// 最大回退 46 分钟。此时「不存在则新建并赋值」在新建分支正确、
+// 在命中分支会把旧值整个抹掉 —— 而抹掉的是**整个历史小时的统计**。
+//
+// 断言拆成两个小时分别校验：老小时必须 2 条、当前小时必须 1 条，
+// 不能只看总数（总数对但分布错，正是这类 bug 的典型假绿）。
+func TestEnsureBucketsOutOfOrderLineAddsToClosedHour(t *testing.T) {
+	// 固定基准时刻，避免跨整点让「当前小时」的键算错。
+	base := time.Now().Truncate(time.Hour)
+	prevHour := base.Add(-30 * time.Minute) // 已经过去的那个小时
+	curHour := base.Add(5 * time.Minute)
+
+	var sb strings.Builder
+	sb.WriteString(statsLine(prevHour.Format(time.RFC3339Nano), "m", "ok", 10, 5, 0, 0, 0, 0))
+	sb.WriteString(statsLine(curHour.Format(time.RFC3339Nano), "m", "ok", 1, 1, 0, 0, 0, 0))
+	p := useTempCallLogRaw(t, sb.String())
+	markBackfillPending(t)
+
+	ensureBucketsUpToDate()
+
+	callLog.mu.RLock()
+	got := map[int64]*hourModelAgg{}
+	for k, v := range hourBuckets {
+		cp := *v
+		got[k.Hour] = &cp
+	}
+	callLog.mu.RUnlock()
+	if len(got) != 2 {
+		t.Fatalf("前置条件不成立：应有两个小时的桶，实际 %d", len(got))
+	}
+
+	// 一条 46 分钟前时间戳的记录迟到（生产实测最大回退 46 分钟）
+	appendRawLines(t, p, statsLine(prevHour.Format(time.RFC3339Nano), "m", "ok", 7, 3, 0, 0, 0, 0))
+	ensureBucketsUpToDate()
+
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	oldKey := hourModelKey{
+		Hour:  time.Date(prevHour.Year(), prevHour.Month(), prevHour.Day(), prevHour.Hour(), 0, 0, 0, time.Local).Unix(),
+		Model: "m",
+	}
+	curKey := hourModelKey{
+		Hour:  time.Date(curHour.Year(), curHour.Month(), curHour.Day(), curHour.Hour(), 0, 0, 0, time.Local).Unix(),
+		Model: "m",
+	}
+	if oldKey.Hour == curKey.Hour {
+		t.Fatal("前置条件不成立：两个时刻落在了同一个小时桶")
+	}
+	ov, ok := hourBuckets[oldKey]
+	if !ok {
+		t.Fatalf("已结束的小时桶不见了：%v", bucketKeysLocked())
+	}
+	if ov.N != 2 || ov.PT != 17 || ov.CT != 8 {
+		t.Fatalf("迟到记录必须 += 进已结束的桶（覆盖会把整个小时的统计抹掉）：%+v", ov)
+	}
+	cv, ok := hourBuckets[curKey]
+	if !ok {
+		t.Fatalf("当前小时的桶不见了：%v", bucketKeysLocked())
+	}
+	if cv.N != 1 || cv.PT != 1 || cv.CT != 1 {
+		t.Fatalf("当前小时不该被迟到记录影响：%+v", cv)
+	}
+}

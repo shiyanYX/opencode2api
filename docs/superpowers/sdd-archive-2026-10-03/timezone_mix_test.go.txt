@@ -1,0 +1,253 @@
+package main
+
+import (
+	"sort"
+	"testing"
+	"time"
+)
+
+// 生产日志真的混存时区：185,722 行是 +08:00，490 行是 Z（2026-08-14 进程换过 TZ）。
+// 两者必须归入**同一个本地小时桶** —— 否则那 490 行会落进早 8 小时的桶里，
+// 面板上的请求数 / token / 速度均值**静默出错，不报错**。
+//
+// 这是计划 `docs/superpowers/plans/2026-10-03-log-perf.md` Task 11 Step 1
+// 标为「硬门禁」但长期零覆盖的一条（spec §9 #9）。
+//
+// ---- 本文件的写法与计划原文的差别，以及为什么 ----
+//
+// 计划原文用 `base := time.Now().Local()` 现场拼出两种写法：
+//
+//	withOffset := base.Format(time.RFC3339Nano) // +08:00
+//	asZ       := base.UTC().Format(time.RFC3339Nano)
+//
+// 它的警告完全正确：TZ=UTC 时 `base` 本来就在 UTC，这两行输出**同一个字符串**
+// （实测都是 2026-10-03T09:30:00Z），测试退化成「同一串解析两次」，
+// 对「Z 被当 UTC」这个 bug 恒绿。原文给的解法是「不在 +08:00 就 Fatalf」，
+// 代价是整套测试在 TZ=UTC 的机器上直接红（CI 默认就是 UTC）。
+//
+// 本文件改用**硬编码的两种写法**：同一瞬间分别以 `+08:00` 与 `Z` 写死成
+// 两个字符串常量。这直接掐掉了退化的**成因**（两串由同一个本地时间派生），
+// 于是：
+//
+//   - 不管宿主机是 UTC、Asia/Shanghai 还是 America/New_York，
+//     喂进去的都是**两个不同的字符串**，测试恒有鉴别力；
+//   - 期望值改成「桶键必须落在该记录所在的本地小时内」这种
+//     **与宿主机时区无关**的判据，而不是把某个时区的答案写死；
+//   - 不需要 skip，也不需要 t.Fatalf，更不需要「必须用某个 TZ 跑」的外部约定。
+//
+// 🔴 **不要改成 `time.Local = time.FixedZone(...)` 的写法。** 本包（mihomo /
+// quic-go / cgo 依赖链）里任何对 `time.Local` 的写入——而写一个与时区无关的
+// 普通包级变量是好的——都会让 `go test -race ./...` 在**进程退出时**段错误：
+//
+//	--- PASS: TestMixedTimezoneOffsetsFoldIntoSameLocalHour (0.00s)
+//	PASS
+//	signal: segmentation fault (core dumped)
+//
+// GOTRACEBACK=all 也拿不到 Go 栈（崩在 TSan 插桩的运行时/非 Go 线程里）；
+// 同样的代码在独立的最小 module 里不复现。go1.26.5 实测。
+// 这也是硬编码写法比「测试内钉时区」更优的第二个理由。
+
+// tzInstants 是一对时间戳：一个瞬间的两种写法，或两条不该合并的记录。
+type tzInstants struct{ a, b string }
+
+// parse 校验这对时间戳的前置条件并返回解析结果。
+//
+// 「字面必须不同」是**反恒绿守卫**：两条 ts 完全相同时，
+// 任何关于时区折叠的断言都退化成「同一串解析两次」，必然恒绿。
+// 这是计划警告里那个失败模式的哨兵 —— 它让退化**当场失败**而不是悄悄通过。
+func (p tzInstants) parse(t *testing.T) (ta, tb time.Time) {
+	t.Helper()
+	var err error
+	if ta, err = time.Parse(time.RFC3339, p.a); err != nil {
+		t.Fatalf("ts %q 解析失败：%v", p.a, err)
+	}
+	if tb, err = time.Parse(time.RFC3339, p.b); err != nil {
+		t.Fatalf("ts %q 解析失败：%v", p.b, err)
+	}
+	if p.a == p.b {
+		t.Fatalf("致命：两条记录的字面 ts 完全相同（%q），"+
+			"本用例退化为「同一串解析两次」，对任何时区 bug 都恒绿", p.a)
+	}
+	return ta, tb
+}
+
+// tzAbsorb 把两行记录写进临时日志并跑一次 backfill。
+//
+// 用 resetConservationState 而非只靠 useTempCallLogRaw 内建的 resetHourBuckets：
+// 后者不碰 absorbedRecords / unabsorbedRecords / bucketRebuildNotBefore，
+// 而这三个是**包级全局** —— 不归零的话本用例的 ΣN(=2) 与
+// absorbed-unabsorbed(=前序用例遗留的值) 对不上，ensureBucketsUpToDate 会判定
+// 不守恒并触发一次全量重建（既刷日志，也让本用例变成在测重建路径而不是测时区折叠）。
+func tzAbsorb(t *testing.T, p tzInstants, ptA, ptB int64) {
+	t.Helper()
+	useTempCallLogRaw(t,
+		statsLine(p.a, "m", "ok", ptA, 1, 7, 0, 0, 0)+
+			statsLine(p.b, "m", "ok", ptB, 2, 7, 0, 0, 0))
+	resetConservationState(t)
+	if _, _, _, n := conservationReads(); n != 0 {
+		t.Fatalf("前提不成立：进入 backfill 前 bucketRebuilds=%d，应为 0", n)
+	}
+	ensureBucketsUpToDate()
+	if _, _, _, n := conservationReads(); n != 0 {
+		t.Fatalf("两条记录本不该触发任何重建，bucketRebuilds=%d", n)
+	}
+}
+
+// tzBucketHour 返回该 ts 应当落进的桶键（本地整点的 Unix 秒）。
+//
+// 判据写成「桶起点 ∈ [记录瞬间, 记录瞬间+1h)」这种形式，而不是直接比一个
+// 写死的 Unix 常量：前者只依赖「同一瞬间的两种写法必须折叠到同一个本地整点」
+// 这**唯一**的不变量，对宿主机时区完全中立；后者等于把某个具体时区的答案
+// 写进测试，换台机器就假失败。
+func tzBucketHour(t *testing.T, ts string) int64 {
+	t.Helper()
+	inst, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lt := inst.In(time.Local)
+	return time.Date(lt.Year(), lt.Month(), lt.Day(), lt.Hour(), 0, 0, 0, time.Local).Unix()
+}
+
+// tzKeys 返回桶键升序列表。
+func tzKeys() []int64 {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	out := make([]int64, 0, len(hourBuckets))
+	for k := range hourBuckets {
+		out = append(out, k.Hour)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// tzExplain 把桶键渲染成本地整点，失败信息里能直接看出差了几小时。
+func tzExplain(keys []int64) string {
+	s := "["
+	for i, k := range keys {
+		if i > 0 {
+			s += " "
+		}
+		s += time.Unix(k, 0).In(time.Local).Format("2006-01-02T15:04Z07:00")
+	}
+	return s + "]"
+}
+
+// tzAssertBucketsFor 断言桶键集合恰好是各条记录所属本地小时的起点。
+func tzAssertBucketsFor(t *testing.T, p tzInstants, want ...string) {
+	t.Helper()
+	wantKeys := make([]int64, 0, len(want))
+	for _, ts := range want {
+		wantKeys = append(wantKeys, tzBucketHour(t, ts))
+	}
+	sort.Slice(wantKeys, func(i, j int) bool { return wantKeys[i] < wantKeys[j] })
+	got := tzKeys()
+	if len(got) != len(wantKeys) {
+		t.Fatalf("桶数不对：输入 %s 期望 %d 个桶 %s，实际 %d 个 %s",
+			p, len(wantKeys), tzExplain(wantKeys), len(got), tzExplain(got))
+	}
+	for i := range wantKeys {
+		if got[i] != wantKeys[i] {
+			t.Fatalf("桶键不对：输入 %s 期望 %s，实际 %s", p, tzExplain(wantKeys), tzExplain(got))
+		}
+	}
+}
+
+// ---- 用例 1：同一瞬间的两种写法必须合流（计划 Task 11 Step 1 的不变量）----
+
+// 同一时刻的 `+08:00` 写法与 `Z` 写法必须落进同一个桶。
+//
+// 逐个偏移跑（+08:00 / -05:00 / +05:45）：若 hourKeyFor 里少写 `.In(time.Local)`，
+// 三对**全部**分桶（字面小时位分别差 8 / 5 / 5.75 小时）。
+// 逐偏移跑还能证明判据没有偷偷硬编码成 +08:00 —— 生产机换过 TZ，这正是出事路径。
+func TestMixedTimezoneOffsetsFoldIntoSameLocalHour(t *testing.T) {
+	cases := []struct {
+		name string
+		p    tzInstants
+	}{
+		// 同一瞬间的两种写法，字面小时位差 8 小时。
+		{"+08", tzInstants{"2026-10-03T09:30:00+08:00", "2026-10-03T01:30:00Z"}},
+		// 负偏移：证明折叠方向与 +08 无关。
+		{"-05", tzInstants{"2026-10-03T09:30:00-05:00", "2026-10-03T14:30:00Z"}},
+		// 45 分钟奇数偏移：证明不是按 8 小时整数倍在糊弄。
+		{"+0545", tzInstants{"2026-10-03T09:30:00+05:45", "2026-10-03T03:45:00Z"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ta, tb := c.p.parse(t)
+			if !ta.Equal(tb) {
+				t.Fatalf("前提不成立：%s 与 %s 不是同一瞬间", c.p.a, c.p.b)
+			}
+			tzAbsorb(t, c.p, 11, 22)
+			tzAssertBucketsFor(t, c.p, c.p.a)
+
+			callLog.mu.RLock()
+			defer callLog.mu.RUnlock()
+			if len(hourBuckets) != 1 {
+				t.Fatalf("两个时区写法应归入 1 个桶，实际 %d 个：%s",
+					len(hourBuckets), tzExplain(tzKeys()))
+			}
+			for k, v := range hourBuckets {
+				if v.N != 2 || v.PT != 33 {
+					t.Fatalf("应为同桶 N=2 PT=33，实际 N=%d PT=%d（桶键 %d）", v.N, v.PT, k.Hour)
+				}
+			}
+		})
+	}
+}
+
+// ---- 用例 2：同一瞬间、且恰好贴着整点边界 ----
+
+// 09:59:59+08:00 与它的 Z 写法 01:59:59Z 是**同一个瞬间**，必须合流。
+//
+// 比用例 1 更狠：两条记录的**字面小时位**是 09 与 01，任何「照着文本里的数字取小时」
+// 的实现都会把它们劈成两个桶。它同时贴着本地整点（差 1 秒就跨到下一小时），
+// 守住 flooring 没有取早一格 / 晚一格。
+func TestMixedTimezoneOffsetsFoldSameInstantAcrossHourBoundary(t *testing.T) {
+	p := tzInstants{"2026-10-03T09:59:59+08:00", "2026-10-03T01:59:59Z"}
+	ta, tb := p.parse(t)
+	if !ta.Equal(tb) {
+		t.Fatalf("前提不成立：%s 与 %s 不是同一瞬间", p.a, p.b)
+	}
+	tzAbsorb(t, p, 11, 22)
+	tzAssertBucketsFor(t, p, p.a)
+}
+
+// ---- 用例 3：字面小时位相同、但**不是**同一瞬间，必须劈开 ----
+
+// 09:59:59+08:00 与 09:00:00Z 的**字面小时位都是 09**，但它们相差 7 小时
+// （前者 = 01:59:59Z），必须落进**两个**桶。
+//
+// 这是用例 1 的镜像方向：不只测「该合的没合」，也测「不该合的合了」。
+// 一旦 hourKeyFor 丢掉时区信息、直接拿解析出来的墙上钟数字取小时，
+// 这两条就会被错并成一个桶 —— 面板上某个小时的请求数凭空翻倍。
+func TestMixedTimezoneOffsetsDoNotMergeDistinctInstants(t *testing.T) {
+	p := tzInstants{"2026-10-03T09:59:59+08:00", "2026-10-03T09:00:00Z"}
+	ta, tb := p.parse(t)
+	if ta.Equal(tb) {
+		t.Fatalf("前提不成立：%s 与 %s 被当成同一瞬间", p.a, p.b)
+	}
+	// 确认两者字面小时位确实相同 —— 这正是本用例鉴别力的来源。
+	if ta.Hour() != tb.Hour() {
+		t.Fatalf("前提不成立：字面小时位不同（%d vs %d），本用例失去意义", ta.Hour(), tb.Hour())
+	}
+	tzAbsorb(t, p, 11, 22)
+	tzAssertBucketsFor(t, p, p.a, p.b)
+}
+
+// ---- 用例 4：真的跨整点（相差 1 秒）必须劈开 ----
+
+// 09:59:59+08:00 与 02:00:00Z 相差**整 1 秒**，却跨着本地整点，必须落进
+// 两个相邻的桶。守住 flooring 本身没有取早 / 晚一格。
+//
+// 如实说明：**它对「去掉 .In(time.Local)」这个变异不敏感**
+// （两种实现下都是 2 个桶），它是整点边界守卫，不是变异见证。
+func TestMixedTimezoneOffsetsSplitAtLocalHourBoundary(t *testing.T) {
+	p := tzInstants{"2026-10-03T09:59:59+08:00", "2026-10-03T02:00:00Z"}
+	ta, tb := p.parse(t)
+	if d := tb.Sub(ta); d != time.Second {
+		t.Fatalf("前提不成立：两条记录相差 %v，应为 1s", d)
+	}
+	tzAbsorb(t, p, 11, 22)
+	tzAssertBucketsFor(t, p, p.a, p.b)
+}

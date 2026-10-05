@@ -1,0 +1,146 @@
+package main
+
+// 本文件验证 DELETE /api/call-log 的语义：清空调用日志必须同时清空累计计数器
+// tokenStats，两者从此同生共死。
+//
+// 背景：/api/stats 加了 ?range= 后，概览页顶部读的是按窗口从调用日志算出来的聚合。
+// 而 callLog.clear() 只 os.Remove 掉 call_log.jsonl，从不碰 tokenStats。
+// 于是清空日志会让顶部所有统计归零，而 stats.json 里的历史总量仍在——
+// 改造前顶部读的是 stats.json，不受影响；改造后就是真实的数据丢失。
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func writeDemoCallLog(t *testing.T, dir string) {
+	t.Helper()
+	line := `{"ts":"2026-09-01T10:00:00Z","model":"m1","status":"ok",` +
+		`"prompt_tokens":100,"completion_tokens":20,"cache_read_tokens":30,"ttft_ms":50,"output_speed":10}`
+	if err := os.WriteFile(filepath.Join(dir, "call_log.jsonl"),
+		[]byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedTokenStats(t *testing.T, dir string) {
+	t.Helper()
+	oldPath := tokenStatsPath
+	tokenStatsPath = filepath.Join(dir, "stats.json") // saveTokenStats() 写这个全局路径
+	t.Cleanup(func() { tokenStatsPath = oldPath })
+	tokenStatsMu.Lock()
+	defer tokenStatsMu.Unlock()
+	tokenStats.TotalRequests = 42
+	tokenStats.Models = map[string]*ModelStats{
+		"m1": {RequestCount: 42, PromptTokens: 100, CompletionTokens: 20},
+	}
+	if err := os.WriteFile(filepath.Join(dir, "stats.json"),
+		mustJSON(tokenStats), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+// 前置：清空前两个源都有数据
+func TestClearLogStartsFromBothSourcesPopulated(t *testing.T) {
+	dir := t.TempDir()
+	callLog.path = filepath.Join(dir, "call_log.jsonl")
+	callLog.records = nil
+	writeDemoCallLog(t, dir)
+	seedTokenStats(t, dir)
+
+	if _, err := os.Stat(callLog.path); err != nil {
+		t.Fatalf("前置失败：调用日志不存在：%v", err)
+	}
+	if tokenStats.TotalRequests == 0 {
+		t.Fatal("前置失败：tokenStats 为空")
+	}
+}
+
+// 核心行为：DELETE /api/call-log 后，累计计数器也归零
+func TestDeleteCallLogAlsoClearsTokenStats(t *testing.T) {
+	dir := t.TempDir()
+	callLog.path = filepath.Join(dir, "call_log.jsonl")
+	callLog.records = nil
+	writeDemoCallLog(t, dir)
+	seedTokenStats(t, dir)
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/call-log", nil)
+	w := httptest.NewRecorder()
+	adminCallLogHandler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("状态码 = %d，期望 200", w.Code)
+	}
+
+	// 调用日志没了（改造前就有）
+	if _, err := os.Stat(callLog.path); !os.IsNotExist(err) {
+		t.Errorf("调用日志文件仍在，期望被删除")
+	}
+
+	// 本次要实现的行为：累计计数器也必须归零
+	tokenStatsMu.Lock()
+	gotTotal, gotModels := tokenStats.TotalRequests, len(tokenStats.Models)
+	tokenStatsMu.Unlock()
+
+	if gotTotal != 0 {
+		t.Errorf("tokenStats.TotalRequests = %d，期望 0——清空日志后顶部统计会归零而历史总量仍在", gotTotal)
+	}
+	if gotModels != 0 {
+		t.Errorf("tokenStats.Models 有 %d 个模型，期望 0", gotModels)
+	}
+}
+
+// 归零后必须落盘，否则进程重启又读回旧值
+func TestDeleteCallLogPersistsClearedStatsToDisk(t *testing.T) {
+	dir := t.TempDir()
+	callLog.path = filepath.Join(dir, "call_log.jsonl")
+	callLog.records = nil
+	writeDemoCallLog(t, dir)
+	seedTokenStats(t, dir)
+
+	adminCallLogHandler(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodDelete, "/api/call-log", nil))
+
+	raw, err := os.ReadFile(filepath.Join(dir, "stats.json"))
+	if err != nil {
+		t.Fatalf("stats.json 应仍存在（写回空值而非删除）：%v", err)
+	}
+	var got TokenStatsData
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("stats.json 不是合法 JSON：%v", err)
+	}
+	if got.TotalRequests != 0 || len(got.Models) != 0 {
+		t.Errorf("落盘的内容 = %+v，期望 total_requests=0 且 models 为空", got)
+	}
+}
+
+// GET 路径不受影响：清空日志不等于清空累计计数器的读取能力
+func TestDeleteCallLogKeepsStatsEndpointResponding(t *testing.T) {
+	dir := t.TempDir()
+	callLog.path = filepath.Join(dir, "call_log.jsonl")
+	callLog.records = nil
+	writeDemoCallLog(t, dir)
+	seedTokenStats(t, dir)
+
+	adminCallLogHandler(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodDelete, "/api/call-log", nil))
+
+	w := httptest.NewRecorder()
+	adminStatsHandler(w, httptest.NewRequest(http.MethodGet, "/api/stats", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("清空后 GET /api/stats 状态码 = %d，期望 200", w.Code)
+	}
+	var got TokenStatsData
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("响应不是合法 JSON：%v", err)
+	}
+}

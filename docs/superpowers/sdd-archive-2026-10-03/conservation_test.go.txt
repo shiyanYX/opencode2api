@@ -1,0 +1,479 @@
+package main
+
+// 本文件验证「守恒检查 + rebuild 自愈」：
+//
+//	Σ N over hourBuckets  ==  absorbedRecords - unabsorbedRecords
+//
+// 为什么要有它：桶一旦损坏，面板数字是**静默错误**的 —— 不会报错、不会自愈、
+// 只会单调发散（那几个 Critical 全是这个形状）。改造前有「每次查询重读文件」
+// 这条永远正确的旁路，桶坏了也不影响结果；桶化之后旁路没了，
+// 必须自己钉一条可检验的不变量。
+//
+// 为什么不用「启动时全量对拍」：对拍只在 backfill 之后跑，而 backfill 期间
+// append 只写文件不碰桶 —— 写入侧 incr 路径一次都没跑过，
+// 对本轮两个 Critical 的覆盖率是 0。守恒检查每次查询顺手做，覆盖 append 路径。
+
+import (
+	"errors"
+	"os"
+	"sync"
+	"testing"
+	"time"
+)
+
+// ---- 测试脚手架 ----
+
+// resetConservationState 把桶全局 + 本轮新增的守恒全局一起复位。
+// 必须调用的理由与 resetHourBuckets 相同：这些是**包级可变**全局，
+// 跨用例污染会让断言变成"上一条用例留下的数字"。
+func resetConservationState(t *testing.T) {
+	t.Helper()
+	resetHourBuckets(t)
+	callLog.mu.Lock()
+	absorbedRecords = 0
+	unabsorbedRecords = 0
+	bucketRebuilds = 0
+	bucketRebuildNotBefore = time.Time{}
+	callLog.mu.Unlock()
+}
+
+// conservationReads 取 (ΣN, absorbed, unabsorbed, rebuilds) 的一致性快照。
+func conservationReads() (sum, absorbed, unabsorbed int64, rebuilds uint64) {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	var n int64
+	for _, a := range hourBuckets {
+		n += a.N
+	}
+	return n, absorbedRecords, unabsorbedRecords, bucketRebuilds
+}
+
+// assertConsistent 断言当前状态守恒，且**期间没有发生过 rebuild**。
+// 第二个断言是这一组用例的重点：合法的不等（clear 之后、坏行、落盘失败）
+// 必须既不误报、也不偷偷触发一次 350ms 全量重扫。
+func assertConsistent(t *testing.T, wantRebuilds uint64, wantSum int64) {
+	t.Helper()
+	sum, absorbed, unabsorbed, rebuilds := conservationReads()
+	if sum != absorbed-unabsorbed {
+		t.Fatalf("不守恒：ΣN=%d 而 absorbedRecords-unabsorbedRecords=%d-%d=%d",
+			sum, absorbed, unabsorbed, absorbed-unabsorbed)
+	}
+	if sum != wantSum {
+		t.Fatalf("ΣN=%d，期望 %d", sum, wantSum)
+	}
+	if rebuilds != wantRebuilds {
+		t.Fatalf("rebuild 次数=%d，期望 %d：不该重建的场景重建了"+
+			"（每次 rebuild 都是一次全量重扫，~350ms）", rebuilds, wantRebuilds)
+	}
+}
+
+// inflateBucketN 人为把**每个**桶的 N 抬高 delta —— 模拟"桶被写多了"。
+// 必须持写锁改，与真实的写入侧 incr 走同一把锁。
+func inflateBucketN(t *testing.T, delta int64) {
+	t.Helper()
+	callLog.mu.Lock()
+	defer callLog.mu.Unlock()
+	if len(hourBuckets) == 0 {
+		t.Fatal("前置失败：桶是空的，无从污染")
+	}
+	for _, a := range hourBuckets {
+		a.N += delta
+	}
+}
+
+// dropOneBucket 删掉一个桶 —— 模拟"桶被丢了/键被覆盖"。
+func dropOneBucket(t *testing.T) {
+	t.Helper()
+	callLog.mu.Lock()
+	defer callLog.mu.Unlock()
+	for k := range hourBuckets {
+		delete(hourBuckets, k)
+		return
+	}
+	t.Fatal("前置失败：桶是空的，无从删除")
+}
+
+func appendOne(t *testing.T, model string, pt int64) {
+	t.Helper()
+	callLog.append(CallRecord{
+		ReqID: "r", TS: time.Now().Format(time.RFC3339Nano),
+		Model: model, Status: "ok", PromptTokens: pt,
+	})
+}
+
+// ---- 正常路径 ----
+
+// append 走写入侧 incr（bucketsSeeded=true）后必须守恒。
+// 这条用例同时是"守恒检查覆盖 append 路径"的证据：
+// 全程没有任何 backfill 被触发过 —— 那个被否决的对拍方案在这里是盲区。
+func TestConservationHoldsAfterAppend(t *testing.T) {
+	useTempCallLogRaw(t, "")
+	resetConservationState(t)
+
+	for i := 0; i < 5; i++ {
+		appendOne(t, "m1", int64(i))
+	}
+	// 查询前先自查一次：append 本身不该破坏不变量
+	assertConsistent(t, 0, 5)
+
+	ensureBucketsUpToDate() // 面板查询
+	assertConsistent(t, 0, 5)
+}
+
+// backfill 路径同样必须守恒。
+func TestConservationHoldsAfterBackfill(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	body := ""
+	for i := 0; i < 4; i++ {
+		body += statsLine(ts, "m1", "ok", int64(i), 1, 0, 0, 0, 0)
+	}
+	useTempCallLogRaw(t, body)
+	resetConservationState(t)
+	markBackfillPending(t)
+
+	ensureBucketsUpToDate()
+	assertConsistent(t, 0, 4)
+}
+
+// ---- 注入损坏 ----
+
+// 桶被写多 → 必须被发现并重建，重建后回到真值。
+//
+// 重建必须是**整体丢弃**旧桶而不是与新桶 += ：若是 += ，
+// 重建后的 ΣN 会是 5+3=8 而不是 5，错误被永久固化 —— 断言 wantSum=5 就是牙齿。
+func TestConservationDetectsInflatedBucketAndRebuilds(t *testing.T) {
+	useTempCallLogRaw(t, "")
+	resetConservationState(t)
+	for i := 0; i < 5; i++ {
+		appendOne(t, "m1", int64(i))
+	}
+
+	inflateBucketN(t, 3)
+	ensureBucketsUpToDate() // 查询顺手做检查
+
+	assertConsistent(t, 1, 5) // 恰好重建 1 次，且回到真值 5
+}
+
+// 桶被丢掉 → 同样必须被发现（方向相反的不等，检测不能只测一个方向）。
+func TestConservationDetectsDroppedBucketAndRebuilds(t *testing.T) {
+	useTempCallLogRaw(t, "")
+	resetConservationState(t)
+	for i := 0; i < 3; i++ {
+		appendOne(t, "m1", int64(i))
+	}
+
+	dropOneBucket(t)
+	ensureBucketsUpToDate()
+
+	assertConsistent(t, 1, 3)
+}
+
+// ---- 边界情况：clear() 之后不许误报 ----
+//
+// 这是最容易写错的一处：clear() 把 hourBuckets 清空、parsedTo=0，
+// 若忘了把 absorbedRecords 一起清 0，下一次查询必然判不一致
+// → 每次 clear 后都触发一次全量重扫（350ms），且面板先闪一轮全零。
+func TestConservationAfterClearDoesNotFalsePositive(t *testing.T) {
+	useTempCallLogRaw(t, "")
+	resetConservationState(t)
+	for i := 0; i < 4; i++ {
+		appendOne(t, "m1", int64(i))
+	}
+	assertConsistent(t, 0, 4)
+
+	callLog.clear() // 用户点「清空日志」
+
+	// clear 之后立刻就应当自洽：桶空、计数 0、0 == 0-0
+	assertConsistent(t, 0, 0)
+	callLog.mu.RLock()
+	seeded, pt := bucketsSeeded, parsedTo
+	callLog.mu.RUnlock()
+	if !seeded || pt != 0 {
+		t.Fatalf("clear 之后 bucketsSeeded=%v parsedTo=%d，期望 true/0", seeded, pt)
+	}
+
+	ensureBucketsUpToDate()   // 面板查询：文件已删，走 open 失败分支
+	assertConsistent(t, 0, 0) // 绝不能重建
+	callLog.mu.RLock()
+	seeded = bucketsSeeded
+	callLog.mu.RUnlock()
+	if !seeded {
+		t.Fatal("误判重建把 bucketsSeeded 打回 false：append 会退回「只写文件不 incr」，" +
+			"此后每条记录都要等下一次查询才进桶")
+	}
+
+	// clear 之后继续正常 append：必须仍守恒（计数已归零，新记录从 0 起算）
+	appendOne(t, "m2", 7)
+	assertConsistent(t, 0, 1)
+}
+
+// clear 期间若有在途 append，那条记录由 backfill 自然补上，仍必须守恒。
+func TestConservationClearThenNewAppendStaysConsistent(t *testing.T) {
+	useTempCallLogRaw(t, "")
+	resetConservationState(t)
+	for i := 0; i < 2; i++ {
+		appendOne(t, "m1", int64(i))
+	}
+	callLog.clear()
+	appendOne(t, "m1", 9) // O_CREATE 重建文件，桶从空起算
+	assertConsistent(t, 0, 1)
+
+	ensureBucketsUpToDate()
+	assertConsistent(t, 0, 1)
+}
+
+// ---- 边界情况：落盘失败回滚不许误报 ----
+//
+// 落盘失败时 parsedTo 不推进、桶不 incr；若 absorbedRecords 却动了，
+// 就会留下"parsedTo 没动但计数动了"的永久不等。
+func TestConservationWriteFailureRollbackDoesNotFalsePositive(t *testing.T) {
+	useTempCallLogRaw(t, "")
+	resetConservationState(t)
+	appendOne(t, "m1", 3) // 先成功一条，让"没推进"这件事可观测
+	assertConsistent(t, 0, 1)
+
+	swapWriteBytes(t, func(*os.File, []byte) (int, error) {
+		return 0, errors.New("ENOSPC: 模拟磁盘满")
+	})
+	appendOne(t, "m1", 99) // 这一条必须被整个回滚
+	swapWriteBytes(t, func(f *os.File, b []byte) (int, error) { return f.Write(b) })
+
+	assertConsistent(t, 0, 1) // 回滚后仍守恒，且没有多余记录
+	ensureBucketsUpToDate()
+	assertConsistent(t, 0, 1)
+}
+
+// ---- 边界情况：坏行推进了 consumed 却没有 add() ----
+//
+// 判据（明确写死）：坏行**不构成**不一致，不许触发 rebuild。
+// 坏行是合法输入（外部工具写了半行、日志被截断），backfill 对它的既定行为是
+// "推进 parsedTo、跳过 add"，永久跳过且不报错。若把这种不等算作损坏，
+// 一个含坏行的文件会让**每次查询**都触发一次全量重扫 —— 性能灾难。
+// 故用 unabsorbedRecords 单独记账，判据是 ΣN == absorbed - unabsorbed。
+func TestConservationMalformedLineDoesNotFalsePositive(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	good := statsLine(ts, "m1", "ok", 1, 1, 0, 0, 0, 0)
+	bad := `{"ts":"2026-10-03T10:00:00Z","model":` + "\n" // 结构性截断
+	useTempCallLogRaw(t, good+bad+good+good)
+	resetConservationState(t)
+	markBackfillPending(t)
+
+	ensureBucketsUpToDate()
+
+	sum, absorbed, unabsorbed, _ := conservationReads()
+	if unabsorbed != 1 {
+		t.Fatalf("unabsorbedRecords=%d，期望 1（那行坏行必须被记账）", unabsorbed)
+	}
+	if absorbed != 4 {
+		t.Fatalf("absorbedRecords=%d，期望 4（坏行也推进了 consumed）", absorbed)
+	}
+	if sum != 3 {
+		t.Fatalf("ΣN=%d，期望 3（坏行不该进任何桶）", sum)
+	}
+	assertConsistent(t, 0, 3)
+}
+
+// ts 解析失败（JSON 合法但时间戳不是 RFC3339）走的是另一条跳过路径，
+// 同样不许误报。
+func TestConservationUnparseableTimestampDoesNotFalsePositive(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	badTS := `{"ts":"昨天","model":"m1","status":"ok","prompt_tokens":1}` + "\n"
+	useTempCallLogRaw(t, statsLine(ts, "m1", "ok", 1, 1, 0, 0, 0, 0)+badTS+
+		statsLine(ts, "m1", "ok", 1, 1, 0, 0, 0, 0))
+	resetConservationState(t)
+	markBackfillPending(t)
+
+	ensureBucketsUpToDate()
+	assertConsistent(t, 0, 2)
+}
+
+// backfill 的两条丢弃分支（期间 clear 过 / parsedTo 被 append 抢走）不许留下不等。
+//
+// 这是「计数必须在提交点推进」这条约束唯一的可观测后果：
+// 若把 absorbedRecords 挪进解析段逐行加，批次被丢弃时计数已经加了、桶却没并进来，
+// 于是留下「计数 = 3、ΣN = 0」的**永久**不等 → 之后每次查询都触发全量重扫。
+func TestConservationDiscardedBackfillBatchDoesNotFalsePositive(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	useTempCallLogRaw(t, statsLine(ts, "m1", "ok", 1, 1, 0, 0, 0, 0)+
+		statsLine(ts, "m1", "ok", 1, 1, 0, 0, 0, 0)+
+		statsLine(ts, "m1", "ok", 1, 1, 0, 0, 0, 0))
+	resetConservationState(t)
+	markBackfillPending(t)
+
+	// 在 Stat 之后、锁内提交之前 clear()：这批 staged 必然被整批丢弃
+	swapBackfillHook(t, func() { callLog.clear() })
+	ensureBucketsUpToDate()
+
+	assertConsistent(t, 0, 0) // 丢弃 = 这批记录既没进桶、也没被记账
+}
+
+// backfill 的**另一条**丢弃分支：解析窗口里落进一个 append，
+// parsedTo 被抢走 → 交接校验要求整批丢弃。
+//
+// 这条比上面那条更危险：clear() 会把计数一起清零，于是「计数已经加了」的痕迹
+// 恰好被抹掉；而这里 clear 没参与，计数与 parsedTo 的错位会原样留下。
+// 若把 absorbedRecords 挪进解析段逐行加，本用例就会变成
+// 「absorbed = 4、ΣN = 1」的永久不等 → 之后每次查询都全量重扫。
+func TestConservationDiscardOnAppendHandoffDoesNotFalsePositive(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	useTempCallLogRaw(t, statsLine(ts, "m1", "ok", 1, 1, 0, 0, 0, 0)+
+		statsLine(ts, "m1", "ok", 1, 1, 0, 0, 0, 0)+
+		statsLine(ts, "m1", "ok", 1, 1, 0, 0, 0, 0))
+	resetConservationState(t)
+	// 刻意**不** markBackfillPending：这里要的就是 bucketsSeeded=true，
+	// 即「写入侧 incr 正在生效」的那个窗口 —— 那才是交接校验存在的理由。
+
+	var once sync.Once
+	swapBackfillHook(t, func() {
+		once.Do(func() { appendOne(t, "m1", 42) }) // 落在 Stat 之后、提交之前
+	})
+
+	ensureBucketsUpToDate()
+
+	// 第 1 轮：3 条被整批丢弃，只有 append 那条进了桶 —— 但账必须平
+	assertConsistent(t, 0, 1)
+
+	ensureBucketsUpToDate() // 第 2 轮补吸，一条不少
+	assertConsistent(t, 0, 4)
+}
+
+// ---- 节流：持续损坏不许每次查询都全量重扫 ----
+//
+// rebuild 的代价是一次全量重扫（真实数据 ~350ms）。若持续损坏而没有节流，
+// 面板每刷一次就是 350ms —— 自愈机制本身会把服务打爆。
+func TestConservationRebuildIsThrottled(t *testing.T) {
+	useTempCallLogRaw(t, "")
+	resetConservationState(t)
+	for i := 0; i < 3; i++ {
+		appendOne(t, "m1", int64(i))
+	}
+
+	// 每次查询前都重新污染：模拟"重建后又被写坏"的持续损坏
+	for i := 0; i < 5; i++ {
+		inflateBucketN(t, 1)
+		ensureBucketsUpToDate()
+	}
+	sum, absorbed, unabsorbed, rebuilds := conservationReads()
+	if rebuilds != 1 {
+		t.Fatalf("5 次查询触发了 %d 次 rebuild，期望恰好 1"+
+			"（首轮该修，后 4 轮在退避窗口内不该再全量重扫）", rebuilds)
+	}
+	// 节流的是「修复」，**不是「检测」**：末态仍然不等，
+	// 说明我们没有因为修不动就当没事——WARN 每次查询都还在报。
+	// 回到真值由 TestConservationRebootsAgainAfterBackoffExpires 覆盖。
+	if sum == absorbed-unabsorbed {
+		t.Fatal("末态竟然自洽：说明损坏被悄悄吃掉了")
+	}
+}
+
+// 退避窗口到期后必须还能再次自愈 —— 节流不许变成"永不重建"。
+func TestConservationRebootsAgainAfterBackoffExpires(t *testing.T) {
+	useTempCallLogRaw(t, "")
+	resetConservationState(t)
+	for i := 0; i < 3; i++ {
+		appendOne(t, "m1", int64(i))
+	}
+
+	inflateBucketN(t, 2)
+	ensureBucketsUpToDate()
+	_, _, _, first := conservationReads()
+	if first != 1 {
+		t.Fatalf("首次损坏未触发 rebuild（rebuilds=%d）", first)
+	}
+
+	inflateBucketN(t, 2)
+	ensureBucketsUpToDate()
+	_, _, _, second := conservationReads()
+	if second != 1 {
+		t.Fatalf("退避窗口内又重建了一次（rebuilds=%d）", second)
+	}
+
+	// 把退避窗口拨到过去：下一次查询必须能再次自愈
+	callLog.mu.Lock()
+	bucketRebuildNotBefore = time.Now().Add(-time.Second)
+	callLog.mu.Unlock()
+	inflateBucketN(t, 2)
+	ensureBucketsUpToDate()
+	assertConsistent(t, 2, 3)
+}
+
+// ---- backfill 待办窗口：append 只写文件、不碰桶，计数也不许动 ----
+func TestConservationAppendDuringBackfillPendingStaysConsistent(t *testing.T) {
+	useTempCallLogRaw(t, "")
+	resetConservationState(t)
+	markBackfillPending(t)
+
+	// 待办窗口里 append：只写文件
+	appendOne(t, "m1", 1)
+	appendOne(t, "m1", 2)
+	assertConsistent(t, 0, 0) // 桶空、计数空 —— 0 == 0-0
+
+	ensureBucketsUpToDate() // 一次性全吸
+	assertConsistent(t, 0, 2)
+
+	// 吸收之后 append 切回 incr，仍必须守恒
+	appendOne(t, "m1", 3)
+	assertConsistent(t, 0, 3)
+	ensureBucketsUpToDate()
+	assertConsistent(t, 0, 3)
+}
+
+// ---- 撕裂的尾半行：不推进 consumed，也不许误报 ----
+func TestConservationTornTailDoesNotFalsePositive(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	full := statsLine(ts, "m1", "ok", 1, 1, 0, 0, 0, 0)
+	useTempCallLogRaw(t, full+full+`{"ts":"2026-10-03T10:00:00Z","model"`) // 末行无换行
+	resetConservationState(t)
+	markBackfillPending(t)
+
+	ensureBucketsUpToDate()
+	_, absorbed, unabsorbed, _ := conservationReads()
+	if absorbed != 2 {
+		t.Fatalf("absorbedRecords=%d，期望 2（末行没有换行，不算被消费）", absorbed)
+	}
+	if unabsorbed != 0 {
+		t.Fatalf("unabsorbedRecords=%d，期望 0", unabsorbed)
+	}
+	assertConsistent(t, 0, 2)
+
+	// 补上换行后，那半行本轮才被消费
+	appendRawLines(t, callLogPath(), "\n")
+	ensureBucketsUpToDate()
+	assertConsistent(t, 0, 2) // 仍是结构性截断 → 记账为 unabsorbed
+}
+
+func callLogPath() string {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	return callLog.path
+}
+
+// ---- 成本：检查本身必须便宜到可以每次查询都做 ----
+func BenchmarkConservationCheck673Buckets(b *testing.B) {
+	var want int64
+	callLog.mu.Lock()
+	hourBuckets = make(map[hourModelKey]*hourModelAgg, 700)
+	base := time.Now().Truncate(time.Hour).Unix()
+	for i := 0; i < 673; i++ {
+		hourBuckets[hourModelKey{
+			Hour:  base + int64(i/17)*3600,
+			Model: "model-" + string(rune('a'+i%17)),
+		}] = &hourModelAgg{N: int64(i)}
+		want += int64(i)
+	}
+	absorbedRecords = want // 真值取实际建出来的量，别写死一个对不上的魔数
+	unabsorbedRecords = 0
+	callLog.mu.Unlock()
+	defer func() {
+		callLog.mu.Lock()
+		hourBuckets = nil
+		callLog.mu.Unlock()
+	}()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, _, ok := checkBucketConservation(); !ok {
+			b.Fatal("前置不成立：新建的桶不守恒")
+		}
+	}
+}

@@ -1,0 +1,438 @@
+package main
+
+import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+)
+
+// ======================== /api/stats 时间窗 ========================
+// 覆盖 modelStatsFromCallLog（calllog.go）与 adminStatsHandler 的 range 分支（main.go）。
+
+func rfc(t time.Time) string { return t.Format(time.RFC3339) }
+
+// daysAgo 返回 n 天**前**第 h 小时的整点（本地时区）。
+//
+// ⚠️ 既有 trends_test.go 里的 dayAt(n, h) 是 n 天**后**（n ≥ 0 即未来），
+// 名字有误导性且被既有用例依赖，故不动它，这里另起一个语义正确的名字。
+func daysAgo(n, h int) time.Time {
+	now := time.Now()
+	d := now.AddDate(0, 0, -n)
+	return time.Date(d.Year(), d.Month(), d.Day(), h, 0, 0, 0, now.Location())
+}
+
+// inWindow 返回一个必定落在「今天」窗口内的时间。
+// 不能写死某一天的小时：today 是**滚动最近 24 小时**（以当前小时收尾），
+// 「今天 10:00」在凌晨跑就是未来十几小时，会被正确地排除——
+// 这些 fixture 曾因此在 00 点后随机失败（写死 10:00 时只在 10 点后成立）。
+func inWindow() time.Time { return time.Now().Add(-1 * time.Hour) }
+
+// ---- ① 窗口边界与 rng 归一化 ----
+
+// 窗口外记录被排除：8 天前的记录不进 7d 窗口。
+func TestModelStatsExcludesOutOfWindow(t *testing.T) {
+	writeCallLog(t, []CallRecord{
+		{ReqID: "in", TS: rfc(inWindow()), Model: "m1", Status: "ok", PromptTokens: 100, CompletionTokens: 10},
+		{ReqID: "out", TS: rfc(daysAgo(8, 10)), Model: "m1", Status: "ok", PromptTokens: 999, CompletionTokens: 999},
+	})
+
+	got := modelStatsFromCallLog("7d")
+	ms := got.Models["m1"]
+	if ms == nil {
+		t.Fatal("m1 missing from 7d window")
+	}
+	if ms.PromptTokens != 100 || ms.CompletionTokens != 10 {
+		t.Errorf("7d window leaked the out-of-window record: prompt=%d completion=%d; want 100/10",
+			ms.PromptTokens, ms.CompletionTokens)
+	}
+
+	// 同一份数据放大窗口后应被纳入
+	if ms30 := modelStatsFromCallLog("30d").Models["m1"]; ms30.PromptTokens != 1099 {
+		t.Errorf("30d window should include the 8-day-old record, prompt=%d; want 1099", ms30.PromptTokens)
+	}
+}
+
+// today 是**滚动最近 24 小时**（不是自然日）：窗口外的记录不进，空 rng 归一为 today。
+// 注意「昨天」不等于「窗口外」——凌晨跑时昨天同一小时距今不足 24h，仍在窗口内，
+// 所以这里用两天前作为窗口外样本。
+func TestModelStatsEmptyRangeNormalizesToToday(t *testing.T) {
+	writeCallLog(t, []CallRecord{
+		{ReqID: "today", TS: rfc(inWindow()), Model: "m1", Status: "ok", PromptTokens: 100, CompletionTokens: 10},
+		{ReqID: "outside", TS: rfc(daysAgo(2, 10)), Model: "m1", Status: "ok", PromptTokens: 777, CompletionTokens: 77},
+	})
+
+	want := modelStatsFromCallLog("today")
+	got := modelStatsFromCallLog("") // 空 rng 必须与 today 完全一致
+	if got.TotalRequests != want.TotalRequests || len(got.Models) != len(want.Models) {
+		t.Fatalf("empty rng did not normalize to today: %+v vs %+v", got, want)
+	}
+	a, _ := json.Marshal(want)
+	b, _ := json.Marshal(got)
+	if string(a) != string(b) {
+		t.Errorf("empty rng payload != today payload:\n today=%s\n empty=%s", a, b)
+	}
+	if got.TotalRequests != 1 {
+		t.Errorf("today window requests = %d; want 1 (记录超出滚动 24h 窗口，须被排除)", got.TotalRequests)
+	}
+
+	// 非法 rng 同样归一为 today（与 adminTrendsHandler 的规则一致）
+	if bad := modelStatsFromCallLog("banana"); bad.TotalRequests != 1 {
+		t.Errorf("invalid rng requests = %d; want 1 (must normalize to today)", bad.TotalRequests)
+	}
+}
+
+// ---- ② 文件缺失 → 非 nil 空结构 ----
+
+// 返回 nil 指针会序列化成 "models":null，前端 renderStats 直接炸（本项目 69ab7dd 踩过）。
+func TestModelStatsMissingFileReturnsNonNilEmpty(t *testing.T) {
+	pointCallLogAtMissing(t)
+
+	got := modelStatsFromCallLog("30d")
+	if got == nil {
+		t.Fatal("modelStatsFromCallLog returned nil; JSON would serialize to null")
+	}
+	if got.Models == nil {
+		t.Fatal("Models map is nil; JSON would serialize \"models\":null")
+	}
+	if len(got.Models) != 0 || got.TotalRequests != 0 {
+		t.Errorf("want empty stats, got %+v", got)
+	}
+
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"total_requests":0,"models":{}}`
+	if string(b) != want {
+		t.Errorf("payload = %s; want %s", b, want)
+	}
+}
+
+// ---- ③ 空 model 名不过滤（Ruling 7） ----
+
+func TestModelStatsKeepsEmptyModelName(t *testing.T) {
+	writeCallLog(t, []CallRecord{
+		{ReqID: "a", TS: rfc(inWindow()), Model: "", Status: "ok", PromptTokens: 50, CompletionTokens: 5},
+	})
+
+	got := modelStatsFromCallLog("today")
+	ms, ok := got.Models[""]
+	if !ok {
+		t.Fatalf("empty model name was dropped; keys=%v", got.Models)
+	}
+	if ms.RequestCount != 1 || ms.PromptTokens != 50 || ms.CompletionTokens != 5 {
+		t.Errorf("empty-model row = %+v; want request_count 1, prompt 50, completion 5", *ms)
+	}
+}
+
+// ---- ④ RequestCount 含失败（刻意的口径偏离） ----
+
+// 累计计数器 recordTokenUsageWithCache 只在拿到 usage 时被调用，故只记成功；
+// 本函数刻意统计全部尝试，与趋势图「请求次数」tab 对齐。见函数注释。
+func TestModelStatsRequestCountIncludesFailures(t *testing.T) {
+	writeCallLog(t, []CallRecord{
+		{ReqID: "a", TS: rfc(inWindow()), Model: "m1", Status: "ok", PromptTokens: 10, CompletionTokens: 1},
+		{ReqID: "b", TS: rfc(inWindow()), Model: "m1", Status: "error", ErrMsg: "boom"},
+		{ReqID: "c", TS: rfc(inWindow()), Model: "m2", Status: "timeout"},
+	})
+
+	got := modelStatsFromCallLog("today")
+	if got.Models["m1"].RequestCount != 2 {
+		t.Errorf("m1 request_count = %d; want 2 (ok + error)", got.Models["m1"].RequestCount)
+	}
+	if got.Models["m2"].RequestCount != 1 {
+		t.Errorf("m2 request_count = %d; want 1 (failed attempt must be counted)", got.Models["m2"].RequestCount)
+	}
+	if got.TotalRequests != 3 {
+		t.Errorf("total_requests = %d; want 3 (all attempts)", got.TotalRequests)
+	}
+}
+
+// ---- ⑤ TotalTokens = prompt + completion（闭合不变量前提） ----
+
+func TestModelStatsTotalTokensClosesOnPromptPlusCompletion(t *testing.T) {
+	writeCallLog(t, []CallRecord{
+		{ReqID: "a", TS: rfc(inWindow()), Model: "m1", Status: "ok", PromptTokens: 1000, CompletionTokens: 100, CacheRead: 400, CacheCreation: 30},
+		{ReqID: "b", TS: rfc(inWindow()), Model: "m1", Status: "ok", PromptTokens: 500, CompletionTokens: 50, CacheRead: 200, CacheCreation: 10},
+		{ReqID: "c", TS: rfc(inWindow()), Model: "m2", Status: "ok", PromptTokens: 7, CompletionTokens: 3, CacheRead: 1, CacheCreation: 2},
+		{ReqID: "d", TS: rfc(inWindow()), Model: "", Status: "error", PromptTokens: 1, CompletionTokens: 2},
+	})
+
+	got := modelStatsFromCallLog("today")
+	for name, ms := range got.Models {
+		if ms.TotalTokens != ms.PromptTokens+ms.CompletionTokens {
+			t.Errorf("model %q: total_tokens %d != prompt %d + completion %d",
+				name, ms.TotalTokens, ms.PromptTokens, ms.CompletionTokens)
+		}
+	}
+	// 缓存 token 不进 TotalTokens（真实消耗 = prompt + completion）
+	m1 := got.Models["m1"]
+	if m1.TotalTokens != 1650 {
+		t.Errorf("m1 total_tokens = %d; want 1650 (cache must not be added)", m1.TotalTokens)
+	}
+	if m1.CacheReadTokens != 600 || m1.CacheCreatedTokens != 40 {
+		t.Errorf("m1 cache: read=%d created=%d; want 600/40", m1.CacheReadTokens, m1.CacheCreatedTokens)
+	}
+}
+
+// ---- ⑥ 速度/TTFT 与 recordModelSpeed 同算法 ----
+
+func TestModelStatsSpeedMatchesRecordModelSpeedSemantics(t *testing.T) {
+	writeCallLog(t, []CallRecord{
+		{ReqID: "a", TS: rfc(inWindow()), Model: "m1", Status: "ok", Stream: true, TTFTMs: 100, OutputSpeed: 10},
+		{ReqID: "b", TS: rfc(inWindow()), Model: "m1", Status: "ok", Stream: true, TTFTMs: 200, OutputSpeed: 20},
+		{ReqID: "c", TS: rfc(inWindow()), Model: "m1", Status: "ok", Stream: true, TTFTMs: 300, OutputSpeed: 30},
+		{ReqID: "d", TS: rfc(inWindow()), Model: "m1", Status: "ok", Stream: true, TTFTMs: 999, OutputSpeed: 0}, // 不计入
+		// 空 model 名：计入 token/请求，但速度统计与 recordModelSpeed 一致地跳过
+		{ReqID: "e", TS: rfc(inWindow()), Model: "", Status: "ok", Stream: true, TTFTMs: 50, OutputSpeed: 50},
+	})
+
+	got := modelStatsFromCallLog("today")
+	m1 := got.Models["m1"]
+	if m1.StreamReqCount != 3 {
+		t.Errorf("m1 stream_req_count = %d; want 3 (output_speed=0 record excluded)", m1.StreamReqCount)
+	}
+	if m1.AvgOutputSpeed != 20 {
+		t.Errorf("m1 avg_output_speed = %v; want 20 (incremental mean of 10/20/30)", m1.AvgOutputSpeed)
+	}
+	if m1.AvgTTFTMs != 200 {
+		t.Errorf("m1 avg_ttft_ms = %v; want 200 (incremental mean of 100/200/300)", m1.AvgTTFTMs)
+	}
+	if m1.RequestCount != 4 {
+		t.Errorf("m1 request_count = %d; want 4 (all attempts, speed-independent)", m1.RequestCount)
+	}
+
+	anon := got.Models[""]
+	if anon.RequestCount != 1 {
+		t.Errorf("empty model request_count = %d; want 1", anon.RequestCount)
+	}
+	if anon.StreamReqCount != 0 || anon.AvgOutputSpeed != 0 || anon.AvgTTFTMs != 0 {
+		t.Errorf("empty model speed stats = %+v; want all zero (recordModelSpeed skips model==\"\")", *anon)
+	}
+}
+
+// ---- ⑦ 与不带 group 的趋势桶逐桶逐字段对账 ----
+
+func TestModelStatsReconcilesWithTrendBuckets(t *testing.T) {
+	writeCallLog(t, []CallRecord{
+		{ReqID: "a", TS: rfc(inWindow()), Model: "m1", Status: "ok", PromptTokens: 100, CompletionTokens: 10, CacheRead: 40, CacheCreation: 5, OutputSpeed: 12, TTFTMs: 90},
+		{ReqID: "b", TS: rfc(inWindow()), Model: "m2", Status: "ok", PromptTokens: 300, CompletionTokens: 20, CacheRead: 60, CacheCreation: 7, OutputSpeed: 8, TTFTMs: 70},
+		{ReqID: "c", TS: rfc(daysAgo(2, 9)), Model: "m2", Status: "error", PromptTokens: 1, CompletionTokens: 2, CacheRead: 4, CacheCreation: 3},
+		{ReqID: "d", TS: rfc(daysAgo(9, 9)), Model: "m1", Status: "ok", PromptTokens: 8888, CompletionTokens: 88}, // 7d 窗外
+		{ReqID: "e", TS: rfc(daysAgo(3, 9)), Model: "", Status: "ok", PromptTokens: 4, CompletionTokens: 5, OutputSpeed: 6, TTFTMs: 60},
+	})
+
+	for _, rng := range []string{"today", "7d"} {
+		got := modelStatsFromCallLog(rng)
+		per := trendsByModelFromCallLog(rng)
+		agg := trendsFromCallLog(rng)
+
+		type cell struct{ req, prompt, completion, cacheCreation, cacheRead int64 }
+		add := func(c *cell, p ModelTrendPoint) {
+			c.req += p.Requests
+			c.prompt += p.PromptTokens
+			c.completion += p.CompletionTokens
+			c.cacheCreation += p.CacheCreation
+			c.cacheRead += p.CacheRead
+		}
+
+		// grid[ts][model]：逐桶 × 逐模型
+		grid := map[string]map[string]*cell{}
+		for _, p := range per {
+			byModel, ok := grid[p.TS]
+			if !ok {
+				byModel = map[string]*cell{}
+				grid[p.TS] = byModel
+			}
+			c, ok := byModel[p.Model]
+			if !ok {
+				c = &cell{}
+				byModel[p.Model] = c
+			}
+			add(c, p)
+		}
+
+		// 1) 逐桶：Σ_模型(按模型桶) 必须等于不带 group 的聚合桶
+		aggByTS := map[string]TrendsPoint{}
+		for _, b := range agg {
+			aggByTS[b.TS] = b
+		}
+		for ts, byModel := range grid {
+			var s cell
+			for _, c := range byModel {
+				s.req += c.req
+				s.prompt += c.prompt
+				s.completion += c.completion
+				s.cacheCreation += c.cacheCreation
+				s.cacheRead += c.cacheRead
+			}
+			b := aggByTS[ts]
+			if s.req != b.Requests || s.prompt != b.PromptTokens || s.completion != b.CompletionTokens ||
+				s.cacheCreation != b.CacheCreation || s.cacheRead != b.CacheRead {
+				t.Errorf("[%s] bucket %s: per-model sum %+v != aggregate %+v", rng, ts, s, b)
+			}
+		}
+
+		// 2) 逐模型：Σ_桶(趋势桶) 必须等于窗口内的模型统计
+		byModel := map[string]*cell{}
+		for _, row := range per {
+			c, ok := byModel[row.Model]
+			if !ok {
+				c = &cell{}
+				byModel[row.Model] = c
+			}
+			add(c, row)
+		}
+		if len(byModel) != len(got.Models) {
+			t.Errorf("[%s] model count: trends=%d stats=%d (%v vs %v)",
+				rng, len(byModel), len(got.Models), byModel, got.Models)
+		}
+		for model, c := range byModel {
+			ms, ok := got.Models[model]
+			if !ok {
+				t.Errorf("[%s] model %q missing from model stats", rng, model)
+				continue
+			}
+			if ms.RequestCount != c.req || ms.PromptTokens != c.prompt ||
+				ms.CompletionTokens != c.completion ||
+				ms.CacheCreatedTokens != c.cacheCreation || ms.CacheReadTokens != c.cacheRead {
+				t.Errorf("[%s] model %q bucket-sum mismatch:\n  trends=%+v\n  stats  =%+v", rng, model, *c, *ms)
+			}
+		}
+
+		// 3) 趋势图里没有的模型，stats 里也不该凭空出现
+		for model := range got.Models {
+			if _, ok := byModel[model]; !ok {
+				t.Errorf("[%s] model %q in stats but has no trend bucket", rng, model)
+			}
+		}
+
+		// 4) total_requests = 不带 group 的趋势桶 Requests 之和
+		var wantTotal int64
+		for _, b := range agg {
+			wantTotal += b.Requests
+		}
+		if got.TotalRequests != wantTotal {
+			t.Errorf("[%s] total_requests = %d; want %d (= sum of aggregate trend buckets)", rng, got.TotalRequests, wantTotal)
+		}
+		var sumReq int64
+		for _, ms := range got.Models {
+			sumReq += ms.RequestCount
+		}
+		if sumReq != got.TotalRequests {
+			t.Errorf("[%s] sum(model request_count) = %d != total_requests = %d", rng, sumReq, got.TotalRequests)
+		}
+	}
+}
+
+// ---- ⑧ adminStatsHandler：向后兼容红线 + range 分支 ----
+
+// withTokenStats 替换全局 tokenStats 并在测试结束后还原。
+func withTokenStats(t *testing.T, s *TokenStatsData) {
+	t.Helper()
+	tokenStatsMu.Lock()
+	old := tokenStats
+	tokenStats = s
+	tokenStatsMu.Unlock()
+	t.Cleanup(func() {
+		tokenStatsMu.Lock()
+		tokenStats = old
+		tokenStatsMu.Unlock()
+	})
+}
+
+func getStats(t *testing.T, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/stats"+query, nil)
+	rec := httptest.NewRecorder()
+	adminStatsHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/stats%s = %d; want 200 (body=%s)", query, rec.Code, rec.Body.String())
+	}
+	return rec
+}
+
+// 不带 range 时，响应必须与 json.Marshal(tokenStats) 逐字节相同。
+func TestAdminStatsHandlerWithoutRangeIsByteIdentical(t *testing.T) {
+	live := &TokenStatsData{
+		TotalRequests: 2,
+		Models: map[string]*ModelStats{
+			"m1": {RequestCount: 1, PromptTokens: 10, CompletionTokens: 2, TotalTokens: 12, CacheReadTokens: 4, AvgTTFTMs: 100, AvgOutputSpeed: 20, StreamReqCount: 1},
+			"m2": {RequestCount: 1, PromptTokens: 20, CompletionTokens: 3, TotalTokens: 23},
+		},
+	}
+	withTokenStats(t, live)
+
+	rec := getStats(t, "")
+	want, err := json.Marshal(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Body.Bytes(); string(got) != string(want) {
+		t.Errorf("no-range response diverged from json.Marshal(tokenStats)\n got=%s\nwant=%s", got, want)
+	}
+
+	// 空 models 也必须原样输出 `{}` 而不是 null
+	withTokenStats(t, &TokenStatsData{Models: map[string]*ModelStats{}})
+	if got := getStats(t, "").Body.String(); got != `{"total_requests":0,"models":{}}` {
+		t.Errorf("empty no-range response = %s; want {\"total_requests\":0,\"models\":{}}", got)
+	}
+}
+
+// 带 range 时走新路径：返回窗口聚合 + trends_by_model，且不读累计计数器。
+func TestAdminStatsHandlerWithRangeReturnsWindowedStats(t *testing.T) {
+	writeCallLog(t, []CallRecord{
+		{ReqID: "a", TS: rfc(inWindow()), Model: "m1", Status: "ok", PromptTokens: 100, CompletionTokens: 10, CacheRead: 40, CacheCreation: 5, OutputSpeed: 15, TTFTMs: 120},
+		{ReqID: "b", TS: rfc(inWindow()), Model: "m2", Status: "error"},
+	})
+	// 累计计数器里放一份与调用日志无关的数据：带 range 时绝不能泄漏它
+	withTokenStats(t, &TokenStatsData{
+		TotalRequests: 999,
+		Models:        map[string]*ModelStats{"legacy": {RequestCount: 999, TotalTokens: 999}},
+	})
+
+	rec := getStats(t, "?range=7d")
+	var out struct {
+		TotalRequests int64                  `json:"total_requests"`
+		Models        map[string]*ModelStats `json:"models"`
+		TrendsByModel []ModelTrendPoint      `json:"trends_by_model"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("range response is not valid JSON: %v (body=%s)", err, rec.Body.String())
+	}
+	if _, leaked := out.Models["legacy"]; leaked {
+		t.Errorf("range response leaked the cumulative counter; body=%s", rec.Body.String())
+	}
+	if out.TotalRequests != 2 {
+		t.Errorf("total_requests = %d; want 2 (window attempts)", out.TotalRequests)
+	}
+	if len(out.TrendsByModel) != 14 { // 2 模型 × 7 桶
+		t.Errorf("trends_by_model rows = %d; want 14", len(out.TrendsByModel))
+	}
+	m1 := out.Models["m1"]
+	if m1 == nil {
+		t.Fatalf("m1 missing from range response; body=%s", rec.Body.String())
+	}
+	if m1.TotalTokens != 110 || m1.PromptTokens != 100 || m1.CompletionTokens != 10 {
+		t.Errorf("m1 = %+v; want prompt 100 / completion 10 / total 110", m1)
+	}
+	if m1.AvgOutputSpeed != 15 || m1.AvgTTFTMs != 120 || m1.StreamReqCount != 1 {
+		t.Errorf("m1 speed = %+v; want ttft 120 / speed 15 / stream 1", m1)
+	}
+
+	// range=banana 必须归一为 today，与 adminTrendsHandler 同规则
+	today := getStats(t, "?range=banana")
+	if today.Body.String() == rec.Body.String() {
+		t.Error("range=banana produced the same payload as range=7d; normalization to today is not applied")
+	}
+
+	// 非法 method 行为不变
+	req := httptest.NewRequest(http.MethodDelete, "/api/stats?range=7d", nil)
+	del := httptest.NewRecorder()
+	adminStatsHandler(del, req)
+	if del.Code != http.StatusOK {
+		t.Errorf("DELETE with range = %d; want 200 (reset path unchanged)", del.Code)
+	}
+}

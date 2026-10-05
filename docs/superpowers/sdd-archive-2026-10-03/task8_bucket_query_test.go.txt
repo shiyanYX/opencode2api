@@ -1,0 +1,471 @@
+package main
+
+// Task 8：三个聚合函数改读小时桶。
+//
+// 本文件的三组用例分工明确：
+//   - A 组「查询不再碰日志文件」：**唯一真红**的用例，决定实现是否写对。
+//   - B 组「接线」：硬约束第 5 条——ensureBucketsUpToDate 必须被查询函数调起。
+//   - C 组「对拍与契约」：与扫文件的旧实现逐字段一致、空 model 不被过滤、网格完整。
+
+import (
+	"encoding/json"
+	"math"
+	"os"
+	"strings"
+	"testing"
+	"time"
+)
+
+// ===================== A 组：查询零 I/O =====================
+
+// sameLenPayload 造两段**字节长度完全相同**、内容完全不同的日志。
+//
+// 长度相同是关键：吸收完成后 parsedTo == size == len(payloadA)，
+// 把文件原地改写成 payloadB 之后 size 仍等于 parsedTo，
+// 于是 backfill 必然走「没有新字节」的提前返回路径。
+// 若 payloadB 更短/更长，size != parsedTo 会触发重扫，测试就测不到目标行为了。
+func sameLenPayload(t *testing.T, model string, pt int64) (string, string, int64) {
+	t.Helper()
+	base := time.Now().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	other := time.Now().Add(-30 * time.Minute).Format(time.RFC3339Nano)
+	a := statsLine(base, model, "ok", pt, 11, 3, 5, 100, 40) +
+		statsLine(other, model, "fail", pt, 22, 6, 7, 200, 80)
+	b := statsLine(base, model, "ok", pt+1, 33, 9, 1, 300, 60) +
+		statsLine(other, model, "fail", pt+2, 44, 8, 2, 400, 70)
+	return a, b, int64(len(a))
+}
+
+// TestModelStatsQueryDoesNotRereadAbsorbedLog 是 Task 8 的核心契约：
+// 字节一旦吸进桶，查询就只读桶，**不得再读日志文件**。
+//
+// 用「等长改写」把它变成确定性断言，不依赖任何计时：
+//  1. 首次查询把整份文件吸进桶（parsedTo == size）。
+//  2. 把文件**原地**改写成另一段等长内容。
+//  3. 再次查询。
+//
+// 改造前（每次 os.ReadFile 全文件）会看到改写后的内容 → 失败。
+// 改造后（读桶）必须仍返回第一次吸进去的数字 → 通过。
+func TestModelStatsQueryDoesNotRereadAbsorbedLog(t *testing.T) {
+	payloadA, payloadB, n := sameLenPayload(t, "aaa", 1000)
+	if len(payloadA) != len(payloadB) {
+		t.Fatalf("前置失败：两段 payload 长度不等（%d vs %d），无法构造等长改写",
+			len(payloadA), len(payloadB))
+	}
+	if n == 0 {
+		t.Fatal("前置失败：payload 为空")
+	}
+	p := useTempCallLogRaw(t, payloadA)
+
+	first := modelStatsFromCallLog("today")
+	if first == nil || first.TotalRequests != 2 {
+		t.Fatalf("前置失败：首次查询应吸收 2 条，实际 %+v", first)
+	}
+
+	// 原地等长改写。size 不变 → parsedTo 不需要动。
+	if err := os.WriteFile(p, []byte(payloadB), 0644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() != n {
+		t.Fatalf("前置失败：改写后文件大小 %d != 首次的 %d", st.Size(), n)
+	}
+
+	second := modelStatsFromCallLog("today")
+	if second == nil {
+		t.Fatal("第二次查询返回 nil")
+	}
+	if second.TotalRequests != 2 {
+		t.Errorf("total_requests = %d，期望 2（记录数不该因文件内容变化而变）", second.TotalRequests)
+	}
+	ms := second.Models["aaa"]
+	if ms == nil {
+		t.Fatalf("aaa 消失；键集=%v", keysOf(second.Models))
+	}
+	if ms.PromptTokens != 2000 {
+		t.Errorf("aaa prompt_tokens = %d，期望 2000（= 首次吸进桶的 1000+1000）。\n"+
+			"拿到改写后的数字说明查询仍在 os.ReadFile 日志文件——Task 8 没生效",
+			ms.PromptTokens)
+	}
+}
+
+// 三个查询函数都必须走「已吸收即零 I/O」，不能只改一个。
+func TestAllThreeQueriesStopRereadingAbsorbedLog(t *testing.T) {
+	payloadA, payloadB, _ := sameLenPayload(t, "ccc", 2000)
+	p := useTempCallLogRaw(t, payloadA)
+
+	// 先跑一轮把文件吸干
+	_ = trendsFromCallLog("today")
+	_ = trendsByModelFromCallLog("today")
+	if got := modelStatsFromCallLog("today"); got.TotalRequests != 2 {
+		t.Fatalf("前置失败：首次查询应吸收 2 条，实际 %d", got.TotalRequests)
+	}
+
+	if err := os.WriteFile(p, []byte(payloadB), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// trends：窗口内总请求数仍是 2，且各桶 prompt 只能是 payloadA 的 2000（payloadB
+	// 是 2001/2002）。断言「∈ {0, 2000}」而不是「== 0」——有数据的桶本就该是 2000。
+	wantPrompt := map[int64]bool{0: true, 2000: true}
+	var sumTrend, sumModel int64
+	for _, b := range trendsFromCallLog("today") {
+		sumTrend += b.Requests
+		if !wantPrompt[b.PromptTokens] {
+			t.Errorf("趋势桶 %s prompt_tokens = %d，期望 0 或 2000（读到改写后的内容说明仍在重扫文件）",
+				b.TS, b.PromptTokens)
+		}
+	}
+	for _, b := range trendsByModelFromCallLog("today") {
+		sumModel += b.Requests
+		if !wantPrompt[b.PromptTokens] {
+			t.Errorf("按模型桶 %s/%s prompt_tokens = %d，期望 0 或 2000", b.TS, b.Model, b.PromptTokens)
+		}
+	}
+	if sumTrend != 2 {
+		t.Errorf("trendsFromCallLog 请求数合计 = %d，期望 2", sumTrend)
+	}
+	if sumModel != 2 {
+		t.Errorf("trendsByModelFromCallLog 请求数合计 = %d，期望 2", sumModel)
+	}
+}
+
+// ===================== B 组：硬约束 ⑤ 接线 =====================
+
+// TestStatsQueriesAbsorbColdStartHistory 锁住硬约束第 5 条：
+// ensureBucketsUpToDate 在 Task 7 落地时**没有任何生产调用方**，
+// 全仓只有测试引用它。若 Task 8 不接上，开机那批存量历史永远不会被吸进桶，
+// 面板恒为空 —— 而且不报错、total_requests 也是对的（若是把它放在末尾累加的话）。
+func TestStatsQueriesAbsorbColdStartHistory(t *testing.T) {
+	body := statsLine(time.Now().Add(-2*time.Hour).Format(time.RFC3339Nano), "cold", "ok", 11, 22, 33, 44, 55, 66)
+	useTempCallLogRaw(t, body)
+	// useTempCallLogRaw 默认置 bucketsSeeded=true（自洽于空文件），
+	// 这里给出内容，所以必须置回 false —— 这才是「进程刚起」的真实状态。
+	markBackfillPending(t)
+
+	if got := modelStatsFromCallLog("today"); got.TotalRequests != 1 {
+		t.Errorf("modelStatsFromCallLog total_requests = %d，期望 1。\n"+
+			"得到 0 说明查询函数没有调 ensureBucketsUpToDate：开机存量历史永远进不了桶，"+
+			"面板一片空白且不报错", got.TotalRequests)
+	}
+
+	// 三个入口各来一次独立 fixture，确保每个都自己接了线
+	for _, tc := range []struct {
+		name string
+		call func() int64
+	}{
+		{"trendsFromCallLog", func() int64 {
+			var n int64
+			for _, b := range trendsFromCallLog("today") {
+				n += b.Requests
+			}
+			return n
+		}},
+		{"trendsByModelFromCallLog", func() int64 {
+			var n int64
+			for _, b := range trendsByModelFromCallLog("today") {
+				n += b.Requests
+			}
+			return n
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			useTempCallLogRaw(t, body)
+			markBackfillPending(t)
+			if got := tc.call(); got != 1 {
+				t.Errorf("%s 请求数合计 = %d，期望 1（未接 ensureBucketsUpToDate）", tc.name, got)
+			}
+		})
+	}
+}
+
+// 模型列表与 total_requests 必须来自**同一份桶快照**。
+// 若把 ensure 放在函数末尾（先 foldBuckets 再 ensure），冷启动会得到
+// {"models":{}, "total_requests":N} —— 数字在、模型全空、不报错。
+func TestModelStatsModelsAndTotalComeFromSameSnapshot(t *testing.T) {
+	var sb strings.Builder
+	for i := 0; i < 3; i++ {
+		sb.WriteString(statsLine(time.Now().Add(-time.Duration(i+1)*time.Hour).Format(time.RFC3339Nano),
+			"m", "ok", 10, 5, 1, 2, 30, 40))
+	}
+	useTempCallLogRaw(t, sb.String())
+	markBackfillPending(t)
+
+	got := modelStatsFromCallLog("today")
+	if got == nil {
+		t.Fatal("返回 nil")
+	}
+	if len(got.Models) == 0 && got.TotalRequests > 0 {
+		t.Fatalf("models 为空但 total_requests=%d —— ensure 被放在读桶之后了", got.TotalRequests)
+	}
+	var sum int64
+	for _, ms := range got.Models {
+		sum += ms.RequestCount
+	}
+	if sum != got.TotalRequests {
+		t.Errorf("Σmodel.request_count = %d != total_requests = %d", sum, got.TotalRequests)
+	}
+}
+
+// ===================== C 组：对拍与契约 =====================
+
+// 桶查询必须与「扫文件」逐字段一致（验收 #2 的自动化）。
+func TestBucketsMatchLegacyScan(t *testing.T) {
+	now := time.Now()
+	loc := time.Local
+	var sb strings.Builder
+	type seed struct {
+		off            time.Duration
+		model          string
+		st             string
+		pt, ct, cc, cr int64
+		ttft, dur      int64
+		speed          float64
+	}
+	// ⚠️ brief 的 seed 结构体少声明了一个字段（字面量给了 9 个值、结构体只有 8 个），
+	// 照抄无法编译。第 6 个整数是 duration_ms，与紧跟其后的 800/120.5 t/s 自洽。
+	seeds := []seed{
+		{-30 * time.Minute, "m1", "ok", 100, 50, 3, 1, 10, 800, 120.5},
+		{-3 * time.Hour, "m1", "fail", 7, 0, 0, 0, 0, 0, 0},
+		{-2 * 24 * time.Hour, "m2", "ok", 20, 20, 0, 0, 5, 400, 60.25},
+		{-40 * 24 * time.Hour, "m2", "ok", 33, 11, 5, 2, 9, 1200, 33.5},
+		{-2 * time.Minute, "", "ok", 1, 1, 0, 0, 0, 500, 9.75},
+	}
+	for _, s := range seeds {
+		ts := now.Add(s.off).In(loc).Format(time.RFC3339Nano)
+		sb.WriteString(statsLine(ts, s.model, s.st, s.pt, s.ct, s.cc, s.cr, s.ttft, s.speed))
+	}
+	useTempCallLogRaw(t, sb.String())
+
+	for _, rng := range []string{"today", "7d", "30d", "180d"} {
+		ts, bidx := trendBuckets(rng)
+		var legacyP, legacyC, legacyCR, legacyCC int64
+		var legacyN, legacyOK, legacyFail int64
+
+		// 旧实现：扫文件
+		forEachBucketedCallRecord(ts, bidx, func(rec CallRecord, _ int) {
+			legacyN++
+			if rec.Status == "ok" {
+				legacyOK++
+			} else {
+				legacyFail++
+			}
+			legacyP += rec.PromptTokens
+			legacyC += rec.CompletionTokens
+			legacyCC += rec.CacheCreation
+			legacyCR += rec.CacheRead
+		})
+
+		// 新实现：读桶
+		got := modelStatsFromCallLog(rng)
+		if got == nil {
+			t.Fatalf("%s: modelStatsFromCallLog 返回 nil", rng)
+		}
+		// ⚠️ ModelStats 结构体里【没有】per-model 的 ok/fail 字段。
+		// modelStatsFromCallLog 根本不按模型统计成败——成败只在 TrendsPoint 里
+		// （TrendsPoint.OK / .Fail）。故此处只能比对请求数与 token。
+		var gN, gP, gC, gCC, gCR int64
+		for _, ms := range got.Models {
+			gN += ms.RequestCount
+			gP += ms.PromptTokens
+			gC += ms.CompletionTokens
+			gCC += ms.CacheCreatedTokens
+			gCR += ms.CacheReadTokens
+		}
+		if gN != legacyN || gP != legacyP || gC != legacyC || gCC != legacyCC || gCR != legacyCR {
+			t.Errorf("%s 不一致: got(n=%d p=%d c=%d cc=%d cr=%d) legacy(n=%d ok=%d fail=%d p=%d c=%d cc=%d cr=%d)",
+				rng, gN, gP, gC, gCC, gCR, legacyN, legacyOK, legacyFail, legacyP, legacyC, legacyCC, legacyCR)
+		}
+		if got.TotalRequests != legacyN {
+			t.Errorf("%s total_requests = %d，期望 %d", rng, got.TotalRequests, legacyN)
+		}
+	}
+}
+
+// 逐桶对拍：trendsFromCallLog 必须与扫文件得到的每个桶逐字段相等。
+// 桶查询把「小时键 → 桶下标」的映射整个换掉了，只对总数是不够的。
+func TestTrendBucketsMatchLegacyScanFieldByField(t *testing.T) {
+	now := time.Now()
+	var sb strings.Builder
+	for _, off := range []time.Duration{
+		-2 * time.Minute, -30 * time.Minute, -3 * time.Hour, -23 * time.Hour,
+	} {
+		sb.WriteString(statsLine(now.Add(off).Format(time.RFC3339Nano), "t1", "ok", 10, 5, 1, 2, 30, 40))
+		sb.WriteString(statsLine(now.Add(off).Format(time.RFC3339Nano), "t2", "fail", 1, 1, 0, 0, 0, 0))
+	}
+	// 7d/30d 窗口内的旧日记录（各一天，覆盖不同日桶）
+	for d := 1; d <= 4; d++ {
+		ts := time.Date(now.Year(), now.Month(), now.Day(), 9+d, 0, 0, 0, time.Local).Format(time.RFC3339)
+		sb.WriteString(statsLine(ts, "t1", "ok", int64(100*d), 5, 1, 2, 30, 40))
+	}
+	useTempCallLogRaw(t, sb.String())
+
+	for _, rng := range []string{"today", "7d", "30d"} {
+		ts, bidx := trendBuckets(rng)
+		want := make([]TrendsPoint, len(ts))
+		for i, label := range ts {
+			want[i] = TrendsPoint{TS: label}
+		}
+		forEachBucketedCallRecord(ts, bidx, func(rec CallRecord, i int) {
+			want[i].Requests++
+			if rec.Status == "ok" {
+				want[i].OK++
+			} else {
+				want[i].Fail++
+			}
+			want[i].PromptTokens += rec.PromptTokens
+			want[i].CompletionTokens += rec.CompletionTokens
+			want[i].CacheCreation += rec.CacheCreation
+			want[i].CacheRead += rec.CacheRead
+		})
+		got := trendsFromCallLog(rng)
+		if len(got) != len(want) {
+			t.Fatalf("%s 桶数 %d != %d", rng, len(got), len(want))
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("%s 桶 %d 不一致:\n got=%+v\nwant=%+v", rng, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+// 空 model 必须出现在 Models 里（改造前 calllog.go 建键之前才跳过窗口外记录，
+// 空 model 是合法键）。过滤掉会让「新增输入+Output+命中 == 真实消耗」红。
+func TestEmptyModelAppearsInBucketQuery(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	useTempCallLogRaw(t, statsLine(ts, "", "ok", 9, 8, 7, 0, 0, 500)+statsLine(ts, "m", "ok", 1, 1, 7, 0, 0, 0))
+	got := modelStatsFromCallLog("today")
+	if got == nil {
+		t.Fatal("返回 nil")
+	}
+	var total int64
+	for _, ms := range got.Models {
+		total += ms.RequestCount
+	}
+	if total != 2 {
+		t.Fatalf("空 model 必须计入，合计应为 2，实际 %d，键集=%v", total, keysOf(got.Models))
+	}
+	if _, ok := got.Models[""]; !ok {
+		t.Errorf("空 model 未出现在 Models 里；键集=%v", keysOf(got.Models))
+	}
+}
+
+func keysOf(m map[string]*ModelStats) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// trendsFromCallLog 必须返回 len(ts) 个点（含零），保证前端折线不断裂。
+func TestTrendsReturnsFullGrid(t *testing.T) {
+	ts := time.Now().Format(time.RFC3339Nano)
+	useTempCallLogRaw(t, statsLine(ts, "m", "ok", 1, 1, 7, 0, 0, 0))
+	for _, rng := range []string{"today", "7d", "30d", "180d"} {
+		labels, _ := trendBuckets(rng)
+		got := trendsFromCallLog(rng)
+		if len(got) != len(labels) {
+			t.Errorf("%s: 应返回 %d 个点，实际 %d", rng, len(labels), len(got))
+		}
+	}
+}
+
+// 折叠小时桶必须按时间排序遍历：Go 的 map 遍历顺序随机化，
+// 直接 range hourBuckets 会让同一请求连发两次的浮点字段不同。
+func TestBucketQueryIsBitwiseDeterministicAcrossCalls(t *testing.T) {
+	const nBuckets = 400
+	now := time.Now()
+	var sb strings.Builder
+	for i := 0; i < nBuckets; i++ {
+		// 每个整点一条，落在 30d 窗口内（400 小时 ≈ 16.6 天）。
+		ts := now.Add(-time.Duration(i) * time.Hour).Format(time.RFC3339Nano)
+		speed := float64(i+1) * math.Pow(10, float64(i%14))
+		sb.WriteString(statsLine(ts, "m", "ok", int64(i), int64(i)*3, 1, 2, int64(i)*7+3, speed))
+	}
+	useTempCallLogRaw(t, sb.String())
+
+	if got := modelStatsFromCallLog("30d"); got.TotalRequests != nBuckets {
+		t.Fatalf("前置失败：应吸进 %d 条，实际 %d", nBuckets, got.TotalRequests)
+	}
+
+	first, err := json.Marshal(modelStatsFromCallLog("30d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 50; i++ {
+		got, _ := json.Marshal(modelStatsFromCallLog("30d"))
+		if string(got) != string(first) {
+			t.Fatalf("第 %d 次查询与第一次不逐字节相同 —— 折叠没有按 (Hour,Model) 排序遍历，"+
+				"map 随机序让浮点累加顺序不稳定。\n 1=%s\n%d=%s", i, first, i, got)
+		}
+	}
+}
+
+// trendsByModelFromCallLog 的输出顺序（模型名升序 × 桶索引升序）必须稳定。
+//
+// ⚠️ 诚实标注这条用例的**射程**：ModelTrendPoint 没有浮点字段，
+// 所以它**抓不到**「foldBucketsByModel 没排序遍历」这个变异（实测过，全绿）。
+// 那个变异由 TestBucketQueryIsBitwiseDeterministicAcrossCalls 从 foldOneModel
+// 一侧兜住。本条守的是另一件事：模型列表来自 map 遍历，
+// 忘记 sort.Strings 就会让同一个响应的行序随机。
+func TestTrendByModelIsBitwiseDeterministicAcrossCalls(t *testing.T) {
+	now := time.Now()
+	var sb strings.Builder
+	for i := 0; i < 120; i++ {
+		for _, m := range []string{"a", "b", "c", "d"} {
+			ts := now.Add(-time.Duration(i) * time.Hour).Format(time.RFC3339Nano)
+			sb.WriteString(statsLine(ts, m, "ok", int64(i), 1, 1, 2, 5, float64(i+1)))
+		}
+	}
+	useTempCallLogRaw(t, sb.String())
+
+	first, err := json.Marshal(trendsByModelFromCallLog("30d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 50; i++ {
+		got, _ := json.Marshal(trendsByModelFromCallLog("30d"))
+		if string(got) != string(first) {
+			t.Fatalf("第 %d 次 trendsByModelFromCallLog 与第一次不逐字节相同", i)
+		}
+	}
+}
+
+// bidx 的边界必须复用，不能复制 dayIdx 的算式。
+// 断言方式是「喂 hourBuckets 里的本地整点键，经过 bidx 之后落点与扫文件一致」：
+// TestTrendBucketsMatchLegacyScanFieldByField 覆盖 today/7d/30d，
+// 这里补 180d 并显式检查跨日边界的桶。
+func TestBucketKeysRoundTripThroughExistingBidx(t *testing.T) {
+	now := time.Now()
+	var sb strings.Builder
+	for d := 0; d <= 6; d++ {
+		ts := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).
+			AddDate(0, 0, -d).Format(time.RFC3339)
+		sb.WriteString(statsLine(ts, "edge", "ok", int64(10*(d+1)), 1, 0, 0, 0, 0))
+	}
+	useTempCallLogRaw(t, sb.String())
+	// 桶要等 ensure 之后才有内容：useTempCallLogRaw 只换 path 并清空桶。
+	ensureBucketsUpToDate()
+
+	ts, bidx := trendBuckets("180d")
+	// 每个不同的 hourModelKey.Hour 还原后必须落在 [0, len(ts)) 内
+	callLog.mu.RLock()
+	keys := make([]int64, 0, len(hourBuckets))
+	for k := range hourBuckets {
+		keys = append(keys, k.Hour)
+	}
+	callLog.mu.RUnlock()
+	if len(keys) == 0 {
+		t.Fatalf("前置失败：桶为空")
+	}
+	for _, h := range keys {
+		i := bidx(time.Unix(h, 0).Local())
+		if i < 0 || i >= len(ts) {
+			t.Errorf("hourKey %d 还原后 bidx = %d，期望 0..%d", h, i, len(ts)-1)
+		}
+	}
+}
