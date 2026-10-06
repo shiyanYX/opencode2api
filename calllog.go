@@ -1768,10 +1768,13 @@ func modelStatsWithBuckets(ts []string, bidx func(time.Time) int) *TokenStatsDat
 		out.Models[name] = ms
 		// 🔴 total_requests 与 models 取自**同一个 a**，不是再独立折叠一遍。
 		// 两者数值恒等（都是窗口内按模型切分的同一批桶的请求数之和），
-		// 但独立折叠要多一趟全桶扫描，且中间还夹着一次加解锁——
-		// 并发 append 正好落在两次取锁之间时，Σmodel.request_count 与
-		// total_requests 会差一条，面板上「合计对不上分项」。
-		// 从同一个 a 累加让这条不变式变成构造上成立，不依赖任何时刻的巧合。
+		// 但独立折叠要多一趟全桶扫描，且中间还夹着一次加解锁。
+		// 注意：恒等是**构造上**的——实测 3,000 次并发查询下从未出现
+		// 「Σmodel.request_count ≠ total_requests」。真正的缺陷在别处：
+		// 旧实现给每个模型各排一次全桶键，落在两次排序之间到达的新请求
+		// 会被后面的模型算上、前面的不算，于是**同一份响应里各模型的数字
+		// 取自不同时刻**（漏掉的那条请求从两个字段里一起消失，字段仍相等）。
+		// 提排序修掉的正是这个：从同一个 a 累加、并共用一份键快照。
 		out.TotalRequests += a.N
 	}
 	return out
