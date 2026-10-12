@@ -116,6 +116,21 @@ type hourModelAgg struct {
 	SpeedN         int64
 	TTFTSum        float64
 	TTFTN          int64
+
+	// ↓ DSH 同口径吞吐：存「和」不存「比率」。
+	//
+	// 为什么要另存而不复用 SpeedSum/SpeedN：SpeedSum 存的是**每条速率**之和，
+	// Σ(速率)/Σn 得到的是「速率的算术平均」——它给每条请求同样的权重，
+	// 与「这个窗口一共跑了多少 token、花了多少秒」是两回事。
+	// 生产实测两者差 4.86 倍（452.70 vs 93.13）：0.8% 的超短请求贡献了速率和的
+	// 69.4%，却只占总时间的 0.002%。DSH 面板用的是 Σtoken ÷ Σ秒，
+	// 所以这里必须**分别存秒和、token 和**，除法留到查询侧做。
+	//
+	// SpeedTpsN 是样本数：它与 SpeedN 不同步（脏样本被守卫整体排除时，
+	// SpeedN 计了、SpeedTpsN 不计），所以必须独立存，不能拿 SpeedN 当分母。
+	SpeedSecSum float64 // Σ生成秒（= time.Since(firstTokenAt)，与写入侧同一个时间窗）
+	SpeedTokSum int64   // Σ完成token
+	SpeedTpsN   int64   // 吞吐样本数
 }
 
 // hourModelKey 的 Hour 是「本地整点」的 Unix 秒。
@@ -252,8 +267,7 @@ func hourKeyFor(ts string, model string) (hourModelKey, bool) {
 }
 
 // add 把一条统计记录累加进桶。
-// 过滤条件必须与 calllog.go 的 forEachBucketedCallRecord 回调（modelStatsFromCallLog）
-// 及 main.go 的 recordModelSpeed 完全一致：
+// 过滤条件必须与 main.go 的 recordModelSpeed 完全一致：
 // model 为空、或 OutputSpeed <= 0 时，StreamReqCount / AvgTTFTMs / AvgOutputSpeed 三者都不计。
 func (a *hourModelAgg) add(r *slimRec) {
 	a.N++
@@ -262,15 +276,49 @@ func (a *hourModelAgg) add(r *slimRec) {
 	} else {
 		a.Fail++
 	}
-	a.PT += r.PromptTokens
-	a.CT += r.CompletionTokens
-	a.CC += r.CacheCreation
-	a.CR += r.CacheRead
+	a.PT = satAdd(a.PT, r.PromptTokens)
+	a.CT = satAdd(a.CT, r.CompletionTokens)
+	a.CC = satAdd(a.CC, r.CacheCreation)
+	a.CR = satAdd(a.CR, r.CacheRead)
 	if r.Model != "" && r.OutputSpeed > 0 {
 		a.SpeedN++
 		a.SpeedSum += r.OutputSpeed
 		a.TTFTN++
 		a.TTFTSum += float64(r.TTFTMs)
+		// ---- 吞吐口径的累加（DSH 同口径：Σtoken ÷ Σ秒）----
+		//
+		// 三条守卫，**被拒的样本分子分母都不进**：
+		//  1. ct > 0：否则分子为 0 而分母照进，凭空拉低吞吐。
+		//  2. sec 有限且 > 0：sec = ct/output_speed 在 output_speed 极小时
+		//     会溢出成 +Inf；SpeedSecSum 是裸 `x += v`，一次 +Inf 进去
+		//     **整个模型桶的吞吐永久变 NaN**，而 NaN 不会被 IsInf 抓住
+		//     —— 它在 json.Marshal 里与 +Inf 一样报错，整个 /api/stats 变 500。
+		//  3. ★物理上界 sec <= (duration_ms+2)/1000。
+		//
+		// ★★ 第 3 条的真实余量是 **(1 - 首字等待/总耗时)**，不是「两次 time.Since
+		// 之间的几微秒」。旧注释写的是后者，是错的：
+		//   构造上 sec = duration - 首字等待 - 收尾开销，所以
+		//   sec/duration ≈ 1 - TTFT/duration，而 TTFT/duration **没有下界**
+		//   （ttft_ms 是毫秒截断量，首 token 立即到达时 ttft_ms=0 完全合法）。
+		// 生产 11,540 条实测：余量中位数 73.5%，**最小只有 0.85%**
+		//   （mimo-v2.5-free, 09-21 19:16, dur=618.3s, sec=613.1s）；
+		//   ratio>0.95 的有 43 条(0.37%)，越过界只需多出 1.6 秒 —— 秒级，不是微秒级。
+		// ⇒ 这条守卫【会误伤合法记录】：一条「首 token 立即到达」的长请求
+		//   margin → 0，被判越界而整条丢弃。
+		// ⇒ **它仍然必须留着**（防的是「有限但荒谬」的 sec：output_speed=1e-305
+		//   推出 sec=1e308，!IsInf&&!IsNaN 判不出来，会把顶层吞吐静默变成 5.67e-302）。
+		// ★ 认领的不变式：**任何一条合法记录都满足 sec <= (duration_ms+2)/1000**。
+		//   若将来出现被这条守卫误伤的报告，第一个要查的就是 TTFT/duration 是否趋零，
+		//   而不是去把 +2 改大 —— 那个余量不是毫秒量级的。
+		if r.CompletionTokens > 0 {
+			if sec := float64(r.CompletionTokens) / r.OutputSpeed; sec > 0 &&
+				!math.IsInf(sec, 0) && !math.IsNaN(sec) &&
+				(r.DurationMS <= 0 || sec <= (float64(r.DurationMS)+2)/1000.0) {
+				a.SpeedSecSum += sec
+				a.SpeedTokSum = satAdd(a.SpeedTokSum, r.CompletionTokens)
+				a.SpeedTpsN++
+			}
+		}
 	}
 }
 
@@ -636,17 +684,13 @@ func absorbOnce() {
 		// 🔴 必须是 += ：生产日志 38.6% 乱序，新记录会落进**已存在**的小时桶
 		// （实测 610 条落进已结束的桶，最大回退 46 分钟）。
 		// 「不存在则新建并赋值」在新建分支正确、在命中分支会把旧值整个抹掉。
-		b.N += v.N
-		b.OK += v.OK
-		b.Fail += v.Fail
-		b.PT += v.PT
-		b.CT += v.CT
-		b.CC += v.CC
-		b.CR += v.CR
-		b.SpeedSum += v.SpeedSum
-		b.SpeedN += v.SpeedN
-		b.TTFTSum += v.TTFTSum
-		b.TTFTN += v.TTFTN
+		//
+		// 🔴🔴 这里**只能调 mergeAggTo**，不得再写逐字拷贝：
+		// 每加一个聚合字段要记得在这里补一行，而「忘了补」不报任何错——
+		// 实测故意不加时 go test ./... 全绿，真日志跑下来 ΣSpeedTokSum=0、
+		// 历史吞吐指标全量归零。mergeAggTo 是全仓唯一的合并写点，
+		// 由 tps_throughput_struct_test.go 的结构断言钉住。
+		mergeAggTo(b, v)
 	}
 	// 🔴🔴 **按快照 size 提交**，而不是「此刻的文件大小」。
 	//
@@ -735,19 +779,42 @@ func bucketIndexOf(hour int64, n int, bidx func(time.Time) int) int {
 	return i
 }
 
+// satAdd 是 int64 饱和加法：到上限就停在上限，**不回绕**。
+//
+// 为什么必须：这些字段是裸 `x += v`，且**直接进 json.Marshal**。
+// 一条 completion_tokens = MaxInt64 的记录（手改日志 / 另一个写入端就会产出）
+// 就能让 CT / SpeedTokSum 回绕成**负数**，而 json 对负数照常序列化 ——
+// 面板会**照实显示一个负的 token 数或负的 t/s**，HTTP 200、不进日志、不告警。
+// 暴露侧现有的 IsInf/IsNaN 守卫**只挡浮点非有限**，对整型回绕一层也挡不住。
+//
+// 饱和而不是报错：出问题时「数字停在上限」与「数字变负」相比，
+// 前者仍是一个可解释的上界，后者是纯谎报。
+func satAdd(a, b int64) int64 {
+	if b > 0 && a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	if b < 0 && a < math.MinInt64-b {
+		return math.MinInt64
+	}
+	return a + b
+}
+
 // mergeAggTo 把源桶累加进目标桶。字段逐字对齐 hourModelAgg。
 func mergeAggTo(dst *hourModelAgg, s *hourModelAgg) {
-	dst.N += s.N
-	dst.OK += s.OK
-	dst.Fail += s.Fail
-	dst.PT += s.PT
-	dst.CT += s.CT
-	dst.CC += s.CC
-	dst.CR += s.CR
+	dst.N = satAdd(dst.N, s.N)
+	dst.OK = satAdd(dst.OK, s.OK)
+	dst.Fail = satAdd(dst.Fail, s.Fail)
+	dst.PT = satAdd(dst.PT, s.PT)
+	dst.CT = satAdd(dst.CT, s.CT)
+	dst.CC = satAdd(dst.CC, s.CC)
+	dst.CR = satAdd(dst.CR, s.CR)
 	dst.SpeedSum += s.SpeedSum
-	dst.SpeedN += s.SpeedN
+	dst.SpeedN = satAdd(dst.SpeedN, s.SpeedN)
+	dst.SpeedSecSum += s.SpeedSecSum
+	dst.SpeedTokSum = satAdd(dst.SpeedTokSum, s.SpeedTokSum)
+	dst.SpeedTpsN = satAdd(dst.SpeedTpsN, s.SpeedTpsN)
 	dst.TTFTSum += s.TTFTSum
-	dst.TTFTN += s.TTFTN
+	dst.TTFTN = satAdd(dst.TTFTN, s.TTFTN)
 }
 
 // foldBuckets 把小时桶折叠进 trendBuckets 给定的窗口，返回每个桶索引的聚合值。
@@ -863,7 +930,7 @@ func foldModelsInWindow(ts []string, bidx func(time.Time) int) ([]string, map[st
 
 type callLogStore struct {
 	// RWMutex 而非 Mutex：纯读路径（latest / loadCallLogFromFile /
-	// forEachBucketedCallRecord）用 RLock，写路径（append/clear）用 Lock。
+	// 读取用 RLock，写路径（append/clear）用 Lock。
 	// Task 8 起查询侧读 hourBuckets 也走 RLock。
 	mu      sync.RWMutex
 	records []CallRecord
@@ -1174,6 +1241,7 @@ func (s *callLogStore) append(rec CallRecord) {
 				PromptTokens: rec.PromptTokens, CompletionTokens: rec.CompletionTokens,
 				CacheCreation: rec.CacheCreation, CacheRead: rec.CacheRead,
 				TTFTMs: rec.TTFTMs, OutputSpeed: rec.OutputSpeed,
+				DurationMS: rec.DurationMS,
 			})
 			// 🔴 **必须同时推进 parsedTo**。
 			// append 已经把这条计进桶了；若 parsedTo 不跟着走，
@@ -1344,8 +1412,15 @@ func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionT
 	if !cr.start.IsZero() {
 		cr.rec.DurationMS = time.Since(cr.start).Milliseconds()
 	}
-	// 计算首 token 延迟和输出速度（仅流式且有输出时）
-	if cr.rec.Stream && !cr.firstTokenAt.IsZero() && cr.completionTok > 0 {
+	// 计算首 token 延迟和输出速度。
+	// ★ 判据是 firstTokenAt，**不再要求 cr.rec.Stream**：
+	// 上游对非流式客户端同样是 stream=true（ensureAgentUpstreamShape 强制），
+	// 其 SSE 由 readAllMarkingFirstData 逐行读取时打点。因此「非流式」不等于
+	// 「没有首 token」—— 旧判据把绝大多数非流式请求永久挡在速度统计之外，
+	// 而它们占本项目 90.4% 的 output token。
+	// 反过来保证：上游若没返回 SSE（错误体、纯 JSON），firstTokenAt 恒为零 ⇒ 不出速度，
+	// 面板显示 "—"，与之前完全一致。
+	if !cr.firstTokenAt.IsZero() && cr.completionTok > 0 {
 		cr.rec.TTFTMs = cr.firstTokenAt.Sub(cr.start).Milliseconds()
 		genSec := time.Since(cr.firstTokenAt).Seconds()
 		if genSec > 0 {
@@ -1498,7 +1573,9 @@ func trendBuckets(rng string) ([]string, func(time.Time) int) {
 	}
 }
 
-// forEachBucketedCallRecord 用给定的桶配置遍历落在区间内的调用记录，
+// （已删：forEachBucketedCallRecord，0 调用者。
+//  它 os.ReadFile 整个日志文件、用 encoding/json 解析、没有 .In(time.Local)
+//  （490 条 Z 行的老 bug）且不经过任何吞吐守卫 —— 留着是上膛的枪。）
 // fn 收到记录与桶索引。返回 false 表示日志文件不可读。
 //
 // ⚠️ **Task 8 起本函数不再有任何生产调用方**：三个聚合函数已改读内存小时桶。
@@ -1510,40 +1587,6 @@ func trendBuckets(rng string) ([]string, func(time.Time) int) {
 //
 // 别把它当生产热路径，也别顺手删掉——删了对拍用例就失去基准。
 // 若将来确认对拍用例也已迁移完毕，删除前请先确认没有任何测试再引用它。
-func forEachBucketedCallRecord(ts []string, bidx func(time.Time) int, fn func(rec CallRecord, bucket int)) bool {
-	// 只读 path，用 RLock。
-	// ⚠️ fn 仍在 Unlock **之后**调用（下面那个循环里），顺序不能动：
-	// 回调归调用方所有，让它在锁内跑等于把调用方的耗时算进全局写锁，
-	// 而且 Task 8 起回调要读 hourBuckets —— 万一有回调回写共享状态，
-	// 在锁内执行会直接踩 "concurrent map writes"。
-	callLog.mu.RLock()
-	p := callLog.path
-	callLog.mu.RUnlock()
-	data, err := os.ReadFile(p)
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var rec CallRecord
-		if json.Unmarshal([]byte(line), &rec) != nil || rec.TS == "" {
-			continue
-		}
-		t, err := time.Parse(time.RFC3339, rec.TS)
-		if err != nil {
-			continue
-		}
-		i := bidx(t)
-		if i < 0 || i >= len(ts) {
-			continue
-		}
-		fn(rec, i)
-	}
-	return true
-}
 
 // 路径未初始化或文件缺失时返回空数组
 //
@@ -1717,6 +1760,13 @@ func modelStatsFromCallLog(rng string) *TokenStatsData {
 func modelStatsWithBuckets(ts []string, bidx func(time.Time) int) *TokenStatsData {
 	out := &TokenStatsData{Models: map[string]*ModelStats{}}
 
+	// 顶层吞吐的分子分母：与 per-model 同源（同一批桶、同一份 SpeedTokSum/SpeedSecSum），
+	// 所以顶层恒等于「按秒加权的各模型吞吐」。除法放在循环后做一次，
+	// 而不是 Σ(每模型 tps×秒)/Σ秒 —— 后者会把已被守卫挡掉的桶算成 0 参与加权。
+	var gSec float64
+	var gTok int64
+	var gN int64
+
 	names, aggs := foldModelsInWindow(ts, bidx)
 	for _, name := range names {
 		a := aggs[name]
@@ -1765,6 +1815,28 @@ func modelStatsWithBuckets(ts []string, bidx func(time.Time) int) *TokenStatsDat
 				ms.AvgTTFTMs = v
 			}
 		}
+
+		// ---- 吞吐三字段（DSH 同口径：Σ完成token ÷ Σ生成秒）----
+		//
+		// 暴露侧的守卫与 add() 的写侧守卫**同判据、不是重复**：
+		//  写侧保证脏样本根本进不了桶；暴露侧保证「即便进来了也整桶不出数」。
+		// 缺暴露侧的实测后果（陷阱②）：一条 312 B 的脏记录就让整个模型桶 +
+		// 全局吞吐**静默消失**、HTTP 200 不报错。
+		// ⇒ 双层都要，两层都不能省。
+		//
+		// 🔴 赋值必须在守卫里，不能只守除法那一步：若先把 SpeedSecSum(=+Inf)
+		// 赋给 ms 再判 Inf，json.Marshal 遇 +Inf 会让整份响应变 500
+		// —— 那正是这道防线要挡的形态。判据相同 ⇒ 非有限时**整桶的吞吐字段一起缺席**。
+		if a.SpeedTpsN > 0 && !math.IsInf(a.SpeedSecSum, 0) && !math.IsNaN(a.SpeedSecSum) {
+			ms.StreamTpsN = a.SpeedTpsN
+			if v := float64(a.SpeedTokSum) / a.SpeedSecSum; !math.IsInf(v, 0) && !math.IsNaN(v) {
+				ms.ThroughputTPS = v
+			}
+		}
+		gSec += a.SpeedSecSum
+		gTok += a.SpeedTokSum
+		gN += a.SpeedTpsN
+
 		out.Models[name] = ms
 		// 🔴 total_requests 与 models 取自**同一个 a**，不是再独立折叠一遍。
 		// 两者数值恒等（都是窗口内按模型切分的同一批桶的请求数之和），
@@ -1776,6 +1848,17 @@ func modelStatsWithBuckets(ts []string, bidx func(time.Time) int) *TokenStatsDat
 		// 取自不同时刻**（漏掉的那条请求从两个字段里一起消失，字段仍相等）。
 		// 提排序修掉的正是这个：从同一个 a 累加、并共用一份键快照。
 		out.TotalRequests += a.N
+	}
+
+	// ---- 顶层吞吐：与 per-model 同一套守卫 ----
+	// 0 样本时三个字段**全部缺席**（omitempty），不是 0、不是 null：
+	// 「窗口内没有可计算吞吐的流式采样」与「吞吐是 0」是两回事，
+	// 面板据此显示 "—" 而不是 0 t/s。
+	if gN > 0 && !math.IsInf(gSec, 0) && !math.IsNaN(gSec) {
+		out.StreamTpsN = gN
+		if v := float64(gTok) / gSec; !math.IsInf(v, 0) && !math.IsNaN(v) {
+			out.ThroughputTPS = v
+		}
 	}
 	return out
 }

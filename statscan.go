@@ -7,12 +7,15 @@ import (
 	"strconv"
 )
 
-// slimRec 只含磁盘侧聚合查询需要的 9 个字段——真正读它们的是 calllog.go 的
+// slimRec 只含磁盘侧聚合查询需要的 10 个字段——真正读它们的是 calllog.go 的
 // forEachBucketedCallRecord / trendsFromCallLog / trendsByModelFromCallLog /
 // modelStatsFromCallLog 及其回调。（写函数名而不是 file:line：行号会随上游
 // 改动腐烂，之前注释里的 calllog.go:477/503/583 已经全部失准。）
 // events / nodes / node_names / path / req_id /
-// route_mode / duration_ms / err_msg / stream 从不被统计访问。
+// route_mode / err_msg / stream 从不被统计访问。
+//
+// DurationMS 是吞吐守卫的物理上界要用的（见 calllog.go add 里第 3 条守卫），
+// 它只为守卫服务、**不进任何统计字段**。
 type slimRec struct {
 	TS               string
 	Model            string
@@ -23,6 +26,7 @@ type slimRec struct {
 	CacheRead        int64
 	TTFTMs           int64
 	OutputSpeed      float64
+	DurationMS       int64
 }
 
 // parseStatsLine 把一行 JSON 解析进 slimRec。
@@ -121,6 +125,11 @@ func parseStatsLine(line []byte, r *slimRec) bool {
 			r.CacheRead = jsonInt(tok)
 		case "ttft_ms":
 			r.TTFTMs = jsonInt(tok)
+		case "duration_ms":
+			// 吞吐守卫的物理上界要拿它交叉校验（见 calllog.go add 里第 3 条守卫）。
+			// parseStatsLine 本来就在扫这一行，多认一个键的代价实测在噪声内
+			// （BenchmarkReadAllAndParse 100.4 MB 全量：56.2→55.1 MB/s，重叠）。
+			r.DurationMS = jsonInt(tok)
 		case "output_speed":
 			r.OutputSpeed = jsonFloat(tok)
 		}

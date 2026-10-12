@@ -918,13 +918,30 @@ type ModelStats struct {
 	CacheReadTokens    int64   `json:"cache_read_tokens,omitempty"`
 	CacheCreatedTokens int64   `json:"cache_created_tokens,omitempty"`
 	AvgTTFTMs          float64 `json:"avg_ttft_ms,omitempty"`      // 平均首 token 延迟
-	AvgOutputSpeed     float64 `json:"avg_output_speed,omitempty"` // 平均输出速度 tokens/s
+	AvgOutputSpeed     float64 `json:"avg_output_speed,omitempty"` // 平均输出速度 tokens/s（**每条速率的算术平均**，不是吞吐）
 	StreamReqCount     int64   `json:"stream_req_count,omitempty"` // 流式请求数
+
+	// ↓ 吞吐（DSH 同口径）：Σ完成token ÷ Σ生成秒，**不是** AvgOutputSpeed。
+	//
+	// ★ 不要叫 output_tps：名字里带 "tps" 会让人以为它是 AvgOutputSpeed 的别名，
+	// 而它俩在生产上差 4.86 倍（452.70 vs 93.13）。差别只在加权方式：
+	// AvgOutputSpeed 给每条请求同样的权重（0.8% 的超短请求贡献了它 69.4% 的值，
+	// 却只占总时间的 0.002%）；吞吐按**耗时**加权，与 DSH 面板同口径。
+	//
+	// 四个字段都 omitempty：窗口内 0 条流式样本时**字段缺席**，
+	// 面板据此显示 "—"，而不是把「没数据」渲染成 0 t/s。
+	ThroughputTPS float64 `json:"throughput_tps,omitempty"` // Σ完成token ÷ Σ生成秒
+	StreamTpsN    int64   `json:"stream_tps_n,omitempty"`    // 吞吐样本数
 }
 
 type TokenStatsData struct {
 	TotalRequests int64                  `json:"total_requests"`
 	Models        map[string]*ModelStats `json:"models"`
+
+	// 全局吞吐。与 per-model 同源同口径：Σ分子 ÷ Σ分母，
+	// **不是**各模型吞吐的平均（那会把秒数小的模型和秒数大的模型等权）。
+	ThroughputTPS float64 `json:"throughput_tps,omitempty"`
+	StreamTpsN    int64   `json:"stream_tps_n,omitempty"`
 }
 
 var (
@@ -2641,7 +2658,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
-			b, readErr := io.ReadAll(resp.Body)
+			b, readErr := readAllMarkingFirstData(resp.Body, ctx)
 			resp.Body.Close()
 			if readErr != nil {
 				return nil, http.StatusBadGateway, nil, readErr
@@ -6934,6 +6951,14 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 			w.Write(data)
 			return
 		}
+		// ⚠️ 无 range 分支**有意不含** throughput_tps / stream_* 三个新字段：
+		//  1. 面板对这条路径是**零读**——admin.html 只有 `/api/stats?range=` 的 GET
+		//     和同一个 URL 的 DELETE，没有不带 range 的 GET；
+		//  2. recordModelSpeed 的签名里**没有分子**（只有 ttftMs 和 outputSpeed），
+		//     要出吞吐必须改签名 + 把每条请求的生成秒也喂进去；
+		//  3. 它的数据要落进 stats.json，加字段就是**持久化 schema 变更**，
+		//     而本批的承诺是「零 schema 变更」（call_log.jsonl 一个字节都不动）。
+		// 要吞吐请用 `/api/stats?range=`。
 		tokenStatsMu.Lock()
 		data, err := json.Marshal(tokenStats)
 		tokenStatsMu.Unlock()
@@ -7135,5 +7160,45 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("graceful shutdown failed", "error", err)
+	}
+}
+
+// ---- 实验副本专用：非流式路径的首 token 打点（逐行读）----
+//
+// 上游对非流式客户端【本来就是 stream=true】（ensureAgentUpstreamShape 强制），
+// 响应随后由 aggregateUpstreamSSE 本地聚合。但聚合器收的是**已读完整的 body**
+// 再 Split，首 token 的时刻在那之前就过去了。本函数把读取改成逐行，
+// 在读到第一行 `data: ` 时调用**与流式路径完全相同**的 callLogFirstToken，
+// 从而让非流式请求也能算出与流式同口径的 decode 速度。
+//
+// 字节等价性：逐块 append 的结果与 io.ReadAll 逐字节相同（含无换行的尾块），
+// 所以 aggregateUpstreamSSE 的输入不变、其行为不变。
+func readAllMarkingFirstData(r io.Reader, ctx context.Context) ([]byte, error) {
+	br := bufio.NewReader(r)
+	var out []byte
+	marked := false
+	for {
+		chunk, rerr := br.ReadBytes('\n')
+		if len(chunk) > 0 {
+			if !marked {
+				line := chunk
+				if n := len(line); n > 0 && line[n-1] == '\n' {
+					line = line[:n-1]
+				}
+				// 与 main.go:3263 的流式判据同构：任意 `data: ` 行（[DONE] 已在其前 continue）。
+				if len(line) > len("data: ") && string(line[:len("data: ")]) == "data: " &&
+					string(bytes.TrimSpace(line[len("data: "):])) != "[DONE]" {
+					marked = true
+					callLogFirstToken(ctx)
+				}
+			}
+			out = append(out, chunk...)
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				return out, nil
+			}
+			return out, rerr
+		}
 	}
 }
