@@ -478,12 +478,12 @@ input,select,textarea{font-family:inherit;color:inherit}
           <span class="uh-req-v"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span id="tcTotalReq">—</span></span>
         </div>
       </div>
-      <!-- 五格顺序（cc-switch：命中率在最后一格）：新增输入 → Output → 命中 → 平均 tps → 缓存命中率 -->
+      <!-- 五格顺序（cc-switch：命中率在最后一格）：新增输入 → Output → 命中 → 吞吐 tps → 缓存命中率 -->
       <div class="uh-grid">
         <div class="uh-cell"><div class="uh-cell-l uh-blue"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg><span>新增输入</span></div><div class="uh-cell-v"><span class="v-mini"><span class="full" id="gIn">—</span><span class="abbr">—</span></span></div></div>
         <div class="uh-cell"><div class="uh-cell-l uh-purple"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span>Output</span></div><div class="uh-cell-v"><span class="v-mini"><span class="full" id="gOut">—</span><span class="abbr">—</span></span></div></div>
         <div class="uh-cell"><div class="uh-cell-l uh-green"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M20 12c0 1.66-3.58 3-8 3s-8-1.34-8-3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/></svg><span>命中</span></div><div class="uh-cell-v"><span class="v-mini"><span class="full" id="gCR">—</span><span class="abbr">—</span></span></div></div>
-        <div class="uh-cell" id="tcTpsSamples" title=""><div class="uh-cell-l uh-amber"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 6.2H21l-5.3 4 2 6.3-5.7-4.1-5.7 4.1 2-6.3-5.3-4h6.6z"/></svg><span>平均 tps</span></div><div class="uh-cell-v" id="tcAvgTps">—</div></div>
+        <div class="uh-cell" id="tcTpsSamples" title=""><div class="uh-cell-l uh-amber"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 6.2H21l-5.3 4 2 6.3-5.7-4.1-5.7 4.1 2-6.3-5.3-4h6.6z"/></svg><span>吞吐 tps</span></div><div class="uh-cell-v" id="tcAvgTps">—</div></div>
         <div class="uh-cell uh-hit"><div class="uh-hit-top"><span class="uh-cell-l uh-green">缓存命中率</span><span class="uh-hit-v" id="tcCacheRate">—</span></div><div class="uh-hit-bar"><i id="tcCacheBar" style="width:0"></i></div></div>
       </div>
     </div>
@@ -533,7 +533,7 @@ input,select,textarea{font-family:inherit;color:inherit}
         <div style="font-size:13px;font-weight:600">📊 模型明细</div>
         <div><button class="btn btn-ghost btn-sm" onclick="loadStats()">刷新</button><button class="btn btn-danger btn-sm" onclick="resetStats()">清空</button><span id="resetStatus" class="muted" style="font-size:11px"></span></div>
       </div>
-      <table class="tbl" id="statsTable"><colgroup><col style="width:22%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:11%"><col style="width:11%"></colgroup><thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th class="num">总计</th><th class="num">TTFT</th><th class="num">速度</th></tr></thead><tbody><tr><td colspan="7" class="empty-hint">点击"刷新"加载数据</td></tr></tbody></table>
+      <table class="tbl" id="statsTable"><colgroup><col style="width:22%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:11%"><col style="width:11%"></colgroup><thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th class="num">总计</th><th class="num">TTFT</th><th class="num">吞吐</th></tr></thead><tbody><tr><td colspan="7" class="empty-hint">点击"刷新"加载数据</td></tr></tbody></table>
     </div>
 
     <!-- 快速接入 -->
@@ -785,11 +785,12 @@ function redrawCharts(){
   // 所以 0 宽容器一律跳过，由 toggleChart 的 show 分支在重新显示时补画。
   const vis=el=>el&&el.clientWidth>0;
   // #reqTrendChart 默认 display:none，只重画当前 tab 可见的那张（同 renderTrends 的写法）。
-  if(vis(q('#trendChart')))initTrend(currentTrendDays);
-  if(vis(q('#reqTrendChart')))initReqTrend(currentTrendDays);
-  if(vis(q('#heatmapChart')))initHeatmap();
+  // 全部走静默路径：切主题要的是「颜色立刻换成另一套」，不是让四张图再从头长一遍。
+  if(vis(q('#trendChart')))initTrend(currentTrendDays,true);
+  if(vis(q('#reqTrendChart')))initReqTrend(currentTrendDays,true);
+  if(vis(q('#heatmapChart')))initHeatmap(true);
   // statModels 为空说明 /api/stats 没成功：宁可不画，也别用空数据把现有甜甜圈刷成「暂无数据」。
-  if(statModels&&vis(q('#donutChart')))initDonut(statModels);
+  if(statModels&&vis(q('#donutChart')))initDonut(statModels,true);
 }
 function toggleTheme(){
   const cur=document.documentElement.getAttribute('data-theme');
@@ -814,7 +815,7 @@ function setAutoRefresh(ms){
 function applyAutoRefresh(){
   if(autoRefreshTimer){clearInterval(autoRefreshTimer);autoRefreshTimer=null}
   const ms=parseInt(localStorage.getItem('autoRefresh')||'0',10)||0;
-  if(ms>0&&currentPage==='overview')autoRefreshTimer=setInterval(()=>{loadStats()},ms);
+  if(ms>0&&currentPage==='overview')autoRefreshTimer=setInterval(()=>{loadStats({silent:true})},ms);
 }
 
 /* ---------- 导航 ---------- */
@@ -862,7 +863,75 @@ function fmtTime(t){return t?String(t).replace('T',' ').slice(0,16):'-'}
 function fmtModalities(list){if(!list||!list.length)return '-';const names={text:'文本',image:'图像',audio:'音频',video:'视频',pdf:'PDF'};return list.map(m=>names[m]||m).join(' / ')}
 function shortFp(fp){return fp?fp.slice(0,8):''}
 function latClass(ms){return ms<150?'':ms<400?'lat-warn':'lat-high'}
-function setConn(online){const el=q('#connState');el.classList.toggle('offline',!online);const full=online?'已连接':'演示数据 · 未连接后端';const short=online?'已连接':'演示';const a=el.querySelector('.ctxt');if(a)a.textContent=full;const b=el.querySelector('.cshort');if(b)b.textContent=short;el.title=full}
+/* ---------- 连接状态：三态，且只复用既有 DOM ----------
+   用户只要「数据正确」，不要新增横幅/角标/时间戳：失败要看得见，
+   但只能靠页面里本来就有的位置（侧栏这一处 + 表格自己的错误行 + 既有 toast）。
+   'online' 后端在且通 / 'demo' 这个 origin 根本不是后端（合法的演示场景）/
+   'error' 后端在、但它坏了 —— 旧判定把第三种也当成第二种，于是整块面板
+   被换成编造的夹具数据（清单里 N-5，数据正确性的头号事故）。 */
+const CONN_TEXT={online:{full:'已连接',short:'已连接',off:false},
+                 demo:{full:'演示数据 · 未连接后端',short:'演示',off:true},
+                 error:{full:'后端未连接',short:'未连接',off:true}};
+function setConn(state){
+  const s=CONN_TEXT[state]||CONN_TEXT.error;
+  const el=q('#connState');if(!el)return;
+  el.classList.toggle('offline',s.off);
+  const a=el.querySelector('.ctxt');if(a)a.textContent=s.full;
+  const b=el.querySelector('.cshort');if(b)b.textContent=s.short;
+  el.title=s.full;
+}
+/* X3：侧栏跟随【核心请求】（/api/stats、/api/nodes、/api/config）的最近一次结果。
+   ★ 只跟核心三发，不跟 call-log / models —— 那些挂了不代表面板数据不对，
+     拿它们去点侧栏正是我们正在修的那类「把局部故障说成全局故障」。
+   ★ 请求数不增加：coreOk 由已有请求的结算结果驱动，没有新增轮询。 */
+let backendState='online';
+const coreState={stats:true,nodes:true,config:true};
+function anyCoreBad(){return !coreState.stats||!coreState.nodes||!coreState.config}
+function applyConn(){
+  // 探测判 error 时【必须】直接转红：那一刻还没有任何核心请求发生过，
+  // coreState 全是初始 true，不特判的话侧栏会显示「已连接」——而我们刚刚
+  // 正是因为连不上才判的 error。（矩阵实测把这个缺陷抓出来了）
+  if(backendState==='demo'){setConn('demo');return}
+  setConn((backendState==='error'||anyCoreBad())?'error':'online')
+}
+/* ★ 必须【逐源】记账，不能用「最后一次请求的结局」：
+   否则 /api/nodes 失败后紧跟着 /api/stats 成功就把绿点刷回来 ——
+   那正是「局部故障被说成全局正常」。代价是「红的那个源没人重试时绿点回不来」，
+   所以自动刷新在红态下会【多打】/api/nodes 与 /api/config（健康态仍是 0 额外请求）。 */
+function noteCore(ok,src){coreState[src]=!!ok;applyConn()}
+/* N-7：陈旧标记。【只写 DOM 属性，不显示任何文字】——
+   「这份数据不是刚拿到的」这件事对人不可见（不显示时间戳、不做变化信号），
+   但对自动化可判定：body[data-stats-state] / body[data-heatmap-state]，
+   以及一个 body.stats-stale 类供纯 CSS 侧检查。 */
+function markSnapshot(ok){
+  document.body.dataset.statsState=ok?'fresh':'stale';
+  document.body.classList.toggle('stats-stale',!ok);
+  window.__statsFresh=!!ok;
+}
+function markHeatmap(ok){
+  document.body.dataset.heatmapState=ok?'fresh':'stale';
+  window.__heatmapFresh=!!ok;
+}
+/* X1 + X2 的公共原语：一次解决「无 r.ok ⇒ 把错误体当数据渲染」与
+   「无 AbortController ⇒ await 永不 settle」两条病根。
+   ★ 超时值分两类（实测依据见报告 §④）：探测 3s、数据 10s。 */
+const T_DATA=10000,T_PROBE=3000;
+async function fetchJSON(url,opts){
+  const o=opts||{},tmo=o.timeout||T_DATA;
+  const ac=new AbortController();
+  const tid=setTimeout(()=>ac.abort(),tmo);
+  try{
+    const r=await fetch(url,{headers:{'Accept':'application/json'},signal:ac.signal});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(o.core)noteCore(true,o.core);
+    return d;
+  }catch(e){
+    if(o.core)noteCore(false,o.core);
+    if(e&&e.name==='AbortError')e.timeout=true;   // 供调用方区分「超时」与「真失败」
+    throw e;
+  }finally{clearTimeout(tid)}                     // ★ 不 clear 会随页面存活线性堆积定时器
+}
 
 /* ============================================================
    数据加载（真实后端 / 离线演示兜底）
@@ -870,17 +939,33 @@ function setConn(online){const el=q('#connState');el.classList.toggle('offline',
 async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),loadCaps(),fetchModelList()]);renderConfigEditors()}
 async function loadConfig(){
   if(DEMO_MODE){cfg=JSON.parse(JSON.stringify(DEMO.cfg));return}
-  try{const r=await fetch('/api/config');if(!r.ok)throw new Error(await r.text());cfg=await r.json()}catch(e){showToast('配置加载失败: '+e.message,'error')}
+  try{
+    const c=await fetchJSON('/api/config',{core:'config'});
+    // 与 /api/stats 同款的形状守卫：200 + 合法 JSON 但不是 config（反代吐的错误体、
+    // 或某个别的端点的响应被缓存串了）时，cfg 会被写成一个无关对象，
+    // renderConfigEditors 随后渲染出一堆【看起来有值其实不是配置】的输入框。
+    if(!c||typeof c!=='object'||Array.isArray(c)||(!('log_level' in c)&&!('api_key' in c)&&!('subscriptions' in c)))
+      throw new Error('响应结构异常（不是 config）');
+    cfg=c;
+  }catch(e){noteCore(false,'config');showToast('配置加载失败: '+e.message,'error')}
 }
 async function loadNodes(){
   if(DEMO_MODE){nodeData=DEMO.nodes.map(n=>({...n}));subData=DEMO.subscriptions.filter(s=>s.url!=='webshare API').map(s=>({...s}));wsData=DEMO.subscriptions.filter(s=>s.url==='webshare API').map(s=>({name:s.name,nodes:s.nodes,last_updated_at:s.last_updated_at}));renderOverview({nodes:nodeData,healthy:nodeData.filter(n=>n.state==='available').length,exhausted_count:nodeData.filter(n=>n.state==='exhausted').length,dead_count:nodeData.filter(n=>n.state==='dead').length,active_name:nodeData.find(n=>n.active)?.name||'',manual_name:''});renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable();return}
-  try{const r=await fetch('/api/nodes');if(!r.ok)throw new Error(await r.text());const d=await r.json();nodeData=d.nodes||[];subData=(d.subscriptions||[]).filter(s=>s.url!=='webshare API');applyWsSnapshot(d.subscriptions||[]);renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable()}catch(e){q('#nodeTable tbody').innerHTML='<tr><td colspan="7" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>'}
+  try{const d=await fetchJSON('/api/nodes',{core:'nodes'});nodeData=d.nodes||[];subData=(d.subscriptions||[]).filter(s=>s.url!=='webshare API');applyWsSnapshot(d.subscriptions||[]);renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable()}catch(e){
+    // 保留上一次渲染好的行：整表清空会把「拿不到」渲染成「这个网关一个节点都没有」。
+    const tb=q('#nodeTable tbody');
+    if(tb)tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="7" class="empty-hint">未更新：'+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>');
+  }
 }
 /* GET /api/stats?range=<当前时间窗> 一次返回 models 聚合 + trends_by_model，
    所以顶部 Hero、两张表、甜甜圈、趋势图共用同一份响应——每次筛选只打这一发。
    statsSeq 在发请求前自增，try 与 catch **两处**都判：过期响应既不能渲染成功态，
    也不能覆盖失败态（否则先发后到的失败响应会把已渲染的新窗口擦成「加载失败」）。 */
-async function loadStats(){
+async function loadStats(opts){
+  // 静默标志按调用传，**绝不存模块级**：本函数是 async，自动刷新与手动刷新可能交错
+  // （自动刷新 await fetch 的间隙用户点了「刷新」），模块级标志会被后一次调用串掉，
+  // 于是自动刷新拿着 false 去画、又播一次入场动画。
+  const silent=!!(opts&&opts.silent);
   const mySeq=++statsSeq;
   // 热力图与本次筛选无关（恒为 180d），且它是独立请求、不受 statsSeq 保护，
   // 所以照旧无条件触发；它也只负责热力图，不再碰命中率（见 updateCacheRate）。
@@ -889,19 +974,34 @@ async function loadStats(){
   // 配合后端单趟 1.38x 合计 2.25x。
   // **不要**改成三路全并发——实测那比串行更慢（6.34s vs 5.98s），
   // 4 核上三个全量解析并发会打满内存带宽与 GC。
-  const heatP=loadHeatmap();
-  if(DEMO_MODE){window.__lastStatsSeq=mySeq;renderStats(DEMO.stats);loadTrends(DEMO.stats.trends_by_model,mySeq);await heatP;return}
+  const heatP=loadHeatmap(silent);
+  if(DEMO_MODE){window.__lastStatsSeq=mySeq;renderStats(DEMO.stats,silent);loadTrends(DEMO.stats.trends_by_model,mySeq,silent);await heatP;return}
   try{
-    const r=await fetch('/api/stats?range='+trendRange);
+    // X1：守卫必须落在 seq 守卫【之后】、renderStats 【之前】——放到 renderStats
+    // 之后毫无意义（值已经写进 DOM 了）。fetchJSON 内部已含 r.ok 与 10s 超时。
+    const d=await fetchJSON('/api/stats?range='+trendRange,{core:'stats'});
     if(mySeq!==statsSeq)return;
-    const d=await r.json();
-    if(mySeq!==statsSeq)return;
+    // 形状守卫：200 + 合法 JSON 但不是 stats 响应（例如反代吐的 {"total_requests":0}）。
+    // 没有它，renderStats 会把「拿不到」渲染成 Hero=0 / 命中率=0%（N-1）。
+    if(!d||typeof d!=='object'||Array.isArray(d)||!d.models||typeof d.models!=='object')
+      throw new Error('响应结构异常（缺少 models）');
     window.__lastStatsSeq=mySeq;
-    renderStats(d);
-    loadTrends(d.trends_by_model,mySeq);
+    markSnapshot(true);
+    renderStats(d,silent);
+    loadTrends(d.trends_by_model,mySeq,silent);
   }catch(e){
     if(mySeq!==statsSeq)return;
-    const tb=q('#statsTable tbody');if(tb)tb.innerHTML='<tr><td colspan="7" class="empty-hint">加载失败 <button class="btn btn-sm btn-ghost" onclick="loadStats()">重试</button></td></tr>';
+    noteCore(false,'stats');   // 形状守卫的失败发生在 fetchJSON 之外，这里补记
+    // ★ N-7：原来的 tb.innerHTML=… 把【已经渲染好的模型明细表整张清空】。
+    //   服务挂掉时用户丢掉的是已经确认过的真数据，而清空后「拿不到」在界面上
+    //   与「真的没有数据」长得一模一样。改为保留旧行 + 追加一行错误。
+    const tb=q('#statsTable tbody');
+    if(tb){
+      const first=tb.firstElementChild;
+      if(!first||!first.classList.contains('stat-err-row'))
+        tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="7" class="empty-hint">未更新：'+(e.timeout?'请求超时 '+T_DATA+'ms':esc(e.message))+' <button class="btn btn-sm btn-ghost" onclick="loadStats()">重试</button></td></tr>');
+    }
+    markSnapshot(false);
   }
   await heatP;
 }
@@ -910,14 +1010,20 @@ async function loadStats(){
 //
 // 它是 async，返回 Promise：loadStats 正是靠这个返回值把它与 stats 请求并发发起
 // （见 loadStats 里的 heatP）。所以**不要**把它改成同步的，也不要在中途 return。
-async function loadHeatmap(){
+async function loadHeatmap(silent){
   try{
-    const r=await fetch('/api/stats/trends?range=180d');
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    const d=await r.json();
+    const d=await fetchJSON('/api/stats/trends?range=180d');
     heatmapData=Array.isArray(d)?d:[];
-  }catch(e){heatmapData=[]}
-  initHeatmap();
+    markHeatmap(true);
+  }catch(e){
+    // N-2 / N-9：原来这里是 heatmapData=[]，把一次失败变成一张空图。
+    // N-9 担心的是「加了超时后 AbortError 落进这个 catch」——本修法让【任何】失败
+    // 都保留上一份热力图（它恒为 range=180d，与时间窗/筛选无关，所以没有
+    // 「窗口变了旧图反而错」的情形），AbortError 与否已无需分支。
+    // 从未成功拿到过数据时 initHeatmap 会画出空网格，用标记把它标出来。
+    markHeatmap(false);
+  }
+  initHeatmap(silent);
 }
 // 缓存命中率（第 5 格）。公式一个字不动：命中 = cache_read / prompt，
 // 分母是 prompt 而不是「新增输入」，因为 prompt 本身已包含 cache_read。
@@ -940,25 +1046,56 @@ function updateCacheRate(models,seq){
   el.textContent=rate+'%';
   const bar=q('#tcCacheBar');if(bar)bar.style.width=rate+'%';
 }
-// 平均 tps（第 4 格）：按流式请求数加权 Σ(avg_output_speed×stream_req_count)/Σ stream_req_count。
-// 这与后端在每条调用日志上做的「流式子集均值」同口径（avg_output_speed 本身就是
-// 流式请求的均值，乘回流式条数就还原成该模型的输出速度总和）。
-// 不再单独 fetch /api/call-log?limit=1000：那份日志既与当前时间窗无关，也无法按模型聚合。
-function renderTps(models){
+// 吞吐 tps（第 4 格）：**直接读后端的 throughput_tps**，前端不再合成。
+// 后端口径 = Σ完成token ÷ Σ生成秒（不含首字延迟），与 DSH 面板同口径。
+//
+// ★ 旧实现是在这里自己按 Σ(avg_output_speed×stream_req_count)/Σstream_req_count 算的，
+// 那是「每条请求速率的算术平均」：每条请求权重相同，于是 0.8% 的超短请求
+// （窗口 < 75ms）贡献了分子的 69.4%、却只占总时间的 0.002%。
+// 生产实测旧口径 452.7 t/s，真实吞吐 93.1 t/s —— 前者不对应任何一个真实请求。
+// 前端合成还有第二个代价：口径分散在前后端两处，改一处忘一处就漂。
+// 现在只有一个口径：后端算，前端读。0 样本时后端**省略**该字段 ⇒ 这里显示 "—"，
+// 而不是把「没数据」渲染成 0 t/s。
+function renderTps(d){
   const el=q('#tcAvgTps');if(!el)return;
-  let sum=0,w=0;
-  for(const k in (models||{})){const m=models[k]||{};const c=m.stream_req_count||0;if(c>0){sum+=(m.avg_output_speed||0)*c;w+=c}}
-  el.textContent=w?Math.round(sum/w)+' t/s':'—';
+  const models=(d&&d.models)||{};
+  const ks=Object.keys(models);
+  const one=ks.length===1?models[ks[0]]:null;
+  // 模型筛选态：renderHeroDetailForFilter 传进来的是 {models:{[选中的模型]:…}}，
+  // 顶层字段不在里面，所以这时取该模型的 per-model 值（全量态才读顶层）。
+  const v=(one?one.throughput_tps:(d&&d.throughput_tps));
+  const n=(one?one.stream_tps_n:(d&&d.stream_tps_n))||0;
+  el.textContent=(typeof v==='number'&&isFinite(v)&&v>0)?Math.round(v)+' t/s':'—';
   // 采样条数没有独立格子（cc-switch 的 MiniStat 只有「标签行 + 值」两行），
   // 降级成整格的 title 悬浮说明，信息不丢但不占版式。
-  const cell=q('#tcTpsSamples');if(cell)cell.title=w?w+' 次流式采样':'窗口内无流式请求';
+  const cell=q('#tcTpsSamples');
+  if(cell)cell.title=n?('吞吐 = Σ完成token ÷ Σ生成秒（不含首字延迟），与 DSH 同口径 · '+n+' 次流式采样'+(one?' · 当前模型 '+ks[0]:'')):'窗口内无可计算吞吐的流式采样';
 }
 async function loadCaps(){
   if(DEMO_MODE){renderCaps(DEMO.caps);return}
-  try{const r=await fetch('/api/models');if(!r.ok)throw new Error('HTTP '+r.status);const d=await r.json();const freeSet=new Set(d.free_models||[]);renderCaps((d.data||[]).filter(x=>freeSet.has(x.id)).map(x=>{if(typeof x==='string')return{id:x};return{id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities}}).filter(x=>x.id))}
-  catch(e){q('#capTable').innerHTML='<thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载失败: '+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadCaps()">重试</button></td></tr></tbody>'}
+  try{const d=await fetchJSON('/api/models');const freeSet=new Set(d.free_models||[]);renderCaps((d.data||[]).filter(x=>freeSet.has(x.id)).map(x=>{if(typeof x==='string')return{id:x};return{id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities}}).filter(x=>x.id))}
+  catch(e){
+    // 同上：不要用 innerHTML 整表重写（旧行是被确认过的真数据）。
+    const t=q('#capTable'),tb=t&&t.querySelector('tbody');
+    if(tb)tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="4" class="empty-hint">未更新：'+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadCaps()">重试</button></td></tr>');
+  }
 }
-async function fetchModelList(){if(DEMO_MODE){modelList=DEMO.models.slice().sort();return}try{let m=await fetch('/api/models');if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort();freeModelIDs=(d.free_models||[]).slice().sort()}else if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}}catch(e){}}
+async function fetchModelList(){if(DEMO_MODE){modelList=DEMO.models.slice().sort();return}try{
+  let m=await fetch('/api/models');
+  if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}
+  else if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort();freeModelIDs=(d.free_models||[]).slice().sort()}
+  else throw new Error('HTTP '+m.status);
+  modelListStale(false);
+}catch(e){
+  // 保留上一份列表（它曾经是真的），但不能再【静默】保留：换订阅后拉取失败时，
+  // 用户看到的是上一份的模型名，却以为那就是当前的。
+  modelListStale(true,e.message);
+}}
+function modelListStale(bad,msg){
+  const sel=q('#modelFilter');if(sel)sel.dataset.stale=bad?'1':'0';
+  window.__modelListStale=!!bad;
+  if(bad&&!window.__modelListToasted){window.__modelListToasted=1;showToast('模型列表未更新：'+(msg||'加载失败')+'（下拉里是上次的结果）','error')}
+}
 function renderOverview(d){
   q('#ovTotal').textContent=d.nodes?d.nodes.length:0;
   q('#ovHealthy').textContent=d.healthy??0;
@@ -967,7 +1104,7 @@ function renderOverview(d){
   q('#ovActive').textContent=d.active_name?('当前: '+d.active_name):(d.active_fp?'当前: '+shortFp(d.active_fp):'直连');
   q('#ovManual').textContent=d.manual_name?('手动: '+d.manual_name):(d.manual_fp?shortFp(d.manual_fp):'自动轮询');
 }
-function renderStats(d){
+function renderStats(d,silent){
   const all=(d&&d.models)||{};
   // 模型下拉的选项必须取全量 d.models 的键。若改用过滤后的 ms 的键，
   // 选中某模型后下拉里就只剩那一个模型，用户再也切不回去。
@@ -989,11 +1126,11 @@ function renderStats(d){
   q('#reqTable').querySelector('tbody').innerHTML=rh;
   // 模型明细表
   let h='';if(!ks.length){h='<tr><td colspan="7" class="empty-hint">暂无数据</td></tr>'}
-  else{for(const k of ks){const m=ms[k];const ttft=m.avg_ttft_ms?Math.round(m.avg_ttft_ms)+'ms':'—';const spd=m.avg_output_speed?m.avg_output_speed.toFixed(1)+' t/s':'—';h+='<tr><td class="mono">'+esc(k)+'</td><td class="num" style="color:var(--blue)">'+fmtFull(m.prompt_tokens)+'</td><td class="num" style="color:var(--ok)">'+fmtFull(m.completion_tokens)+'</td><td class="num" style="color:var(--purple)">'+fmtFull(m.cache_read_tokens||0)+'</td><td class="num" style="font-weight:700">'+fmtFull(m.total_tokens)+'</td><td class="num" style="color:var(--orange)">'+ttft+'</td><td class="num" style="color:var(--ok)">'+spd+'</td></tr>'}
+  else{for(const k of ks){const m=ms[k];const ttft=m.avg_ttft_ms?Math.round(m.avg_ttft_ms)+'ms':'—';const spd=(typeof m.throughput_tps==='number'&&isFinite(m.throughput_tps)&&m.throughput_tps>0)?m.throughput_tps.toFixed(1)+' t/s':'—';h+='<tr><td class="mono">'+esc(k)+'</td><td class="num" style="color:var(--blue)">'+fmtFull(m.prompt_tokens)+'</td><td class="num" style="color:var(--ok)">'+fmtFull(m.completion_tokens)+'</td><td class="num" style="color:var(--purple)">'+fmtFull(m.cache_read_tokens||0)+'</td><td class="num" style="font-weight:700">'+fmtFull(m.total_tokens)+'</td><td class="num" style="color:var(--orange)">'+ttft+'</td><td class="num" style="color:var(--ok)">'+spd+'</td></tr>'}
     h+='<tr style="font-weight:700;border-top:2px solid var(--border-strong)"><td>总计</td><td class="num" style="color:var(--blue)">'+fmtFull(Object.values(ms).reduce((s,m)=>s+(m.prompt_tokens||0),0))+'</td><td class="num" style="color:var(--ok)">'+fmtFull(Object.values(ms).reduce((s,m)=>s+(m.completion_tokens||0),0))+'</td><td class="num" style="color:var(--purple)">'+fmtFull(cacheRead)+'</td><td class="num">'+fmtFull(totalTokens)+'</td><td></td><td></td></tr>'}
   q('#statsTable').querySelector('tbody').innerHTML=h;
   // 更新甜甜圈图
-  initDonut(ms);
+  initDonut(ms,silent);
   window.__lastStats=d;
   renderModelOptions();      // loadStats 与 loadTrends 并发返回，先后不定，双触发自愈
   renderHeroDetailForFilter();
@@ -1021,7 +1158,7 @@ function renderHeroDetail(d){
   const rEl=q('#tcTotalReq');if(rEl)rEl.textContent=fmtFull(sum.reqs);
   // 三格数字：宽屏写完整数字、窄屏写缩写（CSS 媒体查询决定哪个可见）
   setDualNum('gIn',sum.in);setDualNum('gOut',sum.out);setDualNum('gCR',sum.cr);
-  renderTps(models);
+  renderTps(d);
   updateCacheRate(models,window.__lastStatsSeq);
 }
 /* 模型筛选后的顶部 Hero：复用 renderHeroDetail 的求和逻辑，但只取选中的模型。
@@ -1068,6 +1205,21 @@ function renderLatencyDist(nodes){
 
 /* ---------- ECharts 用量趋势 ---------- */
 const charts={};
+// ---- 图表实例复用（1A）------------------------------------------------
+// 统一入口：没有实例（或已被 dispose）就 echarts.init；已有实例就 resize()。
+// 旧的 dispose()+init() 让 ECharts 每次刷新都当成「第一次显示」，
+// 播 1000ms 完整入场（实测自动刷新 1075ms），而且 init() 顺带承担了容器尺寸跟随
+// ——保留实例后这个职责必须显式补回来，resize() 本身不产生动画。
+// 0 宽容器不 resize：此时量出来是 0，会把 canvas 缩成 0×0；等它重新显示，
+// 由 toggleChart 的 show 分支再 resize 一次（与 redrawCharts 的 vis() 守卫同源）。
+function reuseChart(el,key){
+  let c=charts[key];
+  if(!c||c.isDisposed()){c=echarts.init(el);charts[key]=c}
+  else if(el.clientWidth>0){c.resize()}
+  return c;
+}
+// 空态占位节点的类名：与 chart-load-fail 同为「自己挂上去、自己摘下来」的节点。
+const DONUT_EMPTY_CLS='donut-empty';
 function isDark(){return(document.documentElement.getAttribute('data-theme')||'dark')==='dark'}
 function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
 // seriesColor 返回第 i 个数据系列的色值，超出 5 个时循环取模。
@@ -1082,9 +1234,15 @@ let currentTrendDays=30,trendTab='token';
    而 echarts.init() 只往容器里挂自己的节点、不会清空容器，所以必须显式摘。 */
 function chartLoadFail(chartId,label){
   const el=q(chartId);if(!el)return;
-  el.innerHTML='<div class="'+CHART_FAIL_CLS+'" style="display:flex;align-items:center;justify-content:center;height:100%;min-height:120px;text-align:center;color:var(--text-ter);font-size:12.5px;padding:20px">'
-    +'<div><div style="font-size:22px;margin-bottom:8px">📉</div>'
-    +label+' 加载失败<br><span style="font-size:11.5px;opacity:.75">ECharts 未能从 CDN 加载，请检查网络或改用本地资源</span></div></div>';
+  clearChartFailNode(el);   // 同一容器只留一个提示节点
+  // 用 appendChild 而不是 el.innerHTML：容器里可能已经挂着 ECharts 的 canvas，
+  // innerHTML 会把它一起摘掉，实例随即变成僵尸（canvas 数归 0 且再也回不来）。
+  const box=document.createElement('div');
+  box.className=CHART_FAIL_CLS;
+  box.setAttribute('style','display:flex;align-items:center;justify-content:center;height:100%;min-height:120px;text-align:center;color:var(--text-ter);font-size:12.5px;padding:20px');
+  box.innerHTML='<div><div style="font-size:22px;margin-bottom:8px">📉</div>'
+    +label+' 加载失败<br><span style="font-size:11.5px;opacity:.75">ECharts 未能从 CDN 加载，请检查网络或改用本地资源</span></div>';
+  el.appendChild(box);
   console.warn('ECharts 加载失败，'+label+' 无法渲染');
 }
 /* ---------- CDN 挂起兜底：不依赖 DOMContentLoaded ----------
@@ -1131,7 +1289,34 @@ function clearChartLoadFail(){
   CHART_BOXES.forEach(([id])=>clearChartFailNode(q(id)));
 }
 scheduleChartProbe(CHART_ALERT_MS);
-function initAllCharts(){initTrend(currentTrendDays);initHeatmap();chartsReady=true}
+function initAllCharts(){
+  // 只补还没建出来的图。DOMContentLoaded 处理器里 Promise.all([... loadStats() ...])
+  // 先跑完，loadStats 内部已经把 trend / heatmap 建出来了；原来这里无条件再画一遍，
+  // 后果是首屏趋势图把正在播的入场动画**打断重画一次**——实测入场动画直接消失
+  // （首屏 ink 一次性到位，settle=0）。dispose+init 时这叫"重画"，
+  // 保留实例后它变成"取消动画"，所以必须去掉这次重复渲染。
+  if(!charts.trend||charts.trend.isDisposed())initTrend(currentTrendDays);
+  if(!charts.heatmap||charts.heatmap.isDisposed())initHeatmap();
+  chartsReady=true;
+}
+// 视口变化后 ECharts 不会自己跟随（它只在 init/setOption 时量一次尺寸），
+// 现状是靠切主题时的 dispose+init 顺带修正的——那是副作用，不是设计。
+// 保留实例后由这里显式承担。节流用 rAF：连续 resize 事件在一个动画帧里合并成一次。
+let chartResizeRaf=0;
+window.addEventListener('resize',()=>{
+  if(chartResizeRaf)return;
+  chartResizeRaf=requestAnimationFrame(()=>{
+    chartResizeRaf=0;
+    if(!chartsReady)return;
+    ['trend','reqTrend','heatmap','donut'].forEach(k=>{
+      const c=charts[k];
+      if(!c||c.isDisposed())return;
+      const el=c.getDom();
+      if(!el||el.clientWidth<=0)return;   // 隐藏容器量出来是 0，resize 会把 canvas 缩没
+      c.resize();
+    });
+  });
+});
 // fmtAxisTs 把后端桶时间戳格式化成紧凑轴标签：
 //   小时桶 "2026-09-17T14:00" → "14:00"；日桶 "2026-09-17" → "09-17"。
 function fmtAxisTs(ts,hourly){
@@ -1142,18 +1327,21 @@ function fmtAxisTs(ts,hourly){
 // trendTooltipTitle 悬浮标题：今日档只给时间（后端桶是 "2026-09-17T14:00"），
 // 7天/30天档给完整日期。
 function trendTooltipTitle(ts){return trendRange==='today'?fmtAxisTs(ts,true):ts}
-function initTrend(days){
+// silent=true ⇒ animation:false：不播补间（自动刷新 / 切主题 / 切 tab 用）。
+// 首屏、手动刷新、切时间范围、切模型筛选不传 silent ⇒ 保留动画。
+function initTrend(days,silent){
   currentTrendDays=days;const el=q('#trendChart');if(!el)return;
   if(typeof echarts==='undefined'){chartLoadFail('#trendChart','趋势图');return}
   clearChartFailNode(el); // 迟到的 echarts：先摘掉先前打上的提示，否则提示与 canvas 并存
-  if(charts.trend)charts.trend.dispose();charts.trend=echarts.init(el);
+  const ch=reuseChart(el,'trend');
   const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
   const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
   const promptNoCache=slice.map(d=>(d.prompt_tokens||0)-(d.cache_read_tokens||0));
   const cacheHit=slice.map(d=>d.cache_read_tokens||0);
   const compT=slice.map(d=>d.completion_tokens||0);
   const bC=seriesColor(0),oC=seriesColor(1),pC=seriesColor(2);
-  charts.trend.setOption({
+  ch.setOption({
+    animation:!silent,
     tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+trendTooltipTitle(params[0].axisValue)+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+fmtFull(p.value)+'<br/>');return s}},
     legend:{data:['输入','命中缓存','输出'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
     grid:{left:60,right:20,top:40,bottom:30},
@@ -1166,16 +1354,17 @@ function initTrend(days){
     ]
   });
 }
-function initReqTrend(days){
+function initReqTrend(days,silent){
   const el=q('#reqTrendChart');if(!el)return;
   if(typeof echarts==='undefined'){chartLoadFail('#reqTrendChart','请求数趋势图');return}
   clearChartFailNode(el);
-  if(charts.reqTrend)charts.reqTrend.dispose();charts.reqTrend=echarts.init(el);
+  const ch=reuseChart(el,'reqTrend');
   const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
   const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
   const ok=slice.map(d=>d.ok||0);const fail=slice.map(d=>d.fail||0);
   const okC=seriesColor(1),failC=getCSS('--red')||'#ff6b6b';
-  charts.reqTrend.setOption({
+  ch.setOption({
+    animation:!silent,
     tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+trendTooltipTitle(params[0].axisValue)+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+p.value+'<br/>');return s}},
     legend:{data:['成功','失败'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
     grid:{left:50,right:20,top:35,bottom:30},
@@ -1191,8 +1380,10 @@ function switchTrendTab(tab,btn){
   trendTab=tab;
   btn.parentElement.querySelectorAll('button').forEach(b=>{b.style.background='';b.style.color='';b.className='btn btn-sm btn-ghost'});
   btn.style.background='var(--accent-dim)';btn.style.color='var(--accent)';btn.className='btn btn-sm';
-  if(tab==='token'){q('#trendChart').style.display='';q('#reqTrendChart').style.display='none';initTrend(currentTrendDays)}
-  else{q('#trendChart').style.display='none';q('#reqTrendChart').style.display='';initReqTrend(currentTrendDays)}
+  // 切 tab 用静默路径：重画是为了让被隐藏的那张图跟上最新数据，
+  // 不是「用户要求看一次从头生长」，播 1000ms 入场只会拖慢切换。
+  if(tab==='token'){q('#trendChart').style.display='';q('#reqTrendChart').style.display='none';initTrend(currentTrendDays,true)}
+  else{q('#trendChart').style.display='none';q('#reqTrendChart').style.display='';initReqTrend(currentTrendDays,true)}
 }
 function setTrendRange(range){
   trendRange=range;
@@ -1203,11 +1394,10 @@ function setTrendRange(range){
 }
 // 请求热力图：GitHub 贡献图样式 —— 7 行（周一→周日）× N 列（周）。
 // 某列只有在包含「某月 1 日」时才打月份标签，于是月份自然落在坐标轴下方。
-function initHeatmap(){
+function initHeatmap(silent){
   const el=q('#heatmapChart');if(!el)return;
   if(typeof echarts==='undefined'){chartLoadFail('#heatmapChart','请求热力图');return}
   clearChartFailNode(el);
-  if(charts.heatmap){charts.heatmap.dispose();charts.heatmap=null}
   const byDay={};
   for(const b of (heatmapData||[])){const k=(b.ts||'').slice(0,10);if(k)byDay[k]=(b.prompt_tokens||0)+(b.completion_tokens||0)}
   const today=new Date();today.setHours(0,0,0,0);
@@ -1234,8 +1424,11 @@ function initHeatmap(){
   const maxV=Math.max(1,...cells.map(c=>c[2]));
   const dark=isDark();
   const base=dark?'#1b2434':'#ebedf0';
-  charts.heatmap=echarts.init(el);
-  charts.heatmap.setOption({
+  // 注意：reuseChart 必须排在 el.style.height 之后 —— resize() 会按当前容器高度
+  // 量画布，高度还没定就 resize 会量到上一轮的旧高度。
+  const ch=reuseChart(el,'heatmap');
+  ch.setOption({
+    animation:!silent,
     tooltip:{formatter:p=>'<b>'+(cellDates[p.dataIndex]||'')+'</b><br/>Token: '+fmtFull(p.value[2])},
     grid:{left:6,right:6,top:6,bottom:24},
     xAxis:{type:'category',data:xLabels,axisLine:{show:false},axisTick:{show:false},
@@ -1249,18 +1442,32 @@ function initHeatmap(){
       emphasis:{itemStyle:{borderColor:dark?'#e9eef8':'#161a26'}}}]
   });
 }
-function initDonut(ms){
+function initDonut(ms,silent){
   const el=q('#donutChart');if(!el)return;
   if(typeof echarts==='undefined'){chartLoadFail('#donutChart','模型请求分布');return}
+  clearChartFailNode(el);
   const data=ms?Object.entries(ms).map(([name,s])=>({name,value:s.request_count||0})).filter(d=>d.value>0):[];
-  // 顺序很关键：必须先把容器清空、再 echarts.init。原先是 init 之后才
-  // el.innerHTML=''，把 echarts 刚插进去的 canvas 一起删掉了，实例绑在空壳上，
-  // 饼图永远不显示。
-  if(charts.donut){charts.donut.dispose();charts.donut=null}
-  el.innerHTML='';
-  if(!data.length){el.innerHTML='<div style="text-align:center;padding:40px 0;color:var(--text-ter);font-size:13px">暂无数据</div>';return}
-  charts.donut=echarts.init(el);
-  charts.donut.setOption({
+  // 空态：**绝不能用 el.innerHTML**。ECharts 的 canvas 也挂在同一个容器里，
+  // innerHTML='' 会把它摘掉，实例随即变成僵尸——实测容器内 canvas 数归 0，
+  // 之后 setOption()/resize() 都重建不出 canvas，饼图永远回不来。
+  // 与本文件 clearChartFailNode() 同一套写法：占位节点自己挂、自己摘。
+  const ph=el.querySelector('.'+DONUT_EMPTY_CLS);
+  if(ph&&ph.parentNode)ph.parentNode.removeChild(ph);
+  if(!data.length){
+    // setOption({series:[{data:[]}]}) 与 notMerge:true 都清不掉旧扇区
+    // （实测残留墨迹 3981，对照 clear() 为 0），只有 clear() 会真的清空，
+    // 且 clear 后实例仍活着、可以继续 setOption。
+    if(charts.donut&&!charts.donut.isDisposed())charts.donut.clear();
+    const box=document.createElement('div');
+    box.className=DONUT_EMPTY_CLS;
+    box.setAttribute('style','text-align:center;padding:40px 0;color:var(--text-ter);font-size:13px');
+    box.textContent='暂无数据';
+    el.appendChild(box);
+    return;
+  }
+  const ch=reuseChart(el,'donut');
+  ch.setOption({
+    animation:!silent,
     tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)'},
     color:[0,1,2,3,4].map(seriesColor),
     series:[{type:'pie',radius:['42%','72%'],center:['50%','52%'],padAngle:3,
@@ -1278,19 +1485,19 @@ function toggleChart(name,show){
   // 重新显示时必须重画：ECharts 不会自动 resize。隐藏期间若发生过主题切换，
   // redrawCharts() 会跳过 0 宽容器而留下上一套配色，show 时必须按当前主题补画。
   if(!show)return;
-  if(name==='donut'){if(statModels)initDonut(statModels)}
-  else if(name==='heatmap'){initHeatmap()}
-  else{renderTrends()}
+  if(name==='donut'){if(statModels)initDonut(statModels,true)}
+  else if(name==='heatmap'){initHeatmap(true)}
+  else{renderTrends(true)}
 }
-function renderTrends(){
-  if(trendTab==='token')initTrend(currentTrendDays);else initReqTrend(currentTrendDays);
+function renderTrends(silent){
+  if(trendTab==='token')initTrend(currentTrendDays,silent);else initReqTrend(currentTrendDays,silent);
 }
 function setTrendRefresh(){}  /* no-op: ECharts handles refresh via loadStats */
 /* 趋势渲染阶段。trends_by_model 已随 /api/stats?range= 一起回来，所以本函数
    不再自己 fetch，只负责「写入 + 渲染」；竞态守卫退化为一道 seq 校验
    （loadStats 已用 statsSeq 保证只有最新响应会走到这里，但保留判断成本为零）。
    调用方只有 loadStats —— 顶部 Hero、两张表、趋势图因此永远来自同一次响应。 */
-function loadTrends(rows,seq){
+function loadTrends(rows,seq,silent){
   if(seq!==statsSeq)return;                 // 过期响应，丢弃
   TREND_BY_MODEL=Array.isArray(rows)?rows:[];
   // renderModelOptions() 必须先于 aggTrend()：它可能把已不在下拉里的 trendModel
@@ -1303,7 +1510,7 @@ function loadTrends(rows,seq){
   //    谁先谁后完全取决于调用点，所以这里的调用序必须显式保持。
   renderModelOptions();
   aggTrend();
-  renderTrends();
+  renderTrends(silent);
 }
 /* 按当前模型筛选把按模型分组的数据聚合成原 trendsData 的结构。
    trendModel==='all' 时跨模型求和；否则只取该模型。 */
@@ -1668,6 +1875,7 @@ function genApiKey(){
    运行日志
    ============================================================ */
 let logBuf=[],logES=null,logLastSeq=0,logFilterLevel='all',logKeyword='',logStick=true;
+let logRetryDelay=2000,logRetryTimer=null;
 const logListEl=q('#logList');const LOG_MAX_BUF=2000;
 function setLogLevelFilter(l){logFilterLevel=l;qa('#logLevelChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.l===l));renderLogs()}
 function setLogKeyword(v){logKeyword=(v||'').toLowerCase();renderLogs()}
@@ -1691,7 +1899,10 @@ logListEl.addEventListener('scroll',()=>{const el=logListEl;logStick=(el.scrollT
 function logScrollToBottom(){logStick=true;logListEl.scrollTop=logListEl.scrollHeight;q('#logScrollBtn').style.display='none'}
 function initLogs(){
   if(DEMO_MODE){if(!logBuf.length)applyDemoLogs();toggleLogStream(q('#logAutoRefresh').checked);return}
-  fetch('/api/config').then(r=>r.json()).then(c=>{const lv=c.log_level||'info';const sel=q('#logRunLevel');if(sel.value!==lv)sel.value=lv}).catch(()=>{});
+  // 原写法没有 r.ok：500+JSON 时 r.json() 成功，于是错误体里的 log_level
+  // 静默覆盖下拉框。fetchJSON 拒绝把非 2xx 的体交给调用方，所以 catch 可以留空 ——
+  // 「拿不到」不再被写成「日志级别是 info」。
+  fetchJSON('/api/config').then(c=>{const lv=(c&&c.log_level)||'info';const sel=q('#logRunLevel');if(sel.value!==lv)sel.value=lv;if(sel)delete sel.dataset.stale}).catch(e=>{const sel=q('#logRunLevel');if(sel)sel.dataset.stale='1'});
   toggleLogStream(q('#logAutoRefresh').checked);
 }
 function toggleLogStream(on){
@@ -1699,13 +1910,26 @@ function toggleLogStream(on){
   if(on){
     if(DEMO_MODE){if(demoLogTimer)return;demoLogTimer=setInterval(()=>{const seq=++logLastSeq;const levels=['INFO','INFO','DEBUG','WARN','INFO','ERROR'];const msgs=['request_started','upstream_attempt node=hk-01','stream_result tokens='+Math.floor(300+Math.random()*1800),'node health probe ok','switching node after quota signal','upstream_error retry=2'];const i=Math.floor(Math.random()*levels.length);onLogEntry({seq,time:new Date().toISOString(),level:levels[i],msg:msgs[i],attrs:i%2?[{k:'request_id',v:'req_'+Math.floor(9000+Math.random()*900)},{k:'model',v:Math.random()>.5?'gpt-5.5':'glm-5.2'}]:[]})},2600);q('#logStatus').textContent='实时（演示）· seq '+logLastSeq;return}
     if(logES)return;
+    if(logRetryTimer){clearTimeout(logRetryTimer);logRetryTimer=null}
     logES=new EventSource('/api/logs/stream');
+    logES.onopen=()=>{logRetryDelay=2000};
     logES.onmessage=ev=>{try{onLogEntry(JSON.parse(ev.data))}catch(_){}};
-    logES.onerror=()=>{q('#logStatus').textContent='连接中断，重连中…';logES=null;setTimeout(()=>{if(sel&&sel.checked)toggleLogStream(true)},2000)};
+    // ★★ onerror 必须 close()：EventSource 在【连接级掉线】时不会进终态，
+    // 浏览器会自己按算法重连。只把它置 null 而不 close，那个孤儿会一直自己重连，
+    // 每掉一次又多造一个新的 ⇒ 连接数指数自激（实测 128/s→211/s，且取消勾选停不下来）。
+    // close() 是必需项，退避只是锦上添花。
+    logES.onerror=()=>{q('#logStatus').textContent='连接中断，重连中…';
+      const dead=logES;logES=null;if(dead){try{dead.close()}catch(_){}}
+      if(logRetryTimer)clearTimeout(logRetryTimer);
+      const d=logRetryDelay;logRetryDelay=Math.min(logRetryDelay*2,60000);
+      logRetryTimer=setTimeout(()=>{logRetryTimer=null;if(sel&&sel.checked)toggleLogStream(true)},d)};
     q('#logStatus').textContent='已连接';
   }else{
     if(DEMO_MODE){if(demoLogTimer){clearInterval(demoLogTimer);demoLogTimer=null}q('#logStatus').textContent='已暂停';return}
-    if(logES){logES.close();logES=null;q('#logStatus').textContent='已暂停'}
+    // ★ 暂停必须把待重试的定时器也撤掉，否则「已暂停」只是文字
+    if(logRetryTimer){clearTimeout(logRetryTimer);logRetryTimer=null}
+    logRetryDelay=2000;
+    if(logES){try{logES.close()}catch(_){};logES=null;q('#logStatus').textContent='已暂停'}
   }
 }
 function setLogRunLevel(v){
@@ -1735,10 +1959,23 @@ function showLogTab(t){
 }
 function loadCallLog(showStatus){
   if(DEMO_MODE){if(!callLogData.length)applyDemoCallLog();clRefreshView();return}
-  fetch('/api/call-log?limit=500').then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(recs=>{
+  // ★ 2s 超时。**实测依据**（/tmp/impl，环满 2000 条 × 12 events，-benchtime=2s -count=5，
+  // 中位数）：latest(500)+反转+JSON 编码 = **3.17 ms**、1.4 MB、22 allocs。
+  // ⇒ 2s 是实测值的 ~630 倍余量；又必须远小于本页 5s 的自动刷新周期
+  // （showLogTab 里的 setInterval(loadCallLog,5000)），否则下一次刷新会在上一次还在飞时发起。
+  // ★ 注意：**这个端点不读日志文件**（latest() 是 2000 条的内存环），
+  // 所以「95.7 MB 让它变慢」不成立 —— 原缺陷是【完全没有超时】，
+  // 请求一旦挂住就永远停在那里（日志页随之失明），而不是「慢」。
+  const ac=new AbortController();const tid=setTimeout(()=>ac.abort(),2000);
+  fetch('/api/call-log?limit=500',{signal:ac.signal}).then(r=>{clearTimeout(tid);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(recs=>{
     callLogData=recs||[];clRefreshView();
     if(showStatus)q('#clStatus').textContent=clFmtTime(new Date().toISOString())+' 刷新 '+callLogData.length+' 条';
-  }).catch(e=>{if(showStatus)q('#clStatus').textContent='加载失败: '+e.message});
+  }).catch(e=>{
+    clearTimeout(tid);
+    // N-8：showLogTab 首次进页面传的是 showStatus=false，而 catch 被它门控，
+    // 于是「进页面那一刻失败」永远不显示，只有 5s 后的定时刷新才显示。
+    // 错误无条件上报（它是状态行不是 toast，不会吵）；成功才受 showStatus 门控。
+    q('#clStatus').textContent='加载失败: '+(e.name==='AbortError'?'请求超时 2000ms':e.message)});
 }
 function clVisible(){
   const kw=(q('#clKeyword').value||'').trim().toLowerCase();
@@ -1897,14 +2134,19 @@ const DEMO={
     {name:'webshare-主池',url:'webshare API',update_interval_hours:12,nodes:5,last_updated_at:'2026-08-10T22:05:00Z'}
   ],
   // 离线兜底的 /api/stats 响应。字段必须与 ranged 响应同形（models 带
-  // cache_read_tokens / avg_ttft_ms / avg_output_speed / stream_req_count，
-  // 外加 total_requests 与 trends_by_model），否则演示模式下顶部 Hero 会缺格、
-  // 五格闭合不成立，verify_ui.py 的 DEMO 判定也会失效。
-  stats:{total_requests:4532,models:{
-    'gpt-4o-mini':{request_count:1280,prompt_tokens:12345678,completion_tokens:2345678,total_tokens:14691356,cache_read_tokens:6700000,cache_created_tokens:0,avg_ttft_ms:412,avg_output_speed:58.4,stream_req_count:1240},
-    'gpt-5.5':{request_count:342,prompt_tokens:8912345,completion_tokens:1234567,total_tokens:10146912,cache_read_tokens:4100000,cache_created_tokens:0,avg_ttft_ms:538,avg_output_speed:44.1,stream_req_count:331},
-    'glm-5.2':{request_count:876,prompt_tokens:4567890,completion_tokens:987654,total_tokens:5555544,cache_read_tokens:1900000,cache_created_tokens:0,avg_ttft_ms:305,avg_output_speed:71.6,stream_req_count:852},
-    'deepseek-r1':{request_count:2034,prompt_tokens:22334455,completion_tokens:3344556,total_tokens:25679011,cache_read_tokens:9600000,cache_created_tokens:0,avg_ttft_ms:690,avg_output_speed:37.2,stream_req_count:1965}
+  // cache_read_tokens / avg_ttft_ms / avg_output_speed / stream_req_count /
+  // throughput_tps / stream_tps_n，
+  // 外加 total_requests、顶层 throughput_tps 与 trends_by_model），
+  // 否则演示模式下顶部 Hero 会缺格、五格闭合不成立，verify_ui.py 的 DEMO 判定也会失效。
+  // ★ throughput_tps 与 avg_output_speed 必须分开填：前者是 Σtok/Σsec（按秒加权），
+  // 后者是速率的算术平均，不是同一个数。夹具里刻意让两者差出一截
+  // （gpt-4o-mini 58.4 vs 41.2），任何一处误读 avg_output_speed 的代码都会立刻显形。
+  // 顶层值 = Σm.throughput_tps 按各模型 decode 窗加权（非各模型吞吐的平均）。
+  stats:{total_requests:4532,throughput_tps:36.39961257976299,stream_tps_n:4388,models:{
+    'gpt-4o-mini':{request_count:1280,prompt_tokens:12345678,completion_tokens:2345678,total_tokens:14691356,cache_read_tokens:6700000,cache_created_tokens:0,avg_ttft_ms:412,avg_output_speed:58.4,stream_req_count:1240,throughput_tps:41.2,stream_tps_n:1240},
+    'gpt-5.5':{request_count:342,prompt_tokens:8912345,completion_tokens:1234567,total_tokens:10146912,cache_read_tokens:4100000,cache_created_tokens:0,avg_ttft_ms:538,avg_output_speed:44.1,stream_req_count:331,throughput_tps:24.8,stream_tps_n:331},
+    'glm-5.2':{request_count:876,prompt_tokens:4567890,completion_tokens:987654,total_tokens:5555544,cache_read_tokens:1900000,cache_created_tokens:0,avg_ttft_ms:305,avg_output_speed:71.6,stream_req_count:852,throughput_tps:52.6,stream_tps_n:852},
+    'deepseek-r1':{request_count:2034,prompt_tokens:22334455,completion_tokens:3344556,total_tokens:25679011,cache_read_tokens:9600000,cache_created_tokens:0,avg_ttft_ms:690,avg_output_speed:37.2,stream_req_count:1965,throughput_tps:28.3,stream_tps_n:1965}
   },trends_by_model:[]},
   caps:[
     {id:'gpt-4o-mini',cw:128000,mo:16384,mod:['text','image']},
@@ -1919,19 +2161,51 @@ const DEMO={
    启动
    ============================================================ */
 async function detectBackend(){
-  try{const r=await fetch('/api/config',{headers:{'Accept':'application/json'}});if(!r.ok)throw 0;const c=await r.json();if(!c||typeof c!=='object'||Array.isArray(c))throw 0;return true}catch(e){return false}
+  // file:// 是原型预览路径，设计文档写明保留 ⇒ 合法的 demo。
+  if(location.protocol==='file:')return 'demo';
+  const ac=new AbortController();const tid=setTimeout(()=>ac.abort(),T_PROBE);
+  try{
+    const r=await fetch('/api/config',{headers:{'Accept':'application/json'},signal:ac.signal});
+    // 404/405：这个 origin 根本不是后端（静态预览服务器）⇒ demo 合法。
+    // 5xx / 2xx-非JSON / 302 跟随后的 200+HTML / 网络错误 / 超时：后端在、它坏了
+    // ⇒ 一律 error，绝不 demo。fetch 会跟随 302，所以前端看到的是 200+HTML。
+    if(r.status===404||r.status===405)return 'demo';
+    if(!r.ok)return 'error';
+    const c=await r.json();
+    return (c&&typeof c==='object'&&!Array.isArray(c))?'online':'error';
+  }catch(e){return 'error'}
+  finally{clearTimeout(tid)}
+}
+/* N-5 的 D′：探测判 error 后持续重试，一旦不再是 error 就 reload。
+   ★ 用 reload 而不是把 DEMO_MODE 翻回 false：DEMO_MODE 保持「运行期不可变」，
+     1A 依赖这个前提论证 demoLogTimer 不会与 EventSource 打架；
+     热切换会让 19 处读取点全部变成「必须重新求值」，且 :1700 的 demoLogTimer
+     不随模式退出清理 ⇒ 在新位置复现 N-5（编造数据持续再生）。
+     恢复时自动 F5 一次，而这正是用户今天【必须手动做】的动作。
+   ★ 只在 error 时重试：demo 是合法终态，对它 reload 会永远循环。 */
+let backendRetryTimer=null;
+function scheduleBackendRetry(){
+  if(backendRetryTimer)return;
+  backendRetryTimer=setInterval(async()=>{
+    const s=await detectBackend();
+    if(s!=='error'){clearInterval(backendRetryTimer);backendRetryTimer=null;location.reload()}
+  },5000);
 }
 applyTheme();
 window.addEventListener('DOMContentLoaded',async()=>{
-  const online=await detectBackend();
-  DEMO_MODE=!online;
-  setConn(online);
+  /* N-6：与后端无关的初始化必须排在 await detectBackend() 【之前】。
+     原顺序下探测一挂起，Promise.all 不开始 ⇒ initAllCharts 不跑（canvas=0）
+     且 setAutoRefresh 不跑（没有任何重试来源）—— 用户看到一片永远不会动的骨架屏。
+     探测超时（3s）解决「判定不收敛」，提到前面解决「挂起时页面全残」，两者互补。 */
+  initAllCharts();
+  setAutoRefresh(parseInt(localStorage.getItem('autoRefresh')||'0',10)||0);
+  const state=await detectBackend();
+  backendState=state;DEMO_MODE=(state==='demo');applyConn();
   const sa=q('#sideAddr');if(sa)sa.textContent=(location.host||location.hostname)||(DEMO_MODE?'localhost:8000':'-');
+  if(state==='error')scheduleBackendRetry();
   await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats(),loadCaps()]);
   renderConfigEditors();
   initLogs();
-  initAllCharts();
-  setAutoRefresh(parseInt(localStorage.getItem('autoRefresh')||'0',10)||0);
 });
 </script>
 </body>
