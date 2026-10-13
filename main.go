@@ -375,12 +375,19 @@ type ModelInfo struct {
 	ContextWindow   *int64   `json:"context_window,omitempty"`
 	MaxOutputTokens *int64   `json:"max_output_tokens,omitempty"`
 	InputModalities []string `json:"input_modalities,omitempty"`
+	// InputLimit 单次 prompt 上限，与 ContextWindow（prompt+输出 的总预算）是两个量。
+	// omitempty ⇒ 未知或无独立上限时**不下发**，前端不渲染任何东西。
+	InputLimit *int64 `json:"input_limit,omitempty"`
 }
 
 type ModelLimit struct {
 	Context         int64
 	Output          int64
 	InputModalities []string
+	// InputLimit：单次请求 prompt 的上限。0 = 未知或没有独立输入上限
+	// （models.dev 里该键**不存在**，不是 0）。只记「已知且严格小于 context」，
+	// 绝不把缺失当作「等于 context」——全库 28 个带该键的模型里只有 2 个相等。
+	InputLimit int64
 }
 
 var (
@@ -484,7 +491,12 @@ func fetchModelsDevCatalog() (map[string]ModelLimit, error) {
 			} `json:"modalities"`
 			Limit struct {
 				Context int64 `json:"context"`
-				Output  int64 `json:"output"`
+				// ★ 之前这个字段被整个丢掉，导致面板把 context 当输入上限显示
+				//   （big-pickle 报 200,000、真实输入上限 160,000，偏大 20%）。
+				//   models.dev 这份 5.4MB 响应本来就在拉，补一行结构体即可，
+				//   **零新增网络请求**。
+				Input  int64 `json:"input"`
+				Output int64 `json:"output"`
 			} `json:"limit"`
 		} `json:"models"`
 	}
@@ -495,7 +507,11 @@ func fetchModelsDevCatalog() (map[string]ModelLimit, error) {
 	for _, provider := range result {
 		for id, m := range provider.Models {
 			if m.Limit.Context > 0 && m.Limit.Output > 0 {
-				out[id] = ModelLimit{Context: m.Limit.Context, Output: m.Limit.Output, InputModalities: m.Modalities.Input}
+				lim := ModelLimit{Context: m.Limit.Context, Output: m.Limit.Output, InputModalities: m.Modalities.Input}
+				if m.Limit.Input > 0 && m.Limit.Input < m.Limit.Context {
+					lim.InputLimit = m.Limit.Input
+				}
+				out[id] = lim
 			}
 		}
 	}
@@ -563,7 +579,7 @@ func fetchFreeModelsFromDocs() (map[string]bool, error) {
 	defer cancel()
 
 	req, _ := http.NewRequestWithContext(ctx, "GET",
-		"https://docs.opencode.ai/docs/zen/", nil)
+		"https://opencode.ai/v2/docs/console/models/", nil)
 	resp, err := mgmtClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -633,23 +649,18 @@ func loadFallbackFreeModels() map[string]bool {
 // refreshFreeModelsDocs 刷新文档免费模型缓存（带重试）
 func refreshFreeModelsDocs() {
 	var models map[string]bool
-	var lastErr error
 
-	// 重试 3 次
-	for attempt := 0; attempt < 3; attempt++ {
-		fetched, err := fetchFreeModelsFromDocs()
-		if err == nil {
-			models = fetched
-			break
-		}
-		lastErr = err
-		slog.Warn("free models fetch failed", "attempt", attempt+1, "error", err)
-		time.Sleep(time.Duration(attempt+1) * 2 * time.Second)
+	// ★ 不再重试：这个源是"能抓到最好、抓不到无所谓的增强"，不是主源。
+	//   原先重试 3 次（+2s/+4s/+6s 睡眠）再打 Error，源不可用时只会
+	//   拖慢刷新并刷出噪音日志。失败一次、记一条 Warn、立刻走兜底。
+	fetched, err := fetchFreeModelsFromDocs()
+	if err == nil && len(fetched) > 0 {
+		models = fetched
+	} else {
+		slog.Warn("free models docs fetch failed, using fallback (not fatal)", "error", err)
 	}
 
 	if models == nil {
-		// 全部失败，使用兜底策略
-		slog.Error("all fetch attempts failed, using fallback", "error", lastErr)
 		models = loadFallbackFreeModels()
 	} else {
 		// 成功，更新缓存
@@ -3599,10 +3610,18 @@ func replaceModelIDsWithAliases(models []ModelInfo, aliases map[string]string) [
 				ctx, out := limit.Context, limit.Output
 				visibleModel.ContextWindow, visibleModel.MaxOutputTokens = &ctx, &out
 				visibleModel.InputModalities = limit.InputModalities
+				if limit.InputLimit > 0 {
+					il := limit.InputLimit
+					visibleModel.InputLimit = &il
+				}
 			} else if limit, ok := lookupModelLimit(publicFacingModelID(model.ID)); ok {
 				ctx, out := limit.Context, limit.Output
 				visibleModel.ContextWindow, visibleModel.MaxOutputTokens = &ctx, &out
 				visibleModel.InputModalities = limit.InputModalities
+				if limit.InputLimit > 0 {
+					il := limit.InputLimit
+					visibleModel.InputLimit = &il
+				}
 			}
 			result = append(result, visibleModel)
 			seen[visibleID] = struct{}{}
@@ -3649,10 +3668,18 @@ func adminModelsHandler(w http.ResponseWriter, r *http.Request) {
 				ctx, out := limit.Context, limit.Output
 				m.ContextWindow, m.MaxOutputTokens = &ctx, &out
 				m.InputModalities = limit.InputModalities
+				if limit.InputLimit > 0 {
+					il := limit.InputLimit
+					m.InputLimit = &il
+				}
 			} else if limit, ok := lookupModelLimit(publicFacingModelID(m.ID)); ok {
 				ctx, out := limit.Context, limit.Output
 				m.ContextWindow, m.MaxOutputTokens = &ctx, &out
 				m.InputModalities = limit.InputModalities
+				if limit.InputLimit > 0 {
+					il := limit.InputLimit
+					m.InputLimit = &il
+				}
 			}
 			allModels = append(allModels, m)
 		}

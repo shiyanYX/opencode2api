@@ -1073,7 +1073,7 @@ function renderTps(d){
 }
 async function loadCaps(){
   if(DEMO_MODE){renderCaps(DEMO.caps);return}
-  try{const d=await fetchJSON('/api/models');const freeSet=new Set(d.free_models||[]);renderCaps((d.data||[]).filter(x=>freeSet.has(x.id)).map(x=>{if(typeof x==='string')return{id:x};return{id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities}}).filter(x=>x.id))}
+  try{const d=await fetchJSON('/api/models');const freeSet=new Set(d.free_models||[]);renderCaps((d.data||[]).filter(x=>freeSet.has(x.id)).map(x=>{if(typeof x==='string')return{id:x};return{id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities,il:x.input_limit}}).filter(x=>x.id))}
   catch(e){
     // 同上：不要用 innerHTML 整表重写（旧行是被确认过的真数据）。
     const t=q('#capTable'),tb=t&&t.querySelector('tbody');
@@ -1177,7 +1177,7 @@ function renderCaps(rows){
   rows=(rows||[]).filter(x=>x&&x.id).sort((a,b)=>a.id.localeCompare(b.id));
   let h='';
   if(!rows.length){h='<tr><td colspan="4" class="empty-hint">暂无模型数据</td></tr>'}
-  else{for(const m of rows){const label=esc(m.id);const badge='<span class="auto-badge">免费</span>';h+='<tr class="row-auto"><td class="mono">'+label+badge+'</td><td class="num">'+fmtTokens(m.cw)+'</td><td class="num">'+fmtTokens(m.mo)+'</td><td>'+fmtModalities(m.mod)+'</td></tr>'}}
+  else{for(const m of rows){const label=esc(m.id);const badge='<span class="auto-badge">免费</span>';h+='<tr class="row-auto"><td class="mono">'+label+badge+'</td><td class="num">'+fmtTokens(m.cw)+(m.il?'<div style="font-size:11px;color:var(--muted);font-weight:400">输入上限 '+fmtTokens(m.il)+'</div>':'')+'</td><td class="num">'+fmtTokens(m.mo)+'</td><td>'+fmtModalities(m.mod)+'</td></tr>'}}
   q('#capTable').innerHTML='<thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody>'+h+'</tbody>';
 }
 
