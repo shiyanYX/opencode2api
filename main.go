@@ -931,7 +931,7 @@ type ModelStats struct {
 	// 四个字段都 omitempty：窗口内 0 条流式样本时**字段缺席**，
 	// 面板据此显示 "—"，而不是把「没数据」渲染成 0 t/s。
 	ThroughputTPS float64 `json:"throughput_tps,omitempty"` // Σ完成token ÷ Σ生成秒
-	StreamTpsN    int64   `json:"stream_tps_n,omitempty"`    // 吞吐样本数
+	StreamTpsN    int64   `json:"stream_tps_n,omitempty"`   // 吞吐样本数
 }
 
 type TokenStatsData struct {
