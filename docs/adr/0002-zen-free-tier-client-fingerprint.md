@@ -6,30 +6,38 @@
 
 ## 背景
 
-OpenCode Zen 免费层按「请求像不像官方 opencode 客户端」鉴权，而非按账号或 IP。2026-09-17 至 09-21
-上游连续收紧四轮，前三轮都使代理全线返回同一个 403：
+OpenCode Zen 免费层按「请求像不像官方 opencode 客户端」鉴权，而非按账号或 IP。2026-09-17 至 10-13
+上游连续收紧五轮，其中四轮使代理全线返回同一个 403：
 
 ```json
 403 {"type":"error","error":{"type":"FreeTierError",
-     "message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}
+     "message":"OpenCode's free tier can only be used from within OpenCode"}}
 ```
 
-四轮依次是：
+（2026-10-13 起该文案追加了一句 `Download it at https://opencode.ai and keep building.`，
+`Error from provider (Console):` 前缀被去掉——文案变了但闸门性质不变。）
+
+五轮依次是：
 
 1. `x-opencode-session` 必须符合官方 ID 形态（`ses_` + 12 位小写十六进制 + 14 位 base62）；
 2. `body.stream` 必须为 `true`；
 3. `body.tools` 必须包含官方小写工具名 `bash`、`glob`、`grep`、`read`；
-4. `User-Agent` 里的 opencode 版本必须 **>= 1.18.0**（低于则 426，错误类型与前三轮不同）：
+4. `User-Agent` 里的 opencode 版本必须 **>= 1.18.0**（低于则 426，错误类型与其余不同）：
 
-```json
-426 {"type":"error","error":{"type":"UpgradeRequired",
-     "message":"Error from provider (Console): OpenCode 1.18.0 or newer is required to use the free tier"}}
-```
+   ```json
+   426 {"type":"error","error":{"type":"UpgradeRequired",
+        "message":"Error from provider (Console): OpenCode 1.18.0 or newer is required to use the free tier"}}
+   ```
+
+5. `x-opencode-session` 的 12 位 hex 前缀必须是 **descending 编码**（官方对 session 用
+   `Identifier.descending`、对 request 用 ascending；形态不变、只有方向变了）。
 
 第一轮之前本项目的实现是 `"ses_" + randomString(24)`；第二轮之前非流式请求按 `stream:false` 直发；
 第三轮之前只处理「客户端不带 tools」的场景，而生产主客户端（Claude Code 风格、工具名首字母大写）
 自带工具却因不含官方小写名而全线 403；第四轮暴露的是**兜底值本身不合规**——npm 版本探测失败时回退到
-`1.15.3`，低于 1.18.0 门槛，一次网络抖动就让全量请求变 426。
+`1.15.3`，低于 1.18.0 门槛，一次网络抖动就让全量请求变 426；第五轮暴露的是**只对齐了形态、没对齐
+编码方向**——`newOpenCodeID` 一直用 ascending，长度与字符集都对，靠正则的检查完全看不出来，
+而服务端要的是 descending。
 
 排除过的假设（均已实测证伪）：多出口共享 session、host IP 被封、TLS/JA3 指纹、
 User-Agent 内容（短 UA 配正确 session 也能通）、请求体必须含官方 system prompt、
@@ -39,9 +47,11 @@ Authorization 必须是真实 key。
 
 **完整模仿官方客户端的请求形态，而不是寻找服务端开关或绕过手段。**
 
-1. **ID 形态**：新增 `opencode_id.go`，按官方 `Identifier.create` 的布局生成
-   `<prefix>_<12 位小写十六进制时间戳><14 位 base62>`，供 `x-opencode-session`
-   与 `x-opencode-request` 使用；同毫秒内用自增计数器保证单调不重复。
+1. **ID 形态与方向**：新增 `opencode_id.go`，按官方 `Identifier.create` 的布局生成
+   `<prefix>_<12 位小写十六进制时间分量><14 位 base62>`；`newSessionID()` 用 **descending**
+   （`~now`）供 `x-opencode-session`，`newOpenCodeID()` 用 **ascending** 供
+   `x-opencode-request`（官方如此）；同毫秒内用自增计数器保证单调不重复，并设
+   `maxSafeCounter` 上界（上游实测拒绝 counter ≥ 64）。
 2. **stream 形态**：`ensureAgentUpstreamShape` 把上游请求恒置 `stream:true`（补
    `stream_options.include_usage` 以便取用量）；非流式客户端由 `aggregateUpstreamSSE`
    把上游 SSE 聚合回单个 `chat.completion`，三种协议的 6 个调用点因此无需改动。
@@ -53,6 +63,9 @@ Authorization 必须是真实 key。
 5. **版本形态**：新增 `oc_version.go` 统一管理 UA 版本——回退常量必须自身满足门槛
    （`fallbackOCVersion = "1.18.31"`，有单测断言）、优先回退到「最近一次成功探测到的版本」、
    低于门槛的版本不入缓存、只保留前导 `x.y.z`；收到 426 时刷新一次版本并重试以自愈。
+6. **断言编码语义而非形态**：单测对 ID 前缀做**位级比对**（高 36 位等于当前时间的
+   descending/ascending 截断编码），而不是 `regexp.MatchString`——第 5 轮正是形态没变、
+   方向变了，正则一路放行到线上才炸。
 
 ## 理由
 
@@ -64,13 +77,17 @@ Authorization 必须是真实 key。
   schema 的方案都不可接受；回映射使工具名、schema、`tool_choice` 契约全部不变。
 - **兜底值也必须合规**：版本号是探测来的、会失败，回退值若低于门槛就等于「网络抖动即全量失败」。
   凡是会被上游校验的形态参数，其兜底值都要满足当前门槛并加单测钉住。
+- **「形态一致」不等于「编码一致」**：第 5 轮里长度、字符集、前缀名全都正确，只有时间分量的
+  编码方向不同（ascending vs descending），任何基于形态的检查与测试都发现不了。要模仿客户端，
+  就得连编码语义一起模仿，并用位级断言把它钉住。
 
 ## 后果
 
-- 正面：免费层恢复可用；对下游零改动；30 项单元测试覆盖形态、回映射与版本回退（本地保留，
+- 正面：免费层恢复可用；对下游零改动；48 项单元测试覆盖形态、方向、回映射与版本回退（本地保留，
   按 `.gitignore` 约定不入库）。
 - 负面：这是**对抗性适配**，上游未承诺这些形态，任何一次收紧都可能再次失效；重新定位成本约为
-  「一次 MITM 抓包 + 一轮逐字段二分」（流程见 `docs/UPSTREAM-COMPAT.md`）。
+  「一次 MITM 抓包 + 一轮逐字段二分」（流程见 `docs/UPSTREAM-COMPAT.md`）。五轮下来已从
+  「形态匹配」升级到「编码语义匹配」，门槛在持续升高。
 - 负面：所有非流式请求在上游侧变为流式，网关需本地聚合（内存按 `max_tokens` 有界）。
 - 边界：免费层额度仍按出口 IP 限流（`FreeUsageLimitError`），与本决策无关。
 - 若上游进一步转向「只有真客户端能通」（如连接层绑定），本方案失效，届时应评估降级为

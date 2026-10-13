@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **修复：session 编码方向错误，导致免费模型全量 403 `FreeTierError`（"…Download it at https://opencode.ai and keep building."）**。上游在 2026-10-13 把 `x-opencode-session` 的校验从前缀「形态」收紧到前缀「编码方向」：必须与官方客户端一致地用 **descending**（`~now`）编码，而本网关的 `newOpenCodeID` 一直用 **ascending**（`now`）。形态（`ses_` + 12 位小写 hex + 14 位 base62）完全没变，靠正则匹配的检查一律看不出问题，因此此前几轮加固都没覆盖到。
+  - 抓真实 CLI（1.18.33）确认官方**按用途分方向**：`x-opencode-session` 前缀 `0xeca1…`（descending）、`x-opencode-request` 前缀 `0x135e…`（ascending）。
+  - 二分实测（真实 CLI 的 headers/body，仅替换 session）：`descending(now)` 前缀 → 200；`descending(now±1 年)` → 200；**`ascending(now)` 前缀 → 403**；随机 48 位 / 全 0 前缀 → 403；后 14 位 base62 任意替换 → 200（完全自由）；`descending` 但 counter ≥ 64 → 403（counter ≤ 48 通过）。
+  - `opencode_id.go`：`newOpenCodeIDDir(prefix, descending)` 统一实现两个方向，`newSessionID()` 改用 descending（单一入口，`main.go` 的 4 处 session 生成全部走它），`newOpenCodeID()` 保持 ascending 供 `x-opencode-request` 使用；新增 `maxSafeCounter = 15`：同一毫秒内计数器越界时借用下一毫秒重来，保证生成的 session 始终落在实测被接受的范围。
+  - 测试：`opencode_id_test.go` 补方向断言——不只 `regexp.MatchString`，而是对前缀做**位级比对**（高 36 位等于当前时间的 descending / ascending 截断编码），并覆盖 counter 上界与连续突发 300 次生成。注意时间分量是 53 位（`ms<<12`）截断进 48 位，直接解码会回绕成 1970 年代，写测试时不要试图把前缀还原成当前毫秒。本地测试 48 例通过（按 `.gitignore` 约定 `*_test.go` 不入库）。
+  - 顺带记录（未改代码）：官方推理路径已迁到 `/inference/v1/chat/completions` 与 `/inference/v1/responses`；用合规请求实测 `/zen/v1/…`（本网关现用）与 `/inference/v1/…` **都是 200**，故本次未切换，仅写入文档备将来旧路径下线时参考。
+  - 验证：本地实例直连上游，`space-bunny-free` / `mimo-v2.6-flash-free` 非流式（带/不带工具）与流式全部 200，工具名回映射仍正确（客户端 `Bash` → 上游 `bash` → 响应 `Bash`），本地日志 `FreeTierError` 计数为 0。
+  - 文档：`docs/UPSTREAM-COMPAT.md` 条件 1 改写为「必须 descending」并保留旧结论作对照、补端点路径观察与「形态参数要连方向一起对齐」的教训，重新定位流程补 410 与逐位翻转技巧；`CONTEXT.md`、`README.md`、`docs/adr/0002` 同步。
+
 - **修复：Chat 流式转发未保证 SSE 事件空行分隔，导致下游客户端 `JSON.parse` 失败（`PI_AI_ERROR` / `Unexpected non-whitespace character after JSON at position N`）**。`consumeChatStream` 此前对每个 `data:` 行只补单个 `\n`，事件之间的空行完全依赖上游是否发送；上游（Zen）不发空行时，多个 `data:` 事件会被 OpenAI SDK 的 SSE 解析器 join 成一个 JSON（首段恰好 300/306 字符时报 position 301/307），`JSON.parse` 抛出非 network/timeout/5xx 的 SyntaxError，被 DeepSeek Harness 的 `classifyPiAiError` 兜底为 `PI_AI_ERROR` 且不重试，turn 直接终止。新增 `writeSSELine`：`data:` 行统一以 `\n\n` 终止（非 data 行原样透传），`consumeChatStream` 改走该写出路径；`[DONE]`、截断兜底 chunk、Claude 面等原本已写 `\n\n` 的分支不受影响。对已正常发空行的上游只多出无害空行（SSE 规范允许多个空行），不改变 `data:` JSON 内容。
   - 测试：新增 `sse_write_test.go`（3 例：连续 data 事件被空行分隔、带尾换行的 data 规范化为单空行、非 data 行原样透传；按 `.gitignore` 约定仅本地保留），全仓测试 + `go vet` + 构建通过。
 
