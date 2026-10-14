@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **修复：免费模型再次全量 403 `FreeTierError`（上游第 6 轮收紧，三处同时变更）**。用户报的是 429，但实测当前失败面是 403；排查中另外确认了那条 `429 {"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}` 是旧路径的瞬时不可用，不是额度限流。
+  - **① 推理路径必须换成 `/inference/v1/`**（决定性）：抓官方 CLI（1.18.33）发现它已打到 `/inference/v1/chat/completions`。**同一份请求（同头同体）在 `/zen/v1/chat/completions` 上 403、在 `/inference/v1/chat/completions` 上 200**——旧路径现在只放行「完全真客户端」。`buildOCRequestWithEndpoint` 的 zen 侧上游 URL 改为 `/inference/v1/chat/completions`（go/付费面与三个 `/models` 目录端点未动，实测仍 200）。
+  - **② UA 版本有上限，且上游闸门滞后于 npm**：实测 `/inference/v1/` 上 `1.18.0–1.18.33` 通过、`1.18.34–1.19.1` 全部 403、`1.17.9` 仍 426。当时 npm `latest` 已是 **1.19.0**，而本网关此前直接用 npm latest 当 UA 版本 → npm 一发布新版就全量 403。`oc_version.go` 改为默认使用**已验证**的 `pinnedOCVersion = "1.18.33"`，仅在收到 426（下限抬高）时向 npm latest 升级；并新增与 426 对称的自愈：收到 403 且 body 为 `FreeTierError` 而当前版本比 pinned 新时，回退到 pinned 重试一次（`revertToPinnedOCVersion` / `isFreeTierErrorBody`）。
+  - **③ 工具 schema 的 `parameters.properties` 不能为空**：上游要求每个工具的 properties 非空（此前空壳能过）。`placeholderToolNamed` 改为带 `{"input":{"type":"string"}}`，`requiredOfficialTools` 扩为全部 11 个官方工具名（约 1.6KB），一次覆盖「名字 + 数量 + 非空 schema」三项；客户端自带工具时仍只补缺失名字、不覆盖其 `tool_choice`。
+  - 测试：新增 `TestPinnedOCVersionSatisfiesFreeTierMinimum`、`TestRevertToPinnedOCVersion`、`TestIsFreeTierErrorBody`、`TestPlaceholderToolHasNonEmptyProperties`，并按新契约更新 `TestShapeToolsNormalizesCaseAndMapsBack`（客户端已覆盖的官方名不得重复注入，其余官方工具需补齐）；本地 52 例通过（按 `.gitignore` 约定 `*_test.go` 不入库）。
+  - 验证（本地实例直连上游，修复前该形态全 403）：`space-bunny-free` 非流式+无工具 → 200（`content: "OK"`）、非流式+客户端工具 `Bash` → 200 且 `tool_calls` 名回映射为 `Bash`、流式 → 200。
+  - 文档：`docs/UPSTREAM-COMPAT.md` 条件表改为 6 条（新增路径条件、版本上下限、tools 非空 properties），补「同一请求换路径定案」的诊断提示与「上游闸门滞后于 npm」的教训；`README.md`、`CONTEXT.md` 同步。
+
 - **修复：session 编码方向错误，导致免费模型全量 403 `FreeTierError`（"…Download it at https://opencode.ai and keep building."）**。上游在 2026-10-13 把 `x-opencode-session` 的校验从前缀「形态」收紧到前缀「编码方向」：必须与官方客户端一致地用 **descending**（`~now`）编码，而本网关的 `newOpenCodeID` 一直用 **ascending**（`now`）。形态（`ses_` + 12 位小写 hex + 14 位 base62）完全没变，靠正则匹配的检查一律看不出问题，因此此前几轮加固都没覆盖到。
   - 抓真实 CLI（1.18.33）确认官方**按用途分方向**：`x-opencode-session` 前缀 `0xeca1…`（descending）、`x-opencode-request` 前缀 `0x135e…`（ascending）。
   - 二分实测（真实 CLI 的 headers/body，仅替换 session）：`descending(now)` 前缀 → 200；`descending(now±1 年)` → 200；**`ascending(now)` 前缀 → 403**；随机 48 位 / 全 0 前缀 → 403；后 14 位 base62 任意替换 → 200（完全自由）；`descending` 但 counter ≥ 64 → 403（counter ≤ 48 通过）。

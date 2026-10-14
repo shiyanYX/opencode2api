@@ -10,21 +10,39 @@ OpenCode Zen 的免费层**不按账号鉴权，而按「请求像不像官方 o
 >      "message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}
 > ```
 
-## 一、已实测的五道条件
+## 一、已实测的条件
 
-截至 2026-10-13，以下条件**必须同时满足**，缺一即被拒：
+截至 2026-10-15，以下条件**必须同时满足**，缺一即被拒：
 
 | # | 条件 | 失配时的错误 | 本项目实现 |
 |---|---|---|---|
-| 1 | `x-opencode-session` = `ses_` + **descending 编码**的 12 位小写十六进制时间分量 + 14 位 base62（前缀后固定 26 字符） | 403 `FreeTierError` | `opencode_id.go` 的 `newSessionID`（descending）；`newOpenCodeID`（ascending）用于 message/request |
-| 2 | `User-Agent` = `opencode/<semver>`，且**不低于 1.18.0** | **426 `UpgradeRequired`** | `oc_version.go` 取 npm `opencode-ai` latest，回退 `1.18.31` |
-| 3 | `body.stream` 必须为 `true` | 403 `FreeTierError` | `agent_shape.go` 强制置真；非流式客户端由 `aggregateUpstreamSSE` 本地聚合 |
-| 4 | `body.tools` 必须包含官方小写工具名 `bash`、`glob`、`grep`、`read` | 403 `FreeTierError` | `agent_shape.go` 的 `shapeToolsForUpstream` 规范化 + 补齐 |
-| 5 | `User-Agent` 必须存在且形如 `opencode/<semver>` | 403 `FreeTierError` | 同上 |
+| 1 | **推理路径必须是 `/inference/v1/`**（旧的 `/zen/v1/` 已只放行完全真客户端） | 403 `FreeTierError` | `main.go` 的上游 URL |
+| 2 | `x-opencode-session` = `ses_` + **descending 编码**的 12 位小写十六进制时间分量 + 14 位 base62（前缀后固定 26 字符） | 403 `FreeTierError` | `opencode_id.go` 的 `newSessionID`（descending）；`newOpenCodeID`（ascending）用于 message/request |
+| 3 | `User-Agent` = `opencode/<semver>`，**不低于 1.18.0 且不高于上游闸门认到的版本**（见条件 3） | 426 / 403 | `oc_version.go` 用已验证的 `pinnedOCVersion`，不直接用 npm latest |
+| 4 | `body.stream` 必须为 `true` | 403 `FreeTierError` | `agent_shape.go` 强制置真；非流式客户端由 `aggregateUpstreamSSE` 本地聚合 |
+| 5 | `body.tools` 必须含**官方工具名**，且每个工具的 `parameters.properties` **非空**（空 properties 判为无效工具） | 403 `FreeTierError` | `agent_shape.go` 的 `shapeToolsForUpstream` + `placeholderToolNamed` |
+| 6 | `User-Agent` 必须存在且形如 `opencode/<semver>` | 403 `FreeTierError` | 同上 |
 
-> 条件 2 与 5 是同一道校验的两个失败档位：格式不对（缺失、无斜杠、非 semver）走 403
-> `FreeTierError`；格式对但版本过低走 **426 `UpgradeRequired`**。两者是**不同的错误类型**，
-> 排查时不要混为一谈。
+> 条件 3 与 6 是版本校验的两个失败档位：格式不对（缺失、无斜杠、非 semver）走 403
+> `FreeTierError`；格式对但版本过低走 **426 `UpgradeRequired`**；版本**过高**同样走
+> 403 `FreeTierError`（闸门滞后于 npm）。三者要分清。
+
+### 条件 1：推理路径已迁到 `/inference/v1/`（2026-10-15 起必须）
+
+抓官方 CLI（1.18.33）发现它的推理请求打到 `/inference/v1/chat/completions` 与
+`/inference/v1/responses`，而不再是 `/zen/v1/…`。**同一份请求（同头同体）在两边的结果不同**：
+
+| 路径 | 网关形态的请求 | 真客户端形态的请求 |
+|---|---|---|
+| `/zen/v1/chat/completions` | **403 `FreeTierError`** | 200 |
+| `/inference/v1/chat/completions` | **200** | 200 |
+
+也就是说旧路径现在只放行「完全真客户端」，网关必须走新路径。
+（`/zen/v1/models`、`/inference/v1/models`、`/zen/go/v1/models` 三个目录端点目前都还是 200，
+所以只改了推理路径，目录抓取仍走 `/zen/v1/models`。）
+
+> 诊断提示：**同一请求换路径就能定案**。遇到「形态全都对但就是 403」时，先试
+> `/inference/v1/chat/completions`。
 
 ### 条件 1：session 必须用 descending 编码（2026-10-13 收紧）
 
@@ -102,6 +120,32 @@ git-describe 形式（`1.18.31.r12.g88c6c7a`）上游会拒，`sanitizeOCVersion
   低于门槛的版本不入缓存；
 - 收到 426 时**自动刷新一次版本号并重试**（每个请求最多一次），上游再次抬高门槛时可自愈。
 
+### 条件 3（补充）：版本还有**上限**，且闸门滞后于 npm（2026-10-15 实测）
+
+上游不是「越新越好」。2026-10-15 实测（`/inference/v1/`，其余条件全部满足，只改 UA）：
+
+| `User-Agent` | 结果 |
+|---|---|
+| `opencode/1.17.9` | 426 `UpgradeRequired`（低于下限） |
+| `opencode/1.18.0` … `1.18.33` | 200 |
+| **`opencode/1.18.34` … `1.19.1`** | **403 `FreeTierError`**（高于闸门认到的版本） |
+| `opencode/2.0.0` / `2.0.1` | 200（个别版本例外，规律未完全摸清） |
+| `opencode/99.99.99` | 403 |
+| UA 缺失 | 403 |
+
+关键：**当时 npm `latest` 已经是 1.19.0，而闸门只认到 1.18.33**（正好是本机 CLI 的版本）。
+本网关此前直接用 npm latest 当 UA 版本，于是 npm 一发布新版就全量 403。
+
+现在 `oc_version.go` 的处理：
+
+- 默认用**已验证**的 `pinnedOCVersion = "1.18.33"`，不再直接用 npm latest；
+- 收到 426（下限抬高）时才向 npm latest 升级；
+- 收到 **403 且 body 是 `FreeTierError`** 时，若当前版本比 pinned 新，**回退到 pinned 重试一次**
+  （与 426 的升级自愈对称，避免「升级后才发现太新」把自己卡死）。
+
+> 教训：凡是「跟随上游发布的版本号」，都要记住**上游闸门可能滞后**。默认值必须是
+> 「已被上游验证接受」的版本，而不是「上游最新发布的版本」。
+
 ### 条件 3：stream 必须为 true（2026-09-17 上线）
 
 | body | 结果 |
@@ -127,6 +171,23 @@ git-describe 形式（`1.18.31.r12.g88c6c7a`）上游会拒，`sanitizeOCVersion
 **与上述条件无关的量**（均已实测）：body 大小、system prompt 内容、工具 schema、
 `max_tokens`、`tool_choice`（`auto` / `required` / 指向不存在的工具都 200）、
 `x-opencode-project`、`x-opencode-request`、`Authorization`（`Bearer public` 与真实 key 均可）。
+
+**2026-10-15 补充：schema 不能为空。** 上游在此后要求每个工具的
+`parameters.properties` **非空**（名字对但 properties 为空 → 403）：
+
+| tools 内容 | 结果 |
+|---|---|
+| 官方名 + `parameters: {"type":"object","properties":{}}`（空） | **403** |
+| 官方名 + `properties: {"input":{"type":"string"}}`（最小非空） | 200 |
+| 11 个官方名（真实 schema）中的**任意一个** properties 清空 | 403 |
+| 官方名 + 改 description / 换成极简但非空的 schema | 200（**不要求逐字节一致**） |
+| 官方名 + 极简 schema + 90 个客户端工具 | 200（可与客户端工具共存） |
+
+因此 `placeholderToolNamed` 生成的空壳必须带非空 `properties`；本项目直接注入全部
+11 个官方工具名（约 1.6KB），一次覆盖「名字 + 数量 + 非空 schema」三项。
+
+> 注意：此前（09-18～10-13）**空 properties 是能过的**，所以「回调到旧形态」并不能规避
+> 后续收紧——闸门只会单向变严。
 
 ### 旁证：官方客户端自己也会踩条件 4
 

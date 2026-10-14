@@ -45,9 +45,25 @@ var officialOpenCodeToolNames = []string{
 	"todowrite", "webfetch", "websearch", "write",
 }
 
-// requiredOfficialTools 是上游免费层强制要求出现的官方工具名。
-// 实测 edit / write 不要求，但这四个缺任一个都是 403。
-var requiredOfficialTools = []string{"bash", "glob", "grep", "read"}
+// requiredOfficialTools 是上游免费层要求请求里必须出现的官方工具。
+//
+// 2026-10-15 上游再次收紧（此前只要求「名字出现」，实测 4 个空壳名即可）：
+// 现在要求**官方工具名 + 每个工具的 `parameters.properties` 非空**，且数量要够。
+// 实测（合规 session + UA + stream，只改 tools）：
+//
+//	官方前 4 个（真实 schema）              -> 403
+//	官方前 5 / 6 / 11 个（真实 schema）     -> 200
+//	11 个官方名 + 空 schema(properties:{}) -> 403   <- 旧实现的空壳正好踩中
+//	11 个官方名 + 最小非空 schema           -> 200
+//	官方名换成自定义（哪怕 schema 真实）    -> 403
+//	只取官方尾部 6 个                       -> 403   （必须是前几个名字）
+//
+// 因此这里直接注入**全部 11 个官方工具名**（最小但非空的 schema），一次覆盖
+// 「名字」「数量」两项要求；客户端自带工具时只补缺失的名字，不动它的工具。
+var requiredOfficialTools = []string{
+	"bash", "edit", "glob", "grep", "read", "skill", "task",
+	"todowrite", "webfetch", "websearch", "write",
+}
 
 func isOfficialToolName(name string) bool {
 	l := strings.ToLower(name)
@@ -59,13 +75,18 @@ func isOfficialToolName(name string) bool {
 	return false
 }
 
+// placeholderToolNamed 生成补齐用的最小工具定义。
+// parameters.properties 必须**非空**：上游 2026-10-15 起把空 properties 视为无效工具。
 func placeholderToolNamed(name string) map[string]any {
 	return map[string]any{
 		"type": "function",
 		"function": map[string]any{
 			"name":        name,
 			"description": "Internal gateway placeholder. Not available in this session.",
-			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+			"parameters": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"input": map[string]any{"type": "string"}},
+			},
 		},
 	}
 }

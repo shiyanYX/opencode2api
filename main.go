@@ -339,7 +339,9 @@ func initOCSession() {
 	if ocInitDone {
 		return
 	}
-	ocClientVer = fetchOCVersion()
+	// 用**已验证**的版本，而不是 npm latest：上游对版本双向校验（太旧 426、
+	// 太新 403），且闸门通常落后 npm 数天。见 oc_version.go。
+	ocClientVer = lastGoodOCVersion()
 	ocSessionID = newSessionID()
 	ocProjectID = randomHex(40)
 	slog.Info("opencode version", "version", ocClientVer)
@@ -2522,7 +2524,11 @@ func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth Ups
 	if useGoEndpoint {
 		upstreamURL = "https://opencode.ai/zen/go/v1/chat/completions"
 	} else {
-		upstreamURL = "https://opencode.ai/zen/v1/chat/completions"
+		// 2026-10-15 起用 /inference/v1/：官方客户端（1.18.33）已迁到该路径，
+		// 而旧的 /zen/v1/chat/completions 现在只放行「完全真客户端」的请求——
+		// 同一份请求（同头同体）在 /zen/v1/ 上 403 FreeTierError、在 /inference/v1/
+		// 上 200。两个路径目前都还在，但只有新路径接受网关形态。
+		upstreamURL = "https://opencode.ai/inference/v1/chat/completions"
 	}
 	req, err := http.NewRequest("POST", upstreamURL, bytes.NewReader(tryBody))
 	if err != nil {
@@ -2616,6 +2622,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	nodeSwitchPending := false
 	quotaSwitches := 0
 	versionRefreshed := false // 426 时只刷新一次版本，避免无谓循环
+	versionReverted := false  // 403(版本过新) 时只回退一次版本
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
 
@@ -2711,6 +2718,20 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			)
 			callLogEvent(ctx, "switch", nodeFp, "upgrade_required:refresh_version")
 			refreshOCSession()
+			continue
+		}
+
+		// 403 FreeTierError 且当前 UA 版本比已验证版本新：很可能只是上游闸门还没跟上
+		// npm 的新版本（实测 1.19.0 被 403、1.18.33 通过）。回退到已验证版本重试一次，
+		// 与上面的 426 升级自愈对称。见 oc_version.go。
+		if resp.StatusCode == http.StatusForbidden && !versionReverted &&
+			isFreeTierErrorBody(errBody) && revertToPinnedOCVersion() {
+			versionReverted = true
+			log.Warn("freetier_revert_version",
+				"model", modelID,
+				"to", pinnedOCVersion,
+			)
+			callLogEvent(ctx, "switch", nodeFp, "freetier:revert_version")
 			continue
 		}
 
@@ -2909,6 +2930,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	nodeSwitchPending := false
 	quotaSwitches := 0
 	versionRefreshed := false // 426 时只刷新一次版本，避免无谓循环
+	versionReverted := false  // 403(版本过新) 时只回退一次版本
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
 
@@ -2990,6 +3012,20 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			)
 			callLogEvent(ctx, "switch", nodeFp, "upgrade_required:refresh_version")
 			refreshOCSession()
+			continue
+		}
+
+		// 403 FreeTierError 且当前 UA 版本比已验证版本新：很可能只是上游闸门还没跟上
+		// npm 的新版本（实测 1.19.0 被 403、1.18.33 通过）。回退到已验证版本重试一次，
+		// 与上面的 426 升级自愈对称。见 oc_version.go。
+		if resp.StatusCode == http.StatusForbidden && !versionReverted &&
+			isFreeTierErrorBody(errBody) && revertToPinnedOCVersion() {
+			versionReverted = true
+			log.Warn("freetier_revert_version",
+				"model", modelID,
+				"to", pinnedOCVersion,
+			)
+			callLogEvent(ctx, "switch", nodeFp, "freetier:revert_version")
 			continue
 		}
 

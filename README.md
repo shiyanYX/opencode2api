@@ -130,23 +130,26 @@ rg 'promoted_reasoning=true' opencode2api.log
 ### 免费模型 403 `FreeTierError` / 426 `UpgradeRequired`
 
 免费模型被拒时，几乎都是**上游收紧了「客户端形态」校验**，而不是你的 key、账号或出口 IP 有问题
-——换 IP、换 key、降级版本都无效。本项目已对齐截至 2026-10-13 实测的五道条件：
+——换 IP、换 key、降级版本都无效。本项目已对齐截至 2026-10-15 实测的条件：
 
-1. `x-opencode-session` 的 12 位十六进制前缀必须是**官方 descending 编码**的时间分量
-   （`ses_` + 12 位小写 hex + 14 位 base62；注意官方对 session 用 descending、对 request 用 ascending，
-   方向错了同样 403）；
-2. `User-Agent` 必须是 `opencode/<semver>`，且**不低于 1.18.0**；
-3. 上游请求 `stream` 必须为 `true`（非流式客户端由网关本地聚合）；
-4. 上游 `tools` 必须含官方小写工具名 `bash`/`glob`/`grep`/`read`（网关自动规范化并回映射）；
-5. UA 必须存在且形如 `opencode/<semver>`。
+1. **推理路径必须是 `/inference/v1/`**：旧的 `/zen/v1/chat/completions` 现在只放行完全真客户端
+   （同一份请求换路径就从 403 变 200）；
+2. `x-opencode-session` 的 12 位十六进制前缀必须是**官方 descending 编码**的时间分量
+   （`ses_` + 12 位小写 hex + 14 位 base62；官方对 session 用 descending、对 request 用 ascending）；
+3. `User-Agent` 必须是 `opencode/<semver>`：**不低于 1.18.0，且不高于上游闸门认到的版本**
+   （闸门滞后于 npm，实测 npm latest 1.19.0 被 403、1.18.33 通过；网关默认用已验证版本）；
+4. 上游请求 `stream` 必须为 `true`（非流式客户端由网关本地聚合）；
+5. 上游 `tools` 必须含官方工具名，且每个工具的 `parameters.properties` **非空**
+   （网关自动规范化、补齐并回映射）。
 
-四种错误的区分：
+五种错误的区分：
 
 | 错误 | 含义 | 处理 |
 |---|---|---|
-| `403 FreeTierError` | 客户端形态被拒（session 值/方向、stream、tools、UA 缺失或非 semver） | 形态对齐，换节点无用 |
-| `426 UpgradeRequired` | UA 里的 opencode 版本低于上游门槛 | 检查日志 `version=` 与 npm 探测是否失效；网关收到 426 会自动刷新版本重试一次 |
+| `403 FreeTierError` | 客户端形态被拒（路径、session 值/方向、stream、tools 或 UA 版本/格式） | 形态对齐，换节点无用 |
+| `426 UpgradeRequired` | UA 里的 opencode 版本**低于**上游门槛 | 网关会自动刷新版本重试一次；仍失败看日志 `version=` |
 | `429 FreeUsageLimitError` | 免费额度按出口 IP 限流 | 换出口/节点才有意义 |
+| `429 server_error: Endpoint is unavailable` | 上游该路径/端点瞬时不可用 | 重试；持续出现说明路径已下线，检查是否需要换上游路径 |
 | `410 ModelDeprecated` | 该免费模型已下线 | 免费名册会轮换，换一个模型 |
 
 排查与「上游再次变更时如何重新定位」的完整流程见 [docs/UPSTREAM-COMPAT.md](docs/UPSTREAM-COMPAT.md)。
