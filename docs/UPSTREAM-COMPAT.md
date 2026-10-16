@@ -44,7 +44,7 @@ OpenCode Zen 的免费层**不按账号鉴权，而按「请求像不像官方 o
 > 诊断提示：**同一请求换路径就能定案**。遇到「形态全都对但就是 403」时，先试
 > `/inference/v1/chat/completions`。
 
-### 条件 1：session 必须用 descending 编码（2026-10-13 收紧）
+### 条件 2：session 必须用 descending 编码（2026-10-13 收紧）
 
 官方 CLI 的 ID 布局（`packages/opencode/src/id/id.ts`，`LENGTH = 26`）：
 
@@ -80,7 +80,7 @@ OpenCode Zen 的免费层**不按账号鉴权，而按「请求像不像官方 o
 > `((ms<<12) & 0xFFFFFFFFFFFF) >> 12`（ascending）或 `((~(ms<<12)) & 0xFFFFFFFFFFFF) >> 12`
 > （descending）。这一条在写测试时踩过坑。
 
-### 条件 1（历史）：形态从「任意 12 位小写 hex」收紧到「必须 descending」
+### 条件 2（历史）：形态从「任意 12 位小写 hex」收紧到「必须 descending」
 
 2026-09-17 首次上线时只校验形态，当时的实测结论（现已过时，保留作对照）：
 
@@ -95,7 +95,7 @@ OpenCode Zen 的免费层**不按账号鉴权，而按「请求像不像官方 o
 **只有 descending 能过**，直接导致免费模型全量 403。
 
 
-### 条件 2：UA 版本下限（2026-09-21 收紧到 1.18.0）
+### 条件 3：UA 版本下限（2026-09-21 收紧到 1.18.0）
 
 其余条件全部满足、只改 UA 时的实测（2026-09-21）：
 
@@ -146,7 +146,7 @@ git-describe 形式（`1.18.31.r12.g88c6c7a`）上游会拒，`sanitizeOCVersion
 > 教训：凡是「跟随上游发布的版本号」，都要记住**上游闸门可能滞后**。默认值必须是
 > 「已被上游验证接受」的版本，而不是「上游最新发布的版本」。
 
-### 条件 3：stream 必须为 true（2026-09-17 上线）
+### 条件 4：stream 必须为 true（2026-09-17 上线）
 
 | body | 结果 |
 |---|---|
@@ -154,14 +154,18 @@ git-describe 形式（`1.18.31.r12.g88c6c7a`）上游会拒，`sanitizeOCVersion
 | `stream: false` | 403 |
 | 无 `stream` 字段 | 403 |
 
-### 条件 4：必需工具名（2026-09-18 上线）
+### 条件 5：必需工具名（2026-09-18 上线）
+
+> ⚠️ 下表是 **2026-09-18 的结论，已过时**，保留作对照：当时只校验「名字」。
+> 2026-10-15 起还要 `parameters.properties` 非空**且数量要够**，四个官方名已经不够
+> （见下方补充小节与 `agent_shape.go` 的 `requiredOfficialTools` 注释）。
 
 | tools 内容 | 结果 |
 |---|---|
 | `bash, glob, grep, read`（仅名字，schema 全空） | 200 |
 | 上述四个，任意顺序 | 200 |
 | 缺 `glob` / `grep` / `bash` / `read` 任一个 | 403 |
-| **缺 `edit` 或 `write`** | **200**（必需集合只有四个） |
+| **缺 `edit` 或 `write`** | **200**（当时必需集合只有四个） |
 | 同名工具重复出现（如 `bash` 两次，或 `Bash` + `bash`） | **400**（不是 403） |
 | 工具名写成 `Bash` / `Read`（大小写不同） | 403（大小写敏感） |
 | 四个必需名 + 6 / 30 / 60 个自定义工具 | 200 |
@@ -172,7 +176,7 @@ git-describe 形式（`1.18.31.r12.g88c6c7a`）上游会拒，`sanitizeOCVersion
 `max_tokens`、`tool_choice`（`auto` / `required` / 指向不存在的工具都 200）、
 `x-opencode-project`、`x-opencode-request`、`Authorization`（`Bearer public` 与真实 key 均可）。
 
-**2026-10-15 补充：schema 不能为空。** 上游在此后要求每个工具的
+**2026-10-15 补充一：schema 不能为空。** 上游在此后要求每个工具的
 `parameters.properties` **非空**（名字对但 properties 为空 → 403）：
 
 | tools 内容 | 结果 |
@@ -183,31 +187,50 @@ git-describe 形式（`1.18.31.r12.g88c6c7a`）上游会拒，`sanitizeOCVersion
 | 官方名 + 改 description / 换成极简但非空的 schema | 200（**不要求逐字节一致**） |
 | 官方名 + 极简 schema + 90 个客户端工具 | 200（可与客户端工具共存） |
 
+**2026-10-15 补充二：数量也参与判定。** 合规 session + UA + stream，只改 `tools`：
+
+| tools 内容 | 结果 |
+|---|---|
+| 官方**前 4 个**（真实 schema） | **403** ← 与上面 09-18 的「四个必需名 → 200」相反 |
+| 官方前 5 / 6 / 11 个（真实 schema） | 200 |
+| 11 个官方名 + 空 schema（`properties:{}`） | 403 ← 旧实现的空壳正好踩中 |
+| 11 个官方名 + 最小非空 schema | 200 |
+| 官方名换成自定义名（哪怕 schema 真实） | 403 |
+| 只取官方**尾部 6 个** | 403（必须从开头那几个名字起） |
+
 因此 `placeholderToolNamed` 生成的空壳必须带非空 `properties`；本项目直接注入全部
-11 个官方工具名（约 1.6KB），一次覆盖「名字 + 数量 + 非空 schema」三项。
+11 个官方工具名（`bash, edit, glob, grep, read, skill, task, todowrite, webfetch,
+websearch, write`，约 1.6KB），一次覆盖「名字 + 数量 + 非空 schema」三项。
 
 > 注意：此前（09-18～10-13）**空 properties 是能过的**，所以「回调到旧形态」并不能规避
 > 后续收紧——闸门只会单向变严。
 
-### 旁证：官方客户端自己也会踩条件 4
+### 旁证：官方客户端自己也会踩条件 5
 
 官方 CLI 的 auto-compaction 请求是唯一以「单条超大 user 消息 + `tools: []` + 无 system prompt」
 发出的请求，因此官方客户端本身的压缩步骤也会被同一道闸门拒绝，而普通 build 请求正常
-（见 upstream issue 讨论）。这与条件 4 的实测结论一致。
+（见 upstream issue 讨论）。这与条件 5 的实测结论一致。
 
-### 端点路径：官方已改用 `/inference/v1/`（2026-10-13 观察）
+### 端点路径：官方已改用 `/inference/v1/`（2026-10-13 观察，2026-10-15 已切换）
+
+> ⚠️ **本节前半段的结论已被 2026-10-15 的收紧推翻**（见上文「条件 1：推理路径已迁到
+> `/inference/v1/`」）。当时 `/zen/v1/` 实测仍是 200、本网关未做切换；现在
+> `/zen/v1/chat/completions` 对网关形态**返回 403**，本网关**已切到**
+> `https://opencode.ai/inference/v1/chat/completions`（`main.go` 的
+> `buildOCRequestWithEndpoint`）。目录端点未动，仍走 `/zen/v1/models`。
 
 抓包发现官方 CLI 1.18.33 的推理请求已经打到 **`/inference/v1/chat/completions`** 与
-`/inference/v1/responses`，不再是 `/zen/v1/…`：
+`/inference/v1/responses`，不再是 `/zen/v1/…`。2026-10-13 当时的实测（**已过时，保留作对照**）：
 
 | 路径 | 用同一套合规请求实测 | 说明 |
 |---|---|---|
-| `/zen/v1/chat/completions` | 200 | 旧路径目前仍可用 |
+| `/zen/v1/chat/completions` | 200 | 旧路径**当时**仍可用 |
 | `/inference/v1/chat/completions` | 200 | 官方现用路径 |
 | `/zen/v1/models`、`/inference/v1/models`、`/zen/go/v1/models` | 200 | 目录端点都还在 |
 
-**路径不是本次 403 的原因**（两条路径都会因 session 方向错误而 403，改对方向后两条都 200），
-因此本网关仍走 `/zen/v1/`，未做切换。若将来旧路径被下线，这是第一个要改的地方。
+当时据此判断「路径不是本次 403 的原因」（两条路径都会因 session 方向错误而 403，
+改对方向后两条都 200），所以本网关仍走 `/zen/v1/`，未做切换。**这个判断后来被证伪**：
+上游在 2026-10-15 收紧了旧路径，条件 1 变成了硬性要求。
 
 ## 二、为什么工具名要「规范化 + 回映射」而不是「追加」
 
@@ -236,11 +259,12 @@ git-describe 形式（`1.18.31.r12.g88c6c7a`）上游会拒，`sanitizeOCVersion
 
 ## 三、上游再次变更时怎么重新定位
 
-上游在 2026-09-17～10-13 间连续上线了五道闸门（session 形态 → stream → 工具名 → 版本下限 →
-**session 方向**）。再次出现故障时按以下顺序做，**不要猜**：
+上游在 2026-09-17～10-15 间连续上线了**六道闸门**（session 形态 → stream → 工具名 →
+版本下限 → **session 方向** → **推理路径 + 工具数量/非空 schema + 版本上限**，其中最后一条
+是一次同时收紧三项）。再次出现故障时按以下顺序做，**不要猜**：
 
 1. **先看错误类型，别把所有拒绝当成同一件事**
-   - 403 `FreeTierError` = 客户端形态被拒（session 值 / stream / tools / UA 缺失或非 semver）；
+   - 403 `FreeTierError` = 客户端形态被拒（路径 / session 值 / stream / tools 或 UA 版本过高/非 semver）；
    - 426 `UpgradeRequired` = UA 里的版本号低于门槛（**先查日志里的 `version=`**，
      再看回退常量与 npm 探测是否失效）；
    - 429 `FreeUsageLimitError` = 按出口 IP 的额度限流，换 IP/换节点才有意义；
@@ -250,7 +274,7 @@ git-describe 形式（`1.18.31.r12.g88c6c7a`）上游会拒，`sanitizeOCVersion
    - 本地起一个 CONNECT 代理（自签 CA），给 CLI 设 `HTTPS_PROXY` 与 `NODE_EXTRA_CA_CERTS`，
      完整 dump 出 headers 与 body（含 `tools` 全文）。
    - **先比对路径**（官方已迁到 `/inference/v1/`）、再比对逐个 header 的**值与方向**
-     （session 与 request 的前缀方向不同，见条件 1）。
+     （session 与 request 的前缀方向不同，见条件 2）。
 3. **逐字段二分**
    - 以「真实请求 → 200」为基线，**每次只把一个字段换成我们的值**，逐个定位到失配项。
    - 顺序建议：路径 → `User-Agent`（含版本号）→ `x-opencode-session` → `body.stream` →
@@ -273,9 +297,9 @@ git-describe 形式（`1.18.31.r12.g88c6c7a`）上游会拒，`sanitizeOCVersion
 - **形态参数要连「方向/编码」一起对齐**，不能只对齐长度与字符集。session 从「任意 12 位小写
   hex」收紧到「必须是 descending 编码」时，形态完全没变、只有编码方向变了，靠正则匹配的检查
   一律失效——所以单测要断言**编码语义**（对前缀做位级比对），而不只是 `regexp.MatchString`。
-- 免费层额度本身仍按出口 IP 限流（`FreeUsageLimitError` 429），与本文的五道闸门是两回事：
+- 免费层额度本身仍按出口 IP 限流（`FreeUsageLimitError` 429），与本文的六道闸门是两回事：
   前者靠切换节点缓解，后者只能靠形态对齐。
-- 条件 3 使所有非流式请求在上游侧变为流式，本网关需本地聚合（内存占用按 `max_tokens` 有界，
+- 条件 4 使所有非流式请求在上游侧变为流式，本网关需本地聚合（内存占用按 `max_tokens` 有界，
   用量从末尾 chunk 取）。
 - 若上游进一步转向「只有真客户端能通」（例如对 TLS/连接层做绑定），本方案将失效；
   届时应评估把免费模型降级为 best-effort，或转向付费/其它渠道。
