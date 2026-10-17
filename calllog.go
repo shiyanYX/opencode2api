@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,6 +49,22 @@ type CallRecord struct {
 	TTFTMs           int64       `json:"ttft_ms,omitempty"`      // 首 token 延迟（仅流式）
 	OutputSpeed      float64     `json:"output_speed,omitempty"` // 输出速度 tokens/s（仅流式）
 	ErrMsg           string      `json:"err_msg,omitempty"`
+
+	// ↓ 本批新增两个字段。★ 这是【唯一不可逆】的改动：JSONL 格式变了。
+	//
+	// 硬约束一：**不改任何已有字段名**，只追加。老行照样能反序列化 —— encoding/json
+	// 对缺失键留零值，statscan.go 的手写解析器也只认它列出的键，其余忽略。
+	// 硬约束二：**读取处一律兜底**。前端用 (r.dial_ms||0)/(r.final_status||0)，
+	// 老日志（没有这两个字段）在面板上照常显示，不会渲染出 undefined。
+	//
+	// DialMS 建连耗时：来自 httptrace.GotConn 的墙钟值。复用连接时是毫秒级小值，
+	// 新建连时是真实建连耗时；0 表示未记录到（老数据 / 该路径没挂 trace）。
+	// 有了它才能在不新增探针的前提下观测【成功侧】建连分布 —— 之前只有失败侧尾部。
+	DialMS int64 `json:"dial_ms,omitempty"`
+	// FinalStatus 最终上游 HTTP 状态码。与 main.go 四处 log 的 "final_status"
+	// （main.go:2701/2871/2995/3162）同源同值 —— 那些值本来就已经算出来了，
+	// 这里只是把它落进 CallRecord，不再只进应用日志。
+	FinalStatus int `json:"final_status,omitempty"`
 }
 
 // HasIssue 是否有切换/异常事件（前端“只看失败/切换”过滤）。
@@ -1390,6 +1407,10 @@ func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionT
 	} else {
 		cr.rec.Status = "fail"
 	}
+	// final_status 与 main.go 里 log 的 "final_status" 同源：就是传给 finish 的这个
+	// 最终状态码。落盘是为了让面板/外部能直接看到「上游到底返回了什么」，
+	// 而不是只靠 status 的 ok/fail 二值去反推。
+	cr.rec.FinalStatus = status
 	if errMsg != "" && cr.rec.ErrMsg == "" {
 		cr.rec.ErrMsg = errMsg
 	}
@@ -1433,6 +1454,20 @@ func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionT
 	callLog.append(rec)
 }
 
+// observeDialMs 记录本次尝试的建连耗时（httptrace.GotConn 触发时调用）。
+// 只保留**第一次**成功的 GotConn：重试循环里每次尝试都可能建连，
+// 但 dial_ms 表达的是「这次请求建立连接花了多久」，取首个即最贴近直觉的值。
+func (cr *callRecorder) observeDialMs(ms int64) {
+	if cr == nil || ms < 0 {
+		return
+	}
+	cr.mu.Lock()
+	if cr.rec.DialMS == 0 {
+		cr.rec.DialMS = ms
+	}
+	cr.mu.Unlock()
+}
+
 // 便捷包级函数：ctx 无 recorder 时全部安全 no-op。
 
 func callLogEvent(ctx context.Context, typ, node, detail string) {
@@ -1445,6 +1480,30 @@ func callLogFirstToken(ctx context.Context) {
 
 func callLogFinish(ctx context.Context, status int, errMsg string, promptTok, completionTok, cacheCreation, cacheRead int64) {
 	callRecorderFrom(ctx).finish(status, errMsg, promptTok, completionTok, cacheCreation, cacheRead)
+}
+
+// withDialTrace 给上游请求挂一个 httptrace，把**建连耗时**（GotConn 时刻 − 请求开始）
+// 记进本次调用记录。没有它，成功侧的建连耗时永远观测不到 —— 面板与日志里只有
+// duration_ms（整请求）和失败侧的 connect_error，没有成功侧的 dial_ms。
+//
+// ★ 为什么用 GotConn 而不是自己 time.Since(client.Do)：
+// client.Do 返回时【响应头已经读完】，那不是建连；GotConn 才是 transport 真正
+// 拿到一条连接（新建或复用）的时刻。
+// ★ 复用连接时 GotConn 也触发，值是毫秒级小值 —— 这正好让面板能区分
+// 「新建连慢」与「命中复用」，正是上次定超时最缺的那个维度。
+// 复用同一 req 的 ctx 时不会互相覆盖（WithContext 返回新 Request）。
+func withDialTrace(ctx context.Context, req *http.Request) *http.Request {
+	cr := callRecorderFrom(ctx)
+	if cr == nil {
+		return req
+	}
+	start := time.Now()
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			cr.observeDialMs(time.Since(start).Milliseconds())
+		},
+	}
+	return req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 }
 
 // usageFromMap 从上游 usage（OpenAI 或 Claude 风格）提取 输入/输出/缓存创建/缓存读取 token。

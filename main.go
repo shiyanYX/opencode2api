@@ -2635,7 +2635,10 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 		nodeSwitchPending = false
 		attemptStart := time.Now()
-		resp, err := client.Do(up)
+		// 挂 httptrace 记录建连耗时（dial_ms）。不改动任何既有字段，只让本次连接
+		// 的真实建连成本落进调用记录 —— 此前成功侧完全没有这个维度，只有失败侧
+		// 的 connect_error，能据此观测的建连分布全是失败尾部。
+		resp, err := client.Do(withDialTrace(ctx, up))
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
@@ -2943,7 +2946,8 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 		nodeSwitchPending = false
 		attemptStart := time.Now()
-		resp, err := client.Do(up)
+		// 同上：流式路径也挂 dial trace，否则 dial_ms 只覆盖非流式一半流量。
+		resp, err := client.Do(withDialTrace(ctx, up))
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
