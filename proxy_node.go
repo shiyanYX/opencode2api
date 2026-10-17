@@ -223,6 +223,37 @@ const (
 	probeTimeout          = 20 * time.Second
 )
 
+// defaultDialTimeout 节点池【建连】阶段的上限。
+//
+// ★ 为什么要设：节点池 Transport 的 DialContext 原本是裸闭包，没有任何建连超时，
+//
+//	建连失败只能等 TCP 层自己超时 —— 实测失败侧有一个 135.2 秒的尖峰
+//	（Linux SYN 重传耗尽：1+2+4+8+16+32+64 ≈ 127s + 开销）。再乘上重试预算
+//	（loopBudget = maxAttempts 3 + maxQuotaSwitches 5 = 8 次尝试），
+//	含 connect_error 的整请求实测 p50=137 秒、max=1,221 秒。
+//
+// ★ 为什么是 60 秒（依据是成功侧的实测分布，不是拍脑袋）：
+//
+//	成功侧建连耗时（取自节点池探针记录的 latency_ms，n=141）：
+//	  p50=11.7s · p90=15.4s · p99=18.0s · max=18.8s，>20s 的 0 个。
+//	取值 → 误杀率（按成功请求的 connect_ok−请求ts 上界口径，n=171,823）：
+//	  10s → 58.2%   ★ 绝对不能用（会把整个快峰全杀）
+//	  15s → 13.5%   ★ 不能用
+//	  30s → 0.941%
+//	  60s → 0.234%  ← 采用
+//	60s 对实测 max(18.8s) 有 3.2 倍余量，同时把 135s 的病态尾部砍掉一半以上。
+//	★ 成功侧是【强双峰】（58 个在 1~3s、82 个在 10~19s，中间 2.6~9.8s 完全空白），
+//	所以这个值是按「池子里最慢的那个来源」定的，不是按中位数。
+//
+// ★ 只限建连这一个阶段：下方 Transport 的 ResponseHeaderTimeout(60s) 保持不变 ——
+//
+//	那是「已建连、等响应头」的另一个阶段，两者互不覆盖。
+const defaultDialTimeout = 60 * time.Second
+
+// dialTimeout 实际生效的建连超时。做成 var 而非直接用 const，是为了让测试能临时
+// 下调到秒级验证机制（真等 60 秒的测试没有实用价值）；生产取值恒为 defaultDialTimeout。
+var dialTimeout = defaultDialTimeout
+
 var proxyPool = newProxyPool("proxy_state.json")
 
 func newProxyPool(statePath string) *nodePool {
@@ -724,9 +755,16 @@ func (p *nodePool) getClient(fp string) *http.Client {
 	}
 	client := &http.Client{
 		Transport: &http.Transport{
+			// ★ 建连超时必须在这里加，不能套 net.Dialer{Timeout:}：
+			// dialNode 走的是内嵌 mihomo 内核（mihomo.go:196 mihomoDial），
+			// 根本没有 net.Dialer 可套。唯一能约束它的就是 ctx，
+			// 所以用 context.WithTimeout 把 ctx 截止时间传下去。
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return dialNode(ctx, n, network, addr)
+				dctx, cancel := context.WithTimeout(ctx, dialTimeout)
+				defer cancel()
+				return dialNode(dctx, n, network, addr)
 			},
+			// ↓ 响应头阶段的上限，【不在本次改动范围】，保持 60s。
 			ResponseHeaderTimeout: 60 * time.Second,
 			MaxIdleConns:          100,
 			MaxIdleConnsPerHost:   20,
