@@ -3750,10 +3750,18 @@ func adminModelsHandler(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// 附带免费模型列表（从文档缓存），供前端生成完整自动映射
+	// 附带免费模型列表（从文档缓存），供前端生成完整自动映射。
+	// ★ 必须与本次返回的目录（seen）求交：文档源是「上游意图」，目录才是
+	//   「上游事实」，两者刷新节奏与兜底都不同，文档里会残留目录已下线的模型
+	//   （2026-10-15 实测 15 条 free_models vs 目录内只有 10 条）。前端
+	//   「模型映射」直接展开 free_models 生成自动映射行、不做求交，不过滤就会
+	//   多出永远不生效的映射行——用户看到映射列表比模型列表还长。
 	freeModelDocsMu.RLock()
 	freeIDs := make([]string, 0, len(freeModelDocsCache))
 	for id := range freeModelDocsCache {
+		if _, inCatalog := seen[id]; !inCatalog {
+			continue
+		}
 		freeIDs = append(freeIDs, id)
 	}
 	freeModelDocsMu.RUnlock()
