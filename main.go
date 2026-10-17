@@ -2679,6 +2679,9 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
+			// 该出口真的拿到 2xx ⇒ 喂给熔断闸门的恢复滞回（连续 2 次 + 间隔 ≥60s）。
+			// 这是本版解闩权的唯一来源：不再靠节点池状态推断该出口是否恢复。
+			quotaHaltGuard.observeSuccess(egResult.EgressKey())
 			b, readErr := readAllMarkingFirstData(resp.Body, ctx)
 			resp.Body.Close()
 			if readErr != nil {
@@ -2819,17 +2822,22 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 
 		// 出口已回退直连、上游仍 429：剩余重试都打在同一个 IP 上，只会空转。
-		// 立即停止重试并进入熔断，等节点池恢复可用节点（见 quota_halt.go）。
+		// 立即停止重试并对该【具体出口】进入熔断（见 quota_halt.go）。
 		if egResult.Direct && resp.StatusCode == http.StatusTooManyRequests && auth.tier() == TierFree {
-			if quotaHaltGuard.halt("direct_429", errBody) {
+			// 按出口分桶：桶身份来自 EgressResult（NodeFP/Direct），不是全局一个 bool。
+			// 同时记一次失败 ⇒ 该出口的恢复滞回计数清零。
+			egressKey := egResult.EgressKey()
+			quotaHaltGuard.observeFailure(egressKey)
+			if quotaHaltGuard.halt(egressKey, "direct_429", errBody) {
 				log.Warn("quota_halt_entered",
+					"egress", egressKey,
 					"try_model", modelID,
 					"surface", surface,
 					"status", resp.StatusCode,
 					"attempt_index", attempt,
 					"node_pool_size", proxyPool.nodeCount(),
 				)
-				callLogEvent(ctx, "quota_halt", nodeFp, "enter: 直连出口 429，停止重试等待节点恢复")
+				callLogEvent(ctx, "quota_halt", nodeFp, "enter: 直连出口 429，停止重试等待出口恢复")
 			}
 			lastBody = errBody
 			lastStatus = resp.StatusCode
@@ -2986,6 +2994,8 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
+			// 同上：流式路径也必须喂恢复滞回，否则只有一半流量能积累恢复证据。
+			quotaHaltGuard.observeSuccess(egResult.EgressKey())
 			log.Info("upstream_attempt",
 				"try_model", modelID,
 				"surface", surface,
@@ -3113,17 +3123,22 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 
 		// 出口已回退直连、上游仍 429：剩余重试都打在同一个 IP 上，只会空转。
-		// 立即停止重试并进入熔断，等节点池恢复可用节点（见 quota_halt.go）。
+		// 立即停止重试并对该【具体出口】进入熔断（见 quota_halt.go）。
 		if egResult.Direct && resp.StatusCode == http.StatusTooManyRequests && auth.tier() == TierFree {
-			if quotaHaltGuard.halt("direct_429", errBody) {
+			// 按出口分桶：桶身份来自 EgressResult（NodeFP/Direct），不是全局一个 bool。
+			// 同时记一次失败 ⇒ 该出口的恢复滞回计数清零。
+			egressKey := egResult.EgressKey()
+			quotaHaltGuard.observeFailure(egressKey)
+			if quotaHaltGuard.halt(egressKey, "direct_429", errBody) {
 				log.Warn("quota_halt_entered",
+					"egress", egressKey,
 					"try_model", modelID,
 					"surface", surface,
 					"status", resp.StatusCode,
 					"attempt_index", attempt,
 					"node_pool_size", proxyPool.nodeCount(),
 				)
-				callLogEvent(ctx, "quota_halt", nodeFp, "enter: 直连出口 429，停止重试等待节点恢复")
+				callLogEvent(ctx, "quota_halt", nodeFp, "enter: 直连出口 429，停止重试等待出口恢复")
 			}
 			lastBody = errBody
 			lastStatus = resp.StatusCode
