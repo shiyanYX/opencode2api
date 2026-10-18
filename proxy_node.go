@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -94,6 +95,10 @@ type ProxyNode struct {
 	// LatencyMs 最近一次健康探测延迟（毫秒）；0/未探测表示尚无结果。
 	LatencyMs   int64     `json:"-"`
 	LastProbeAt time.Time `json:"-"`
+	// ProbeFailStreak 连续探测失败次数（运行时态，不持久化）。
+	// 只有连续 probeFailStreakThreshold 次失败才判 dead —— 一次网络抖动不该丢掉一个 IP
+	// （2026-10-19 生产：一轮抖动让 86 个节点同时被判死、70 分钟不恢复）。
+	ProbeFailStreak int `json:"-"`
 	// GateState 推理闸门状态（unknown | ok | rejected），归 T3 所有。
 	// T1 的 confirm-then-mark 只写 "rejected"：该出口被上游按 IP 拒绝。
 	// 当 gateReviveRequiresProbe=true 时，rejected 节点不接受「冷却到期」的时间复活，
@@ -489,6 +494,7 @@ func (p *nodePool) markLocked(fp string, st NodeState, reason, gate string) bool
 	n.MarkedAt = now
 	n.LastError = reason
 	n.GateState = gate
+	n.ProbeFailStreak = 0 // 显式状态变更后重新计数，避免跨状态累积
 	switch st {
 	case NodeExhausted:
 		n.CooldownUntil = now.Add(p.effectiveExhaustedCooldown())
@@ -602,6 +608,36 @@ func (p *nodePool) markFreeTierRejected(fp string) bool {
 
 // ======================= 健康检查 =======================
 
+const (
+	// probeFailStreakThreshold 连续探测失败多少次才判 dead。
+	// =2：一次网络抖动/上游偶尔的 TLS 失败不判死；两次（相隔一个周期）说明节点确实坏。
+	probeFailStreakThreshold = 2
+	// probeMaxConcurrent 单轮探测的最大并发数。生产曾出现「86 个 dead ⇒ 每分钟 86 路
+	// 并发探测」的自压制循环，必须限并发。
+	probeMaxConcurrent = 8
+)
+
+// testProbeNode 测试钩子：非 nil 时替代真实探测（与 testNodeClient 同一风格）。
+var testProbeNode func(ctx context.Context, n *ProxyNode, probeURL string) (int64, error)
+
+// blipStreak 连续多少轮探测被判为「全局抖动」。
+// 抖动轮次一节点都不判死，缺了它就会静默掩盖「本机网络长期异常」——所以要有升级信号。
+var blipStreak atomic.Int64
+
+// probeRoundLooksLikeGlobalBlip 判断一整轮探测的失败是否像「我们自己的网络问题」。
+// 依据（2026-10-19 生产）：一次约 2 分钟的出口抖动让 90/218 个节点在同一轮超时。
+// 判据：一轮里失败 >=20 个，或（该轮 >=8 个且失败占 >=75%）。
+// 命中时整轮失败不予采信 —— 不判死、也不累积 streak。
+func probeRoundLooksLikeGlobalBlip(total, failed int) bool {
+	if total < 8 || failed <= 0 {
+		return false
+	}
+	if failed >= 20 {
+		return true
+	}
+	return failed*4 >= total*3
+}
+
 // healthIntervalLocked 返回当前探测周期（调用方持锁）。
 // probeInterval 为负数表示禁用健康检查；0 表示使用默认 15min。
 func (p *nodePool) healthIntervalLocked() time.Duration {
@@ -637,6 +673,9 @@ func (p *nodePool) healthInterval() time.Duration {
 // 当探测目标为 opencode.ai 时，自动注入 Authorization 与 x-opencode-session 头，
 // 模拟真实请求以验证代理对上游域名的可达性（而非仅验证通用互联网连通性）。
 func (p *nodePool) probeNode(ctx context.Context, n *ProxyNode, probeURL string) (int64, error) {
+	if testProbeNode != nil {
+		return testProbeNode(ctx, n, probeURL)
+	}
 	client := p.getClient(n.Fingerprint)
 	if client == nil {
 		return 0, errors.New("node client unavailable")
@@ -667,6 +706,19 @@ func (p *nodePool) probeNode(ctx context.Context, n *ProxyNode, probeURL string)
 
 // probeFilter 限定一次探测的节点子集。
 type probeFilter int
+
+// String 让日志能区分「是哪一种轮次触发了闸门」。
+func (f probeFilter) String() string {
+	switch f {
+	case probeAll:
+		return "all"
+	case probeAvailable:
+		return "available"
+	case probeDead:
+		return "dead"
+	}
+	return "unknown"
+}
 
 const (
 	probeAll       probeFilter = iota // 全量（含 exhausted）：面板手动"测速"使用
@@ -711,8 +763,12 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 		return 0
 	}
 	var (
-		wg     sync.WaitGroup
-		probed int
+		wg       sync.WaitGroup
+		probed   int
+		mu       sync.Mutex
+		failedFP []string
+		failWhy  = map[string]string{}
+		sem      = make(chan struct{}, probeMaxConcurrent)
 	)
 	for _, n := range nodes {
 		switch filter {
@@ -727,13 +783,18 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 		}
 		probed++
 		wg.Add(1)
+		sem <- struct{}{}
 		go func(n *ProxyNode) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
 			ms, err := p.probeNode(pctx, n, probeURL)
 			if err != nil {
-				p.markProbeDead(n.Fingerprint, "probe: "+err.Error())
+				mu.Lock()
+				failedFP = append(failedFP, n.Fingerprint)
+				failWhy[n.Fingerprint] = err.Error()
+				mu.Unlock()
 				// 降 Debug：markProbeDead 已按「首次 / 重复 / exhausted」三级分级
 				// （Info / Debug / Debug，见 :650 / :634 / :628），重复失败的节流
 				// 已在它内部完成。这条无状态转移信息的重复记录不应再以 Warn 刷屏
@@ -748,6 +809,29 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 		}(n)
 	}
 	wg.Wait()
+
+	// 全局抖动闸【只对可用节点巡检轮次生效】。
+	// dead 复探轮天然大面积失败（它们本来就是 dead），若参与判定会让 WARN 每分钟一条、
+	// ERROR 每 10 分钟一条且永久常亮 —— 恰好反转了这条告警本该提供的信号（R2 复审 D1）。
+	guarded := filter == probeAvailable
+	if guarded && probeRoundLooksLikeGlobalBlip(probed, len(failedFP)) {
+		n := blipStreak.Add(1)
+		slog.Warn("probe_round_global_blip",
+			"filter", filter.String(),
+			"probed", probed, "failed", len(failedFP), "consecutive", n,
+			"action", "整轮失败不予采信（疑似本机出口/网络问题）")
+		if n == 3 || n%10 == 0 {
+			slog.Error("probe_round_global_blip_persistent", "consecutive", n,
+				"hint", "连续多轮抖动：节点不会被判死，但本机网络/出口可能长期异常，需人工检查")
+		}
+		return probed
+	}
+	if guarded {
+		blipStreak.Store(0)
+	}
+	for _, fp := range failedFP {
+		p.markProbeDead(fp, "probe: "+failWhy[fp])
+	}
 	return probed
 }
 
@@ -774,6 +858,16 @@ func (p *nodePool) markProbeDead(fp, reason string) {
 			"node", n.Name, "fp", fp, "error", reason)
 		return
 	}
+	// 连续失败守卫：一次失败只累计 streak，不判死 —— 一次网络抖动不该丢掉一个出口 IP
+	// （2026-10-19 生产：一轮抖动让 86 个节点同时被判死，其中至少一个 TCP 实际可达）。
+	n.ProbeFailStreak++
+	if n.ProbeFailStreak < probeFailStreakThreshold {
+		slog.Info("node health probe failed (streak, not dead yet)",
+			"node", n.Name, "fp", fp, "streak", n.ProbeFailStreak,
+			"threshold", probeFailStreakThreshold, "error", reason)
+		return
+	}
+	n.ProbeFailStreak = 0
 	n.State = NodeDead
 	n.MarkedAt = now
 	n.LastError = reason
@@ -803,6 +897,7 @@ func (p *nodePool) recordProbeSuccess(fp string, ms int64) {
 	}
 	n.LatencyMs = ms
 	n.LastProbeAt = time.Now()
+	n.ProbeFailStreak = 0 // 探测成功即清零，避免历史抖动累积成误判
 	if n.State == NodeDead {
 		n.State = NodeAvailable
 		n.MarkedAt = time.Time{}
