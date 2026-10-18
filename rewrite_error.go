@@ -29,7 +29,18 @@ func rewriteUpstreamError(body []byte) []byte {
 	// 里包含 "free tier" 子串，若继续改写会被误报成模型下线，掩盖真实原因，
 	// 因此这里直接透传原始错误，保留可诊断性。
 	if strings.EqualFold(errType, "FreeTierError") {
-		return body
+		// ★ 这里不是"原样透传"而是"【保留原样再补一句可读的说明】"。
+		//
+		// 为什么要补：403 会被绝大多数客户端解读成「你的 API key 不对」，
+		// 于是用户去换 key —— 而 key 是对的，被拒的是【客户端形态】（上游要求
+		// 免费层只能从合规客户端发起）。原样透传保留可诊断性，但没解决误读。
+		//
+		// ★ 为什么不改成 5xx：状态码是下游重试策略的开关，改成 503 会让客户端
+		//   把它当瞬时故障疯狂重试（403 本来是"不重试"的档位），反而放大上游压力；
+		//   而 FreeTierError 在调用方看来确实【不该重试】—— 重试也换不来形态合规。
+		//   所以：保留 403 + 保留 error.type（让本函数的透传判定继续成立，
+		//   不会被下游的"模型已下线"启发式误改写）+ 只增强 message。
+		return annotateFreeTierError(obj, body)
 	}
 
 	msgL := strings.ToLower(msg)
@@ -103,4 +114,48 @@ func extractErrorFields(obj map[string]any) (errType, msg string) {
 		}
 	}
 	return errType, msg
+}
+
+// annotateFreeTierError 给 FreeTierError 补一段说明，让下游看得出
+// 「这是上游对客户端形态的要求，不是你的 key 有问题」。
+// ★ 只增强 message 并加一个无歧义的标记字段，**不改状态码、不改 error.type**。
+// 解析失败时原样返回 —— 绝不因为补充说明而破坏原有的可诊断性。
+func annotateFreeTierError(obj map[string]any, body []byte) []byte {
+	const explain = " This is an upstream client-compliance requirement, not an invalid API key: " +
+		"OpenCode's free tier is only available to clients it recognises. " +
+		"Your key is valid. Retrying or switching nodes will not help."
+	em, _ := obj["error"].(map[string]any)
+	if em == nil {
+		return body // 结构不认识，宁可不动
+	}
+	msg, _ := em["message"].(string)
+	lower := msg
+	if lower == "" {
+		return body
+	}
+	// 幂等：已补过就不要再补（同一个 body 可能被 rewrite 多次）
+	if len(lower) > 140 && containsFold(lower, "client-compliance requirement") {
+		return body
+	}
+	em["message"] = msg + explain
+	em["upstream_compliance_required"] = true
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// containsFold 是大小写无关的子串判断（避免为此再引 strings 的额外用法差异）。
+func containsFold(s, sub string) bool {
+	n, m := len(s), len(sub)
+	if m == 0 {
+		return true
+	}
+	for i := 0; i+m <= n; i++ {
+		if strings.EqualFold(s[i:i+m], sub) {
+			return true
+		}
+	}
+	return false
 }

@@ -38,6 +38,26 @@ type EgressResult struct {
 	eg  *EgressClient // 反向引用
 }
 
+// EgressKeyDirect 是「真·直连出口」在按出口分桶时的桶键。
+// 上游按出口 IP 分桶限流，所以桶的身份必须能唯一指出「哪个出口」，
+// 否则一个出口被限流会把另一个出口一起挡掉。
+const EgressKeyDirect = "direct"
+
+// EgressKey 返回该出口的分桶键：节点出口用其指纹，直连用固定键。
+//
+// ★ 「出口身份」用哪个字段：EgressResult.NodeFP。节点池选出来的出口一律带
+//
+//	指纹；NodeFP == "" 且 Direct == true 才是真·直连出口。
+//	（NodeFP 为空但 Direct 为 false 是静态 socks5 —— 它也有自己的 IP，
+//	按理也该单独一个桶，但当前熔断只在 Direct 时触发，先与直连合并，
+//	避免在没有实例的场景下造出永远不会被解除的假桶。）
+func (r EgressResult) EgressKey() string {
+	if r.Direct || r.NodeFP == "" {
+		return EgressKeyDirect
+	}
+	return "node:" + r.NodeFP
+}
+
 // Invalidate 解除 sticky 绑定，下次同一会话换出口。
 // 节点池或直连路径下为 no-op。
 func (r *EgressResult) Invalidate() {

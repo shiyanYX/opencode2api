@@ -715,6 +715,7 @@ input,select,textarea{font-family:inherit;color:inherit}
             <span>共 <b id="clTotal">0</b> 条</span>
             <span class="c-ok">【成功】<b id="clOk">0</b></span>
             <span class="c-fail">【失败】<b id="clFail">0</b></span>
+            <span class="c-ok">真实成功率 <b id="clRealRate">—</b></span>
             <span class="c-issue">异常/切换 <b id="clIssue">0</b></span>
             <span style="margin-left:auto;display:flex;gap:8px">
               <button class="btn btn-ghost btn-sm" onclick="clearCallLog()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg> 清空</button>
@@ -1996,6 +1997,12 @@ function clRefreshView(){
   q('#clOk').textContent=ok;
   q('#clFail').textContent=callLogData.length-ok;
   q('#clIssue').textContent=issue;
+  // 真实成功率：分母是**全部**记录（含走直连、没经过节点的），分子是 status==='ok'。
+  // 这个数之前就算好了（上面 ok / callLogData.length），只是没显示——面板只给了
+  // 绝对值，用户只能自己拿 100×成功/总数去算，而节点表里又看不到那批直连记录，
+  // 于是 94.60% 这种「只算走节点」的比率就成了唯一可见的口径。
+  const totalAll=callLogData.length;
+  q('#clRealRate').textContent=totalAll?(ok/totalAll*100).toFixed(2)+'%':'—';
   const dates=new Set(callLogData.map(r=>(r.ts||'').slice(0,10)).filter(Boolean));
   const sel=q('#clDate'),cur=sel.value;
   sel.innerHTML='<option value="">全部日期</option>'+[...dates].sort().reverse().map(d=>'<option'+(d===cur?' selected':'')+'>'+d+'</option>').join('');
@@ -2055,16 +2062,34 @@ function clRenderHour(visible){
 function clRenderNode(visible){
   const el=q('#clNode');
   const m=new Map();
+  // 「全部」行的累加器：分母包含直连请求。★ 这是修掉「面板说漂亮话」的关键一行——
+  // 原来表格每一行都是「最终出口节点」，直连记录被塞进一个叫「未知」的桶，
+  // 而那一桶恰好是最差的一批（实测成功率 57.9%，占全量 35.49%），
+  // 于是用户看到的每一行都好看，加总却对不上真实成功率。
+  const all={node:'全部',req:0,ok:0,totalMs:0,issue:0,isTotal:true};
   for(const r of visible){
     const last=r.nodes&&r.nodes.length?r.nodes.length-1:-1;
-    const node=last>=0?((r.node_names&&r.node_names[last])||r.nodes[last]):'未知';
+    // 走直连（没有节点）的记录：按事件类型细分成三类，不再糊成一个「未知」。
+    // 判定顺序即优先级；三类互斥，且必须覆盖全部直连记录（否则会多出第四类残留）。
+    let node;
+    if(last<0){
+      const evs=r.events||[];
+      const has=k=>evs.some(e=>e&&e.type===k);
+      const blocked=evs.some(e=>e&&e.type==='quota_halt'&&(e.detail||'').includes('blocked'));
+      node=blocked?'直连·闸门拒绝':has('connect_error')?'直连·连不上':'直连·其他';
+    }else{
+      node=(r.node_names&&r.node_names[last])||r.nodes[last];
+    }
     let s=m.get(node);if(!s){s={node,req:0,ok:0,totalMs:0,issue:0};m.set(node,s)}
-    s.req++;if(r.status==='ok')s.ok++;s.totalMs+=r.duration_ms||0;s.issue+=(r.events||[]).filter(e=>CL_ISSUE_TYPES.includes(e.type)).length;
+    const issueN=(r.events||[]).filter(e=>CL_ISSUE_TYPES.includes(e.type)).length;
+    s.req++;if(r.status==='ok')s.ok++;s.totalMs+=r.duration_ms||0;s.issue+=issueN;
+    all.req++;if(r.status==='ok')all.ok++;all.totalMs+=r.duration_ms||0;all.issue+=issueN;
   }
-  const rows=[...m.values()].sort((a,b)=>b.req-a.req||b.issue-a.issue);
+  // 「全部」置顶，其余仍按请求数降序。
+  const rows=[all].concat([...m.values()].sort((a,b)=>b.req-a.req||b.issue-a.issue));
   if(!rows.length){el.innerHTML='<div class="cl-empty">暂无日志数据</div>';return}
-  el.innerHTML='<div style="font-size:13px;font-weight:600;margin-bottom:4px">节点分析</div><div style="font-size:12px;color:var(--text-ter);margin-bottom:8px">按最终出口节点聚合请求量、成功率与稳定性</div>'+
-    '<table class="cl-tbl"><thead><tr><th>节点</th><th class="num">请求数</th><th class="num">成功率</th><th class="num">平均耗时</th><th class="num">异常/切换</th></tr></thead><tbody>'+rows.map(n=>{const rate=n.req?n.ok/n.req:0;const cls=rate>=0.9?'':rate>=0.5?'warn':'bad';return '<tr><td style="font-family:var(--mono);font-size:12px">'+esc(n.node)+'<span class="ratebar"><i class="'+cls+'" style="width:'+(rate*100)+'%"></i></span></td><td class="num">'+n.req+'</td><td class="num">'+Math.round(rate*100)+'%</td><td class="num">'+clFmtDur(Math.round(n.totalMs/n.req))+'</td><td class="num">'+n.issue+'</td></tr>'}).join('')+'</tbody></table>';
+  el.innerHTML='<div style="font-size:13px;font-weight:600;margin-bottom:4px">节点分析</div><div style="font-size:12px;color:var(--text-ter);margin-bottom:8px">按最终出口节点聚合；「直连·*」为未经过节点直接出站的请求，按失败形态细分；「全部」行的分母含直连</div>'+
+    '<table class="cl-tbl"><thead><tr><th>节点</th><th class="num">请求数</th><th class="num">成功率</th><th class="num">平均耗时</th><th class="num">异常/切换</th></tr></thead><tbody>'+rows.map(n=>{const rate=n.req?n.ok/n.req:0;const cls=rate>=0.9?'':rate>=0.5?'warn':'bad';return '<tr'+(n.isTotal?' style="font-weight:600"':'')+'><td style="font-family:var(--mono);font-size:12px">'+esc(n.node)+'<span class="ratebar"><i class="'+cls+'" style="width:'+(rate*100)+'%"></i></span></td><td class="num">'+n.req+'</td><td class="num">'+(rate*100).toFixed(2)+'%</td><td class="num">'+clFmtDur(Math.round(n.totalMs/n.req))+'</td><td class="num">'+n.issue+'</td></tr>'}).join('')+'</tbody></table>';
 }
 function clearCallLog(){
   if(!confirm('确定清空全部调用日志？\n\n该操作不可恢复：调用日志文件会被删除，同时 Token 累计统计也会一并清零（两者现在是同一份数据的两个视图）。'))return;

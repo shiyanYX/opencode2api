@@ -288,6 +288,15 @@ var (
 	requestCount atomic.Int64
 )
 
+// ocClientVersion 读取当前上游 UA 版本（持锁，收窄既有的无锁读）。
+// ⚠️ 已持有 ocInitMu 的函数（initOCSession / refreshOCSession /
+// revertToPinnedOCVersion）内部【不得】调用它，否则自死锁——它们直接读 ocClientVer。
+func ocClientVersion() string {
+	ocInitMu.Lock()
+	defer ocInitMu.Unlock()
+	return ocClientVer
+}
+
 func fetchOCVersion() string {
 	return probeOCVersion(mgmtClient)
 }
@@ -351,20 +360,25 @@ func initOCSession() {
 }
 
 func refreshOCSession() {
-	ocInitMu.Lock()
-	defer ocInitMu.Unlock()
 	if noSessionRefresh { // 测试桩：只本地轮换，不访问网络
+		ocInitMu.Lock()
 		ocSessionID = newSessionID()
 		ocProjectID = randomHex(40)
 		ocInitDone = false
+		ocInitMu.Unlock()
 		return
 	}
-	ocClientVer = fetchOCVersionDirect()
+	// ★ 网络探测必须在临界区【外】：fetchOCVersionDirect() 最长要等 5s 超时，
+	// 若持 ocInitMu 做它，会阻塞每一个读版本的请求（ocClientVersion() 也要这把锁）。
+	// 这是 T7-I6 指出的新增锁点风险（顺带缓解了请求入口的既有停顿）。
+	ver := fetchOCVersionDirect()
+	ocInitMu.Lock()
+	ocClientVer = ver
 	ocSessionID = newSessionID()
 	ocProjectID = randomHex(40)
-	slog.Info("session refreshed", "version", ocClientVer, "session_id", ocSessionID)
-	// 恢复未初始化状态，后续 initOCSession 重新初始化
 	ocInitDone = false
+	slog.Info("session refreshed", "version", ocClientVer, "session_id", ocSessionID)
+	ocInitMu.Unlock()
 }
 
 // ======================== 模型 ========================
@@ -2511,10 +2525,10 @@ func modelExistsInCaches(modelID string) bool {
 }
 
 func buildOCRequest(modelID string, bodyMap map[string]any, auth UpstreamAuth, nodeFP string) (*http.Request, error) {
-	return buildOCRequestWithEndpoint(modelID, bodyMap, auth, auth.shouldUseGoEndpoint(modelID), nodeFP)
+	return buildOCRequestWithEndpoint(modelID, bodyMap, auth, auth.shouldUseGoEndpoint(modelID), nodeFP, ocClientVersion())
 }
 
-func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth UpstreamAuth, useGoEndpoint bool, nodeFP string) (*http.Request, error) {
+func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth UpstreamAuth, useGoEndpoint bool, nodeFP, ver string) (*http.Request, error) {
 	bodyMap["model"] = modelID
 	tryBody, err := json.Marshal(bodyMap)
 	if err != nil {
@@ -2536,7 +2550,9 @@ func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth Ups
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", auth.authorizationHeader())
-	req.Header.Set("User-Agent", fmt.Sprintf("opencode/%s", ocClientVer))
+	// 版本由调用方传入（本请求自己携带），不再在函数内二次读全局：
+	// 否则「attemptVer == 实际发出的版本」不是不变量，C1 的归因守卫会失效。
+	req.Header.Set("User-Agent", fmt.Sprintf("opencode/%s", ver))
 	req.Header.Set("x-opencode-client", "cli")
 	req.Header.Set("x-opencode-project", ocProjectID)
 	req.Header.Set("x-opencode-session", getOrCreateSessionByNode(nodeFP))
@@ -2623,19 +2639,37 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	quotaSwitches := 0
 	versionRefreshed := false // 426 时只刷新一次版本，避免无谓循环
 	versionReverted := false  // 403(版本过新) 时只回退一次版本
+	// 403 FreeTierError（出口 IP 被上游拒）的有界换节点预算。只「换」不 mark：
+	// mark 必须等到换节点后成功（confirm-then-mark，见 .research/T1-403-design-v2.md）。
+	// pendingVer 与 pendingBadFp 成对记录，mark 前要求两者版本一致（C1 归因守卫）。
+	pendingBadFp := ""
+	pendingVer := ""
+	freeTierSwitches := 0
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
 		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
 		client, nodeFp := egResult.Client, egResult.NodeFP
-		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp)
+		// I2：本 attempt 实际发出的 UA 版本由本请求自己携带（builder 不再读全局），
+		// 否则 C1 的「失败 attempt 与确认 attempt 版本相同」不是不变量。
+		attemptVer := ocClientVersion()
+		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp, attemptVer)
 		if err != nil {
 			return nil, 500, nil, err
 		}
 		nodeSwitchPending = false
+		// I6：并发下 pick 可能又把刚失败的节点选回来（force 只排除 activeID），
+		// 静默空转会让「换了节点还是 403」事后无法解释，故显式记一条事件。
+		if pendingBadFp != "" && nodeFp == pendingBadFp {
+			callLogEvent(ctx, "freetier_switch_noop", nodeFp, "same_node_returned:concurrent_pick")
+			log.Warn("freetier_switch_noop", "node", proxyPool.nameOf(nodeFp), "switches_done", freeTierSwitches)
+		}
 		attemptStart := time.Now()
-		resp, err := client.Do(up)
+		// 挂 httptrace 记录建连耗时（dial_ms）。不改动任何既有字段，只让本次连接
+		// 的真实建连成本落进调用记录 —— 此前成功侧完全没有这个维度，只有失败侧
+		// 的 connect_error，能据此观测的建连分布全是失败尾部。
+		resp, err := client.Do(withDialTrace(ctx, up))
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
@@ -2676,6 +2710,9 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
+			// 该出口真的拿到 2xx ⇒ 喂给熔断闸门的恢复滞回（连续 2 次 + 间隔 ≥60s）。
+			// 这是本版解闩权的唯一来源：不再靠节点池状态推断该出口是否恢复。
+			quotaHaltGuard.observeSuccess(egResult.EgressKey())
 			b, readErr := readAllMarkingFirstData(resp.Body, ctx)
 			resp.Body.Close()
 			if readErr != nil {
@@ -2701,6 +2738,26 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				"final_status", resp.StatusCode,
 				"fallback_used", false,
 			)
+			// confirm-then-mark 的【确认侧】：只有「换了节点后成功」才 mark 原节点。
+			// 失败路径永不到这里 ⇒ 形态回归时池子零损伤。版本必须与失败那次一致（C1）。
+			if pendingBadFp != "" {
+				if pendingVer != attemptVer {
+					callLogEvent(ctx, "freetier_confirm_rejected_version_changed", pendingBadFp,
+						fmt.Sprintf("failed_ver=%s confirm_ver=%s", pendingVer, attemptVer))
+				} else if nodeFp != "" && nodeFp != pendingBadFp {
+					if ok, why := proxyPool.freeTierMarkAllowed(); ok {
+						proxyPool.markFreeTierRejected(pendingBadFp)
+						callLogEvent(ctx, "freetier_node_confirmed_bad", pendingBadFp,
+							fmt.Sprintf("confirmed_ip_rejected failed_ver=%s confirm_ver=%s switches=%d", pendingVer, attemptVer, freeTierSwitches))
+						log.Warn("freetier_node_confirmed_bad",
+							"bad", proxyPool.nameOf(pendingBadFp), "ok", proxyPool.nameOf(nodeFp),
+							"failed_ver", pendingVer, "confirm_ver", attemptVer)
+					} else {
+						callLogEvent(ctx, "freetier_confirm_suppressed", pendingBadFp, "suppressed:"+why)
+						log.Warn("freetier_confirm_suppressed", "node", proxyPool.nameOf(pendingBadFp), "reason", why)
+					}
+				}
+			}
 			return b, resp.StatusCode, resp.Header, nil
 		}
 		errBody, _ := io.ReadAll(resp.Body)
@@ -2732,6 +2789,32 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				"to", pinnedOCVersion,
 			)
 			callLogEvent(ctx, "switch", nodeFp, "freetier:revert_version")
+			continue
+		}
+
+		// 403 FreeTierError 且版本已是「已验证可接受」版本：版本不再是可疑变量，出口 IP 可能是。
+		// 先换一个节点重试，但【不 mark】——mark 必须等到换节点后成功（下方成功路径）。
+		// 形态回归（所有节点都 403）时一次都不会 mark，池子零损伤。
+		// 与上面的版本回退天然互斥：回退块一旦命中就 continue，走不到这里。
+		if resp.StatusCode == http.StatusForbidden && isFreeTierErrorBody(errBody) &&
+			attemptVer == pinnedOCVersion && nodeFp != "" && freeTierSwitches < freeTierSwitchBudget {
+			freeTierSwitches++
+			// 只记【第一个】被拒节点：预算=1 时等价；将来若把预算提到 ≥2，
+			// 这里不会静默覆盖前一个（升级预算需要改成列表，见 T7-I5）。
+			if pendingBadFp == "" {
+				pendingBadFp = nodeFp
+				pendingVer = attemptVer
+			}
+			callLogEvent(ctx, "switch", nodeFp, "freetier:probe_alt_node")
+			log.Warn("freetier_node_switch",
+				"try_model", modelID, "surface", surface,
+				"from", proxyPool.nameOf(nodeFp), "switches_done", freeTierSwitches,
+				"version", attemptVer)
+			client.CloseIdleConnections()
+			// 节点池路径下 Invalidate() 是 no-op（egress.go 里它依赖 key/eg）；
+			// 真正让下一次 pick 排除当前节点的是 nodeSwitchPending（ForceSwitch）。
+			egResult.Invalidate()
+			nodeSwitchPending = true
 			continue
 		}
 
@@ -2816,17 +2899,22 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 
 		// 出口已回退直连、上游仍 429：剩余重试都打在同一个 IP 上，只会空转。
-		// 立即停止重试并进入熔断，等节点池恢复可用节点（见 quota_halt.go）。
+		// 立即停止重试并对该【具体出口】进入熔断（见 quota_halt.go）。
 		if egResult.Direct && resp.StatusCode == http.StatusTooManyRequests && auth.tier() == TierFree {
-			if quotaHaltGuard.halt("direct_429", errBody) {
+			// 按出口分桶：桶身份来自 EgressResult（NodeFP/Direct），不是全局一个 bool。
+			// 同时记一次失败 ⇒ 该出口的恢复滞回计数清零。
+			egressKey := egResult.EgressKey()
+			quotaHaltGuard.observeFailure(egressKey)
+			if quotaHaltGuard.halt(egressKey, "direct_429", errBody) {
 				log.Warn("quota_halt_entered",
+					"egress", egressKey,
 					"try_model", modelID,
 					"surface", surface,
 					"status", resp.StatusCode,
 					"attempt_index", attempt,
 					"node_pool_size", proxyPool.nodeCount(),
 				)
-				callLogEvent(ctx, "quota_halt", nodeFp, "enter: 直连出口 429，停止重试等待节点恢复")
+				callLogEvent(ctx, "quota_halt", nodeFp, "enter: 直连出口 429，停止重试等待出口恢复")
 			}
 			lastBody = errBody
 			lastStatus = resp.StatusCode
@@ -2931,19 +3019,33 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	quotaSwitches := 0
 	versionRefreshed := false // 426 时只刷新一次版本，避免无谓循环
 	versionReverted := false  // 403(版本过新) 时只回退一次版本
+	// 403 FreeTierError（出口 IP 被上游拒）的有界换节点预算。只「换」不 mark：
+	// mark 必须等到换节点后成功（confirm-then-mark，见 .research/T1-403-design-v2.md）。
+	// pendingVer 与 pendingBadFp 成对记录，mark 前要求两者版本一致（C1 归因守卫）。
+	pendingBadFp := ""
+	pendingVer := ""
+	freeTierSwitches := 0
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
 		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
 		client, nodeFp := egResult.Client, egResult.NodeFP
-		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp)
+		// I2：同非流式——版本由本请求携带，见上方注释。
+		attemptVer := ocClientVersion()
+		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp, attemptVer)
 		if err != nil {
 			return nil, 500, nil, err
 		}
 		nodeSwitchPending = false
+		// I6：同非流式——换节点后可能又拿到同一个坏节点，必须可观测。
+		if pendingBadFp != "" && nodeFp == pendingBadFp {
+			callLogEvent(ctx, "freetier_switch_noop", nodeFp, "same_node_returned:concurrent_pick")
+			log.Warn("freetier_switch_noop", "node", proxyPool.nameOf(nodeFp), "switches_done", freeTierSwitches)
+		}
 		attemptStart := time.Now()
-		resp, err := client.Do(up)
+		// 同上：流式路径也挂 dial trace，否则 dial_ms 只覆盖非流式一半流量。
+		resp, err := client.Do(withDialTrace(ctx, up))
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
@@ -2982,6 +3084,8 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
+			// 同上：流式路径也必须喂恢复滞回，否则只有一半流量能积累恢复证据。
+			quotaHaltGuard.observeSuccess(egResult.EgressKey())
 			log.Info("upstream_attempt",
 				"try_model", modelID,
 				"surface", surface,
@@ -2995,6 +3099,26 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				"final_status", resp.StatusCode,
 				"fallback_used", false,
 			)
+			// 流式侧的「成功」是【响应头级】确认（body 一行未读；实测 connect_ok 里
+			// 0.67% 最终仍失败）——这是 v2 明确接受并记录在案的取舍（§6.2），不是疏漏。
+			if pendingBadFp != "" {
+				if pendingVer != attemptVer {
+					callLogEvent(ctx, "freetier_confirm_rejected_version_changed", pendingBadFp,
+						fmt.Sprintf("failed_ver=%s confirm_ver=%s", pendingVer, attemptVer))
+				} else if nodeFp != "" && nodeFp != pendingBadFp {
+					if ok, why := proxyPool.freeTierMarkAllowed(); ok {
+						proxyPool.markFreeTierRejected(pendingBadFp)
+						callLogEvent(ctx, "freetier_node_confirmed_bad", pendingBadFp,
+							fmt.Sprintf("confirmed_ip_rejected failed_ver=%s confirm_ver=%s switches=%d", pendingVer, attemptVer, freeTierSwitches))
+						log.Warn("freetier_node_confirmed_bad",
+							"bad", proxyPool.nameOf(pendingBadFp), "ok", proxyPool.nameOf(nodeFp),
+							"failed_ver", pendingVer, "confirm_ver", attemptVer)
+					} else {
+						callLogEvent(ctx, "freetier_confirm_suppressed", pendingBadFp, "suppressed:"+why)
+						log.Warn("freetier_confirm_suppressed", "node", proxyPool.nameOf(pendingBadFp), "reason", why)
+					}
+				}
+			}
 			return newToolNameRewriter(wrapRawSSE(resp.Body), toolMapping, injectedTools), resp.StatusCode, resp.Header, nil
 		}
 		errBody, _ := io.ReadAll(resp.Body)
@@ -3026,6 +3150,32 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				"to", pinnedOCVersion,
 			)
 			callLogEvent(ctx, "switch", nodeFp, "freetier:revert_version")
+			continue
+		}
+
+		// 403 FreeTierError 且版本已是「已验证可接受」版本：版本不再是可疑变量，出口 IP 可能是。
+		// 先换一个节点重试，但【不 mark】——mark 必须等到换节点后成功（下方成功路径）。
+		// 形态回归（所有节点都 403）时一次都不会 mark，池子零损伤。
+		// 与上面的版本回退天然互斥：回退块一旦命中就 continue，走不到这里。
+		if resp.StatusCode == http.StatusForbidden && isFreeTierErrorBody(errBody) &&
+			attemptVer == pinnedOCVersion && nodeFp != "" && freeTierSwitches < freeTierSwitchBudget {
+			freeTierSwitches++
+			// 只记【第一个】被拒节点：预算=1 时等价；将来若把预算提到 ≥2，
+			// 这里不会静默覆盖前一个（升级预算需要改成列表，见 T7-I5）。
+			if pendingBadFp == "" {
+				pendingBadFp = nodeFp
+				pendingVer = attemptVer
+			}
+			callLogEvent(ctx, "switch", nodeFp, "freetier:probe_alt_node")
+			log.Warn("freetier_node_switch",
+				"try_model", modelID, "surface", surface,
+				"from", proxyPool.nameOf(nodeFp), "switches_done", freeTierSwitches,
+				"version", attemptVer)
+			client.CloseIdleConnections()
+			// 节点池路径下 Invalidate() 是 no-op（egress.go 里它依赖 key/eg）；
+			// 真正让下一次 pick 排除当前节点的是 nodeSwitchPending（ForceSwitch）。
+			egResult.Invalidate()
+			nodeSwitchPending = true
 			continue
 		}
 
@@ -3109,17 +3259,22 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 
 		// 出口已回退直连、上游仍 429：剩余重试都打在同一个 IP 上，只会空转。
-		// 立即停止重试并进入熔断，等节点池恢复可用节点（见 quota_halt.go）。
+		// 立即停止重试并对该【具体出口】进入熔断（见 quota_halt.go）。
 		if egResult.Direct && resp.StatusCode == http.StatusTooManyRequests && auth.tier() == TierFree {
-			if quotaHaltGuard.halt("direct_429", errBody) {
+			// 按出口分桶：桶身份来自 EgressResult（NodeFP/Direct），不是全局一个 bool。
+			// 同时记一次失败 ⇒ 该出口的恢复滞回计数清零。
+			egressKey := egResult.EgressKey()
+			quotaHaltGuard.observeFailure(egressKey)
+			if quotaHaltGuard.halt(egressKey, "direct_429", errBody) {
 				log.Warn("quota_halt_entered",
+					"egress", egressKey,
 					"try_model", modelID,
 					"surface", surface,
 					"status", resp.StatusCode,
 					"attempt_index", attempt,
 					"node_pool_size", proxyPool.nodeCount(),
 				)
-				callLogEvent(ctx, "quota_halt", nodeFp, "enter: 直连出口 429，停止重试等待节点恢复")
+				callLogEvent(ctx, "quota_halt", nodeFp, "enter: 直连出口 429，停止重试等待出口恢复")
 			}
 			lastBody = errBody
 			lastStatus = resp.StatusCode

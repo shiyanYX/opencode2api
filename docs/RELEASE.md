@@ -81,7 +81,7 @@ permissions:
 
 ```bash
 make fmt
-make test
+go test ./...
 make vet
 make release-snapshot VERSION=v0.1.0
 ```

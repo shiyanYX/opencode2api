@@ -6,8 +6,8 @@
 
 ## 背景
 
-OpenCode Zen 免费层按「请求像不像官方 opencode 客户端」鉴权，而非按账号或 IP。2026-09-17 至 10-13
-上游连续收紧五轮，其中四轮使代理全线返回同一个 403：
+OpenCode Zen 免费层按「请求像不像官方 opencode 客户端」鉴权，而非按账号或 IP。2026-09-17 至 10-15
+上游连续收紧六轮，其中五轮使代理全线返回同一个 403：
 
 ```json
 403 {"type":"error","error":{"type":"FreeTierError",
@@ -17,9 +17,9 @@ OpenCode Zen 免费层按「请求像不像官方 opencode 客户端」鉴权，
 （2026-10-13 起该文案追加了一句 `Download it at https://opencode.ai and keep building.`，
 `Error from provider (Console):` 前缀被去掉——文案变了但闸门性质不变。）
 
-五轮依次是：
+六轮依次是：
 
-1. `x-opencode-session` 必须符合官方 ID 形态（`ses_` + 12 位小写十六进制 + 14 位 base62）；
+1. `x-opencode-session` 必须符合官方 ID 形态（`ses_` + 12 位十六进制 + 14 位 base62）；
 2. `body.stream` 必须为 `true`；
 3. `body.tools` 必须包含官方小写工具名 `bash`、`glob`、`grep`、`read`；
 4. `User-Agent` 里的 opencode 版本必须 **>= 1.18.0**（低于则 426，错误类型与其余不同）：
@@ -31,13 +31,18 @@ OpenCode Zen 免费层按「请求像不像官方 opencode 客户端」鉴权，
 
 5. `x-opencode-session` 的 12 位 hex 前缀必须是 **descending 编码**（官方对 session 用
    `Identifier.descending`、对 request 用 ascending；形态不变、只有方向变了）。
+6. **同时收紧三项**（2026-10-15）：推理路径必须是 `/inference/v1/`（旧 `/zen/v1/` 只放行完全
+   真客户端）；工具要**官方名 + `parameters.properties` 非空 + 数量够**（官方前 4 个 → 403，
+   前 5/6/11 个 → 200）；UA 版本**有上限**——`1.18.0–1.18.33` 通过，`1.18.34–1.19.1` 全部 403
+   （闸门滞后于 npm），因此默认值必须是**已验证**的 `pinnedOCVersion` 而非 npm latest。
 
 第一轮之前本项目的实现是 `"ses_" + randomString(24)`；第二轮之前非流式请求按 `stream:false` 直发；
 第三轮之前只处理「客户端不带 tools」的场景，而生产主客户端（Claude Code 风格、工具名首字母大写）
 自带工具却因不含官方小写名而全线 403；第四轮暴露的是**兜底值本身不合规**——npm 版本探测失败时回退到
 `1.15.3`，低于 1.18.0 门槛，一次网络抖动就让全量请求变 426；第五轮暴露的是**只对齐了形态、没对齐
 编码方向**——`newOpenCodeID` 一直用 ascending，长度与字符集都对，靠正则的检查完全看不出来，
-而服务端要的是 descending。
+而服务端要的是 descending；第六轮则是「跟随上游发布的版本号」这个默认值本身失效——闸门认到的版本
+滞后于 npm，直接用 npm latest 会导致上游一发布新版就全量 403。
 
 排除过的假设（均已实测证伪）：多出口共享 session、host IP 被封、TLS/JA3 指纹、
 User-Agent 内容（短 UA 配正确 session 也能通）、请求体必须含官方 system prompt、
@@ -56,13 +61,17 @@ Authorization 必须是真实 key。
    `stream_options.include_usage` 以便取用量）；非流式客户端由 `aggregateUpstreamSSE`
    把上游 SSE 聚合回单个 `chat.completion`，三种协议的 6 个调用点因此无需改动。
 3. **工具形态**：`shapeToolsForUpstream` 把客户端工具名中忽略大小写命中官方名者改写为官方小写名
-   （沿用客户端自己的 schema），大小写无关去重（上游对重名返回 400），再补齐缺失的必需工具；
+   （沿用客户端自己的 schema），大小写无关去重（上游对重名返回 400），再补齐缺失的必需工具——
+   第 6 轮后是**全部 11 个官方名**，且每个都要带最小但非空的 `parameters.properties`
+   （只补名字不满足数量要求，空壳 schema 会被判无效）；
    客户端完全无工具时才设 `tool_choice:"none"`。
 4. **对下游透明**：响应侧按 `上游名 -> 客户端原名` 回映射，并丢弃空壳工具产生的调用。
    流式路径由 `newToolNameRewriter` 包装上游 SSE 统一收口，三条协议面共用。
 5. **版本形态**：新增 `oc_version.go` 统一管理 UA 版本——回退常量必须自身满足门槛
-   （`fallbackOCVersion = "1.18.31"`，有单测断言）、优先回退到「最近一次成功探测到的版本」、
+   （`fallbackOCVersion`，有单测断言）、优先回退到「最近一次成功探测到的版本」、
    低于门槛的版本不入缓存、只保留前导 `x.y.z`；收到 426 时刷新一次版本并重试以自愈。
+   **默认值用已验证的 `pinnedOCVersion` 而不是 npm latest**（第 6 轮的教训：闸门滞后于 npm），
+   并在收到 403 `FreeTierError` 且当前版本比 pinned 新时回退到 pinned 重试一次。
 6. **断言编码语义而非形态**：单测对 ID 前缀做**位级比对**（高 36 位等于当前时间的
    descending/ascending 截断编码），而不是 `regexp.MatchString`——第 5 轮正是形态没变、
    方向变了，正则一路放行到线上才炸。
@@ -83,10 +92,10 @@ Authorization 必须是真实 key。
 
 ## 后果
 
-- 正面：免费层恢复可用；对下游零改动；48 项单元测试覆盖形态、方向、回映射与版本回退（本地保留，
+- 正面：免费层恢复可用；对下游零改动；52 项单元测试覆盖形态、方向、回映射与版本回退（本地保留，
   按 `.gitignore` 约定不入库）。
 - 负面：这是**对抗性适配**，上游未承诺这些形态，任何一次收紧都可能再次失效；重新定位成本约为
-  「一次 MITM 抓包 + 一轮逐字段二分」（流程见 `docs/UPSTREAM-COMPAT.md`）。五轮下来已从
+  「一次 MITM 抓包 + 一轮逐字段二分」（流程见 `docs/UPSTREAM-COMPAT.md`）。六轮下来已从
   「形态匹配」升级到「编码语义匹配」，门槛在持续升高。
 - 负面：所有非流式请求在上游侧变为流式，网关需本地聚合（内存按 `max_tokens` 有界）。
 - 边界：免费层额度仍按出口 IP 限流（`FreeUsageLimitError`），与本决策无关。
