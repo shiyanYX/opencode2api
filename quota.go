@@ -121,6 +121,13 @@ func classifyRegionRestriction(status int, body []byte) (bool, string) {
 	if status != 403 || len(body) == 0 {
 		return false, ""
 	}
+	// FreeTierError 是「客户端形态 / 出口 IP」问题，与区域无关；但上游文案里会出现
+	// "available in OpenCode" 之类字样，会误命中下面的超宽关键词。必须先排除，
+	// 否则一次 403 会被串成「区域限制 → 学区域 → 切节点 → 刷新 session」
+	// （见 .research/T1-403-design-v2.md §9-M2 的文案变体测试）。
+	if isFreeTierErrorBody(body) {
+		return false, ""
+	}
 
 	var obj struct {
 		Error struct {

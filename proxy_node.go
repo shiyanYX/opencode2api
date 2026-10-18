@@ -94,6 +94,11 @@ type ProxyNode struct {
 	// LatencyMs 最近一次健康探测延迟（毫秒）；0/未探测表示尚无结果。
 	LatencyMs   int64     `json:"-"`
 	LastProbeAt time.Time `json:"-"`
+	// GateState 推理闸门状态（unknown | ok | rejected），归 T3 所有。
+	// T1 的 confirm-then-mark 只写 "rejected"：该出口被上游按 IP 拒绝。
+	// 当 gateReviveRequiresProbe=true 时，rejected 节点不接受「冷却到期」的时间复活，
+	// 只能由 T3 的闸门感知探针成功复活（见 .research/T1-403-design-v2.md §4.1）。
+	GateState string `json:"-"`
 }
 
 // ProxyNodeConfig 是配置（config.json / 面板）中可手填的节点精简形态。
@@ -187,6 +192,7 @@ type nodeRuntimeState struct {
 	LastUsedAt    time.Time `json:"last_used_at,omitempty"`
 	LatencyMs     int64     `json:"latency_ms,omitempty"`
 	LastProbeAt   time.Time `json:"last_probe_at,omitempty"`
+	GateState     string    `json:"gate_state,omitempty"`
 }
 
 var zeroTime time.Time
@@ -297,6 +303,11 @@ func (p *nodePool) sweepExpiredLocked(now time.Time) {
 	dirty := false
 	for _, n := range p.nodes {
 		if n.State != NodeExhausted {
+			continue
+		}
+		// C3 复活契约：被上游按出口 IP 拒绝的节点不接受「冷却到期」的时间复活。
+		// 降级开关默认 false（T3 的闸门探针未上线时退化为旧的 5h 冷却，避免永久封禁）。
+		if gateReviveRequiresProbe && n.GateState == GateStateRejected {
 			continue
 		}
 		if n.CooldownUntil.IsZero() || !now.After(n.CooldownUntil) {
@@ -447,11 +458,29 @@ func (p *nodePool) switchToNext() string {
 	return ""
 }
 
+// freeTierRejectedReason 是 confirm-then-mark 确认侧的固定 reason。
+// gate_state 的置位只允许通过 markFreeTierRejected（写 rejected）与 unmark（清 unknown）发生。
+const freeTierRejectedReason = "freetier:confirmed_ip_rejected"
+
 // mark 标记节点状态并触发变更日志。返回 false 表示指纹不存在。
+// 任何【非 FreeTier 拒绝】原因的 mark 都会复位 gate_state —— 否则配额/连接类标记
+// 会继承「IP 拒绝」的复活豁免，冷却到期也不复活（T7-I3；也是打开
+// gateReviveRequiresProbe 的前置条件）。
 func (p *nodePool) mark(fp string, st NodeState, reason string) bool {
-	now := time.Now()
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	ok := p.markLocked(fp, st, reason, GateStateUnknown)
+	p.mu.Unlock()
+	if !ok {
+		return false
+	}
+	p.saveWG.Add(1)
+	go func() { defer p.saveWG.Done(); p.saveState() }()
+	return true
+}
+
+// markLocked 在已持有写锁的前提下执行标记；gate 为要写入的 gate_state。
+func (p *nodePool) markLocked(fp string, st NodeState, reason, gate string) bool {
+	now := time.Now()
 	n := p.byID[fp]
 	if n == nil {
 		return false
@@ -459,6 +488,7 @@ func (p *nodePool) mark(fp string, st NodeState, reason string) bool {
 	n.State = st
 	n.MarkedAt = now
 	n.LastError = reason
+	n.GateState = gate
 	switch st {
 	case NodeExhausted:
 		n.CooldownUntil = now.Add(p.effectiveExhaustedCooldown())
@@ -477,8 +507,6 @@ func (p *nodePool) mark(fp string, st NodeState, reason string) bool {
 	slog.Info("node state changed",
 		"node", n.Name, "fp", fp, "state", st.String(),
 		"reason", reason, "until", n.CooldownUntil.Format(time.RFC3339))
-	p.saveWG.Add(1)
-	go func() { defer p.saveWG.Done(); p.saveState() }()
 	return true
 }
 
@@ -493,6 +521,80 @@ func (p *nodePool) unmark(fp string) bool {
 	n.MarkedAt = time.Time{}
 	n.CooldownUntil = time.Time{}
 	n.LastError = ""
+	// 必须一并清 gate_state：否则「面板解除标记」之后节点仍被豁免时间复活，
+	// 运维将失去唯一的手工出路（T1-403-design-v2 §4.5）。
+	n.GateState = GateStateUnknown
+	p.saveWG.Add(1)
+	go func() { defer p.saveWG.Done(); p.saveState() }()
+	return true
+}
+
+// ======================= 免费层 IP 拒绝（confirm-then-mark / T3 契约） =======================
+
+const (
+	// GateStateUnknown 未知（默认；连通性探测成功也只写 ok，不代表过了推理闸门）。
+	GateStateUnknown = ""
+	// GateStateOK 闸门探测确认可通过（由 T3 写）。
+	GateStateOK = "ok"
+	// GateStateRejected 被上游按出口 IP 拒绝（由 T1 的 confirm-then-mark 写）。
+	GateStateRejected = "rejected"
+	// freeTierSwitchBudget 单次请求内因 403 FreeTierError 换节点的预算。
+	// =1：实测「替身也被 403」的经验频率为 2.91%（非 CL 家族）/ 0%（其它 1::），
+	// 预算 1 已覆盖约 97%；预算 2 必须升级为精确 exclude（改 pick 签名，热路径），
+	// 本次不做（见 .research/T1-403-design-v2.md §7.2）。
+	freeTierSwitchBudget = 1
+)
+
+var (
+	// gateReviveRequiresProbe 是 C3 契约的降级开关：默认 false = 旧行为（冷却到期自动复活）。
+	// T3 的闸门感知探针上线后才应置 true；否则 gate_state=rejected 的节点将永久封禁
+	// （只剩面板 unmark 一条手工出路）。见 .research/T1-403-design-v2.md §4.1。
+	gateReviveRequiresProbe = false
+	// shapeSuspectNow 由 T3 接线（闸 3 全局形状闩）：为真时抑制节点级 mark。
+	// T3 未上线时恒为 false（不抑制）。
+	shapeSuspectNow = func() bool { return false }
+	// freeTierFloor 由 T3 接线（闸 2 池底保护）：available 数低于等于它会拒绝 mark。
+	// 默认 0 ⇒ 仅在池子真的没有可用节点时才拒绝。
+	freeTierFloor = func() int { return 0 }
+)
+
+// availableCount 报告当前可路由（available）的节点数。
+func (p *nodePool) availableCount() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	c := 0
+	for _, n := range p.nodes {
+		if p.eligible(n, now) {
+			c++
+		}
+	}
+	return c
+}
+
+// freeTierMarkAllowed 是 confirm-then-mark 确认侧的闸门（T3 闸 3 + 池底）。
+// 返回 (是否允许, 抑制原因)。
+func (p *nodePool) freeTierMarkAllowed() (bool, string) {
+	if shapeSuspectNow() {
+		return false, "shape_latch"
+	}
+	if p.availableCount() <= freeTierFloor() {
+		return false, "pool_floor"
+	}
+	return true, ""
+}
+
+// markFreeTierRejected 把「被上游按出口 IP 拒绝」的节点标记为 NodeExhausted，
+// 并写入 gate_state="rejected"。只在 confirm-then-mark 的【确认侧】调用
+// （即：换节点后确实成功了）。失败路径上绝不调用，形态回归时池子零损伤。
+// ★ 状态与 gate_state 在同一次加锁内完成，避免「先标状态、再补字段」中间态。
+func (p *nodePool) markFreeTierRejected(fp string) bool {
+	p.mu.Lock()
+	ok := p.markLocked(fp, NodeExhausted, freeTierRejectedReason, GateStateRejected)
+	p.mu.Unlock()
+	if !ok {
+		return false
+	}
 	p.saveWG.Add(1)
 	go func() { defer p.saveWG.Done(); p.saveState() }()
 	return true
@@ -798,6 +900,7 @@ func (p *nodePool) setNodes(nodes []*ProxyNode) {
 			n.LastUsedAt = prev.LastUsedAt
 			n.LatencyMs = prev.LatencyMs
 			n.LastProbeAt = prev.LastProbeAt
+			n.GateState = prev.GateState
 		}
 		next = append(next, n)
 		byID[n.Fingerprint] = n
@@ -867,6 +970,7 @@ func (p *nodePool) saveState() {
 			LastUsedAt:    n.LastUsedAt,
 			LatencyMs:     n.LatencyMs,
 			LastProbeAt:   n.LastProbeAt,
+			GateState:     n.GateState,
 		}
 	}
 	p.mu.RUnlock()
@@ -898,6 +1002,7 @@ func (p *nodePool) loadState() {
 			n.LastUsedAt = rs.LastUsedAt
 			n.LatencyMs = rs.LatencyMs
 			n.LastProbeAt = rs.LastProbeAt
+			n.GateState = rs.GateState
 		}
 	}
 	p.mu.Unlock()
