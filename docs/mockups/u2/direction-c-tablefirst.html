@@ -1,0 +1,1767 @@
+<!doctype html>
+<html lang="zh" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>方向 C · 表格优先（Table-First）· 高保真原型</title>
+<!-- 内联 SVG favicon：file:// 打开时不产生 404 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ececec'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='17' font-weight='bold' fill='%230a0a0a' text-anchor='middle'%3EC%3C/text%3E%3C/svg%3E">
+<!--
+  ============================================================================
+  方向 C · 表格优先（Table-First）· 高保真原型
+  ----------------------------------------------------------------------------
+  自包含单文件：file:// 直接打开，零 CDN / 零构建 / 零外部字体 / 零网络请求。
+  与 static/admin.html 的关系：
+    · 保留 5 分区导航 + 左侧栏 + .app/.sidebar/.main/.card/.tbl/.badge/.chip 结构
+    · 只做「token 层替换 + 表格能力升级 + 评分列占位」
+    · 页面内所有 F / O 角标标出「照抄 freellm」与「我们自己的」来源
+  ============================================================================
+-->
+<style>
+/* ══════════════════════════════════════════════════════════════════════════
+   ① 设计令牌（primitive → semantic 两层）
+   ──────────────────────────────────────────────────────────────────────────
+   第一层是原始值，第二层沿用 admin.html 现有变量名（--bg/--surface/--border/…）。
+   把下面两个 :root 块整块替换进 static/admin.html:32-68，现有 11 张表 / 全部
+   组件就会自动换到新外观 —— 这就是本方向「最小 diff」的全部秘密。
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 第一层：原始值 ── 照抄 freellm client/src/index.css:44-113（F）
+   灰阶刻度对应 Tailwind v4 neutral：0.995/0.98/0.97/0.92/0.52/0.22/0.18/0.135 */
+:root{
+  --n-0:#ffffff; --n-50:#fafafa; --n-100:#f5f5f5; --n-200:#e5e5e5; --n-300:#d4d4d4;
+  --n-400:#a3a3a3; --n-500:#737373; --n-600:#525252; --n-700:#404040; --n-800:#262626;
+  --n-850:#1c1c1c; --n-900:#171717; --n-925:#121212; --n-950:#0a0a0a; --n-1000:#070707;
+  /* 圆角刻度：freellm index.css:44-52 的注释原文（sm4/md6/lg8/xl12/2xl16/3xl24/4xl32） */
+  --r-xs:4px; --r-sm:6px; --r-md:8px; --r-lg:12px; --r-xl:16px; --r-2xl:24px; --r-full:999px;
+  /* 间距基数 4px（--spacing:.25rem） */
+  --sp:4px;
+  /* 字号刻度：Tailwind v4 默认（xs12 / sm14 / base16 / lg18 / xl20 / 2xl24） */
+  --fs-10:10px; --fs-11:11px; --fs-12:12px; --fs-14:14px; --fs-16:16px; --fs-20:20px; --fs-24:24px;
+  /* 动效：--default-transition-duration:.15s + cubic-bezier(.4,0,.2,1)（F） */
+  --dur:.15s; --ease:cubic-bezier(.4,0,.2,1);
+  /* CJK 系统字体栈：我们自己的（O）—— freellm 的 Geist 无 CJK 字形，搬来零收益 */
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif;
+  --mono:ui-monospace,'SF Mono','JetBrains Mono','Cascadia Code',Consolas,monospace;
+}
+/* ── 第二层：语义令牌 · 暗色 ── 值照抄 freellm index.css:90-122（F）
+   关键差异：border 是【纯白 10% 半透明】，不是我们原来的蓝灰 rgba(148,163,184,.14)；
+   整套中性色 chroma=0（无彩度），主色 = 近白。 */
+[data-theme="dark"]{
+  --bg:var(--n-1000);            /* oklch(0.135 0 0) 页面底 */
+  --surface:var(--n-925);        /* oklch(0.175 0 0) 卡片底 */
+  --surface-2:var(--n-850);      /* oklch(0.22  0 0) 弱底 / hover */
+  --border:rgba(255,255,255,.10);/* oklch(1 0 0 / 10%)  ← 半透明白，不是实色 */
+  --border-strong:rgba(255,255,255,.18);
+  --line:rgba(255,255,255,.06);
+  --input:rgba(255,255,255,.14); /* oklch(1 0 0 / 14%) */
+  --text:var(--n-50);            /* oklch(0.98 0 0) */
+  --text-sec:var(--n-400);       /* oklch(0.68 0 0) */
+  --text-ter:#7f7f7f;
+  --primary:var(--n-200);        /* 主色 = 近白（freellm oklch(0.93 0 0)） */
+  --primary-fg:var(--n-950);
+  /* ── 我们自己的（O）：状态语义三档 + 强调色 ──
+     freellm 把这些色硬编码在组件里（penalty-inspector.tsx:70-76），我们令牌化。
+     强调色只用于「当前节点」标记 / 焦点环 / 链接，不再当主按钮色。 */
+  --accent:#8ab4ff; --accent-dim:rgba(138,180,255,.14);
+  --s-ok:#3ddc97;  --s-ok-dim:rgba(61,220,151,.13);  --s-ok-line:rgba(61,220,151,.38);
+  --s-warn:#f5b544;--s-warn-dim:rgba(245,181,68,.13);--s-warn-line:rgba(245,181,68,.38);
+  --s-bad:#ff7a7a; --s-bad-dim:rgba(255,122,122,.13);--s-bad-line:rgba(255,122,122,.38);
+  --s-info:#8ab4ff;--s-info-dim:rgba(138,180,255,.12);
+  --s-mut:#8a8a8a; --s-mut-dim:rgba(255,255,255,.06);
+  --shadow:0 10px 34px rgba(0,0,0,.6);
+  color-scheme:dark;
+}
+/* ── 第二层：语义令牌 · 亮色 ── 同名同构映射（F）
+   这是对我们现有做法的一处修正：admin.html:55-68 的亮色是「另起一套色值」，
+   每加一个新色就要手配两次；freellm 亮/暗两套是【同构】的。 */
+[data-theme="light"]{
+  --bg:#fdfdfd; --surface:#ffffff; --surface-2:#f7f7f7;
+  --border:var(--n-200); --border-strong:var(--n-300); --line:rgba(0,0,0,.06);
+  --input:var(--n-200);
+  --text:#171717; --text-sec:#6b6b6b; --text-ter:#8a8a8a;
+  --primary:#1c1c1c; --primary-fg:#fafafa;
+  --accent:#3b63c9; --accent-dim:rgba(59,99,201,.10);
+  --s-ok:#0a6f42;  --s-ok-dim:rgba(10,111,66,.10);  --s-ok-line:rgba(10,111,66,.30);
+  --s-warn:#9a5b06;--s-warn-dim:rgba(154,91,6,.10); --s-warn-line:rgba(154,91,6,.30);
+  --s-bad:#b42318; --s-bad-dim:rgba(180,35,24,.09); --s-bad-line:rgba(180,35,24,.28);
+  --s-info:#2f5fd6;--s-info-dim:rgba(47,95,214,.10);
+  --s-mut:#6b6b6b; --s-mut-dim:rgba(0,0,0,.05);
+  --shadow:0 10px 30px rgba(30,40,70,.10);
+  color-scheme:light;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ② 基础
+   ══════════════════════════════════════════════════════════════════════════ */
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  font-family:var(--font);background:var(--bg);color:var(--text);
+  font-size:var(--fs-14);line-height:1.6;-webkit-font-smoothing:antialiased;
+  /* 全局等宽数字（F）：freellm index.css:137 body{font-feature-settings:'ss01','cv11','tnum'}。
+     我们原来是逐处标 .num（admin.html:78），会漏 —— 这一行消掉一整类漏标缺陷。 */
+  font-variant-numeric:tabular-nums;
+}
+button{font-family:inherit;font-variant-numeric:inherit}
+input,select{font-family:inherit;color:inherit}
+::selection{background:var(--accent-dim)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.muted{color:var(--text-ter)}
+.mono{font-family:var(--mono)}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.nowrap{white-space:nowrap}
+.ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ③ 原型工具条 + 来源图例（模造物，不进生产实现）
+   ══════════════════════════════════════════════════════════════════════════ */
+.proto{
+  position:sticky;top:0;z-index:60;background:var(--bg);
+  border-bottom:1px dashed var(--border-strong);
+  padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+  font-family:var(--mono);font-size:11.5px;
+}
+.proto-tag{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:var(--r-sm);
+  background:var(--s-warn-dim);color:var(--s-warn);font-weight:700;letter-spacing:.02em}
+.proto-group{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border:1px solid var(--border);border-radius:var(--r-sm)}
+.proto-group>b{color:var(--text-ter);font-weight:600}
+.proto select,.proto button.pbtn{background:var(--surface-2);border:1px solid var(--border);color:var(--text-sec);
+  border-radius:var(--r-xs);padding:3px 8px;font-size:11.5px;font-family:var(--mono);cursor:pointer}
+.proto button.pbtn:hover{color:var(--text);border-color:var(--border-strong)}
+.proto button.pbtn.on{background:var(--accent-dim);color:var(--accent);border-color:transparent}
+.proto .spacer{flex:1}
+.legend{border-bottom:1px dashed var(--border);background:var(--surface);display:none}
+.legend.open{display:block}
+.legend-in{max-width:1520px;margin:0 auto;padding:16px 20px 20px}
+.legend h2{font-size:13px;font-weight:700;letter-spacing:.02em;margin-bottom:4px}
+.legend .lg-sub{font-size:11.5px;color:var(--text-ter);margin-bottom:14px;line-height:1.65}
+.lg-cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
+.lg-col{border:1px solid var(--border);border-radius:var(--r-lg);padding:12px 14px;background:var(--bg)}
+.lg-col h3{font-size:12px;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:7px}
+.lg-col ul{list-style:none;font-size:11.8px;line-height:1.75;color:var(--text-sec)}
+.lg-col li{padding-left:12px;position:relative}
+.lg-col li::before{content:"·";position:absolute;left:0;color:var(--text-ter)}
+.lg-col li b{color:var(--text);font-weight:600}
+.lg-col.f{border-left:3px solid var(--s-info)}
+.lg-col.o{border-left:3px solid var(--s-warn)}
+.lg-col.x{border-left:3px solid var(--s-bad)}
+.lg-col.x li b{color:var(--text-sec)}
+
+/* 页内 F/O 角标（O）：把「来源」变成可开关的一等公民，这是本方向最值钱的一块 */
+.mk{display:none;align-items:center;justify-content:center;width:15px;height:15px;border-radius:4px;
+  font-family:var(--mono);font-size:9px;font-weight:800;vertical-align:1.5px;margin-left:6px;
+  cursor:help;flex:none;letter-spacing:0}
+body[data-marks="on"] .mk{display:inline-flex}
+/* 图例里的徽标常显：它就是这套标记的解释器 */
+.mk-static{display:inline-flex!important}
+.mk-f{background:var(--s-info-dim);color:var(--s-info);border:1px solid color-mix(in srgb,var(--s-info) 40%,transparent)}
+.mk-o{background:var(--s-warn-dim);color:var(--s-warn);border:1px solid color-mix(in srgb,var(--s-warn) 40%,transparent)}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ④ 面板骨架（结构照抄现有 admin.html，一个 class 名都没换）
+   ══════════════════════════════════════════════════════════════════════════ */
+.app{display:flex;min-height:100vh}
+.sidebar{width:204px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;position:sticky;top:0;height:100vh;padding:18px 12px;overflow-y:auto}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:0}
+.sidebar .brand{padding:0 6px 16px;border-bottom:1px solid var(--border);margin-bottom:10px}
+.logo-mark{width:36px;height:36px;border-radius:10px;background:var(--primary);display:grid;place-items:center;color:var(--primary-fg);flex-shrink:0}
+.logo-text{font-size:15px;font-weight:600;font-family:var(--mono);letter-spacing:-.02em;line-height:1.15}
+.logo-accent{color:var(--text-sec);font-weight:700}
+.logo-sub{font-size:9.5px;color:var(--text-ter);letter-spacing:.2em;margin-top:3px}
+.nav{display:flex;flex-direction:column;gap:2px;flex:1;overflow-y:auto}
+.nav button{position:relative;display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:9px 11px;
+  border:none;border-radius:var(--r-md);background:transparent;color:var(--text-sec);font-size:13.5px;font-weight:500;
+  cursor:pointer;transition:background var(--dur) var(--ease),color var(--dur) var(--ease)}
+.nav button:hover{background:var(--surface-2);color:var(--text)}
+/* 导航激活态（F）：freellm 用「文字转前景色」，不用品牌色底 —— 主色让位给状态语义 */
+.nav button.active{background:var(--surface-2);color:var(--text);font-weight:600}
+.nav button.active::before{content:"";position:absolute;left:0;top:22%;bottom:22%;width:2.5px;border-radius:2px;background:var(--text)}
+.sidebar-foot{border-top:1px solid var(--border);padding-top:10px;display:flex;flex-direction:column;gap:8px}
+.conn{display:flex;align-items:center;gap:7px;padding:3px 8px;font-size:11.5px;color:var(--text-ter)}
+.conn .pulse{width:7px;height:7px;border-radius:50%;background:var(--s-ok);position:relative;flex-shrink:0}
+.conn .pulse::after{content:"";position:absolute;inset:-3px;border-radius:50%;background:var(--s-ok);opacity:.35;animation:pulse 2s ease-out infinite}
+@keyframes pulse{0%{transform:scale(.6);opacity:.5}70%{transform:scale(1.7);opacity:0}100%{opacity:0}}
+.mini{font-size:11px;color:var(--text-sec);font-family:var(--mono);padding:0 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.main{flex:1;min-width:0;padding:28px 34px 80px;max-width:1360px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:22px;padding-bottom:18px;border-bottom:1px solid var(--border);flex-wrap:wrap}
+/* 页面标题保留 20px（O）：freellm 的 PageHeader 是 24px，但它没有「工具条式顶栏」 */
+.topbar h1{font-size:var(--fs-20);font-weight:700;line-height:1.35;flex:1;display:flex;align-items:baseline;gap:10px;letter-spacing:-.01em}
+.topbar .crumb{font-size:12px;color:var(--text-ter);font-weight:500}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⑤ 按钮 / chips / 分段控件
+   ══════════════════════════════════════════════════════════════════════════ */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:6px 13px;border:1px solid transparent;
+  border-radius:var(--r-md);font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;line-height:1.25;
+  transition:background var(--dur) var(--ease),border-color var(--dur) var(--ease),color var(--dur) var(--ease)}
+/* 主按钮 = 近白底（F）：freellm --primary 是近白，品牌蓝不再当主操作色 */
+.btn-primary{background:var(--primary);color:var(--primary-fg)}
+.btn-primary:hover{background:color-mix(in srgb,var(--primary) 88%,var(--bg))}
+.btn-ghost{background:transparent;color:var(--text-sec);border-color:var(--border)}
+.btn-ghost:hover{background:var(--surface-2);color:var(--text);border-color:var(--border-strong)}
+.btn-danger{background:transparent;color:var(--s-bad);border-color:var(--s-bad-line)}
+.btn-danger:hover{background:var(--s-bad-dim)}
+.btn-sm{padding:3px 9px;font-size:11.8px;border-radius:var(--r-sm)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.filter-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+/* chips（F）：pill 形态 + 无彩度，激活态用表面色而不是品牌色 */
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:var(--r-full);
+  border:1px solid var(--border);background:transparent;color:var(--text-sec);font-size:12px;font-weight:500;cursor:pointer;
+  transition:all var(--dur) var(--ease)}
+.chip:hover{border-color:var(--border-strong);color:var(--text)}
+.chip.active{background:var(--primary);border-color:transparent;color:var(--primary-fg);font-weight:600}
+.chip .cnt{font-family:var(--mono);font-size:11px;opacity:.75}
+/* 分段控件 .seg（F）：freellm 唯一的「一套分段控件到处用」惯用法 */
+.seg{display:inline-flex;gap:2px;background:var(--surface-2);border-radius:var(--r-lg);padding:3px}
+.seg button{background:none;border:none;color:var(--text-sec);font-size:12.5px;font-weight:600;
+  padding:5px 13px;border-radius:var(--r-md);cursor:pointer;transition:all var(--dur) var(--ease)}
+.seg button:hover{color:var(--text)}
+.seg button[aria-selected="true"]{background:var(--surface);color:var(--text);box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.input-sm{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-md);color:var(--text);
+  font-size:12px;padding:5px 9px;outline:none;cursor:pointer}
+.input-sm:hover{border-color:var(--border-strong)}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⑥ 卡片 / 统计卡 / Hero（结构不动，只换 token）
+   ══════════════════════════════════════════════════════════════════════════ */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-2xl);
+  padding:18px 20px;margin-bottom:16px}
+/* 卡片头（F）：freellm Panel = header(px16 py12 + border-b) + body(p16)；
+   我们原来是 h2 内嵌 border-bottom，右侧控件靠内联 style 拼 —— 换成显式结构。 */
+.card-hd{display:flex;align-items:center;gap:10px;margin:-2px 0 14px;padding-bottom:11px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.card-hd h2{font-size:14.5px;font-weight:650;letter-spacing:-.005em;display:flex;align-items:center;gap:8px}
+.card-hd .hd-sub{font-size:11.5px;color:var(--text-ter);font-weight:400}
+.card-hd .hd-act{margin-left:auto;display:flex;align-items:center;gap:8px}
+.card .hint{font-size:12.5px;color:var(--text-sec);line-height:1.65}
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px}
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-xl);padding:14px 16px;position:relative}
+.stat .k{font-size:11px;font-weight:600;color:var(--text-ter);margin-bottom:7px;display:flex;align-items:center;gap:7px;letter-spacing:.02em}
+/* 统计值 30px → 20px（F）：对齐 freellm 的 text-xl 唯一用值场景（AnalyticsPage.tsx:334） */
+.stat .v{font-size:var(--fs-20);font-weight:700;font-family:var(--mono);letter-spacing:-.01em;line-height:1.15}
+.stat .sub{font-size:11.5px;color:var(--text-ter);margin-top:6px;font-family:var(--mono)}
+.stat .v.green{color:var(--s-ok)}.stat .v.orange{color:var(--s-warn)}.stat .v.red{color:var(--s-bad)}.stat .v.blue{color:var(--text)}
+
+/* Hero（结构照抄，只调字号/圆角/边框） */
+.hero-usage-card{display:flex;flex-direction:column;gap:14px}
+.uh-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.uh-lead{display:flex;align-items:center;gap:12px;min-width:0}
+.uh-glyph{display:grid;place-items:center;width:38px;height:38px;border-radius:var(--r-lg);flex-shrink:0;background:var(--surface-2);color:var(--text)}
+.uh-label{font-size:11.5px;font-weight:500;color:var(--text-ter);margin-bottom:2px}
+.uh-value-line{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+/* 26px → 22px（F）：freellm 全站没有 26px 这一档 */
+.uh-value{font-size:22px;font-weight:700;line-height:1.1;letter-spacing:-.015em}
+.uh-badge{font-size:11.5px;font-weight:600;color:var(--text-sec);background:var(--surface-2);border-radius:var(--r-sm);padding:2px 6px}
+.uh-req{display:flex;flex-direction:column;gap:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-lg);padding:8px 14px}
+.uh-req-k{font-size:10px;color:var(--text-ter);letter-spacing:.06em}
+.uh-req-v{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:600}
+.uh-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+@media (min-width:1080px){.uh-grid{grid-template-columns:repeat(5,1fr)}}
+.uh-cell{display:flex;flex-direction:column;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r-lg);padding:11px 12px}
+.uh-cell-l{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:500;color:var(--text-ter)}
+.uh-cell-v{font-size:14px;font-weight:600;line-height:1.35}
+.uh-hit{grid-column:span 2;justify-content:center;gap:7px}
+@media (min-width:1080px){.uh-hit{grid-column:span 1}}
+.uh-hit-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.uh-hit-v{font-size:12.5px;font-weight:700;color:var(--s-ok)}
+.uh-hit-bar{position:relative;height:5px;border-radius:var(--r-full);background:var(--surface-2);overflow:hidden}
+.uh-hit-bar>i{display:block;height:100%;width:0;border-radius:var(--r-full);background:var(--s-ok);transition:width .4s}
+.v-mini .abbr{display:none}
+@media (max-width:820px){.v-mini .full{display:none}.v-mini .abbr{display:inline}}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⑦ 表格能力层（本方向的主战场）
+   ══════════════════════════════════════════════════════════════════════════ */
+/* 滚动容器：让 sticky 表头有作用域（列宽稳定 + 竖向滚动） */
+.tbl-wrap{border:1px solid var(--border);border-radius:var(--r-xl);overflow:auto;max-height:min(82vh,760px)}
+.tbl-wrap.plain{max-height:none}
+.tbl{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;
+  /* 列宽稳定（O）：table-layout:fixed + <colgroup> 显式列宽。
+     现状是 th 上写 width="20%" + table-layout:auto ⇒ 内容一变列宽就跳。 */
+  table-layout:fixed}
+.tbl thead th{
+  /* 粘性表头（O · 本方向新增）：freellm 没做，它的表格靠外层 overflow-x-auto */
+  position:sticky;top:0;z-index:3;background:var(--surface);
+  text-align:left;font-size:11px;font-weight:600;color:var(--text-ter);letter-spacing:.03em;
+  padding:9px 10px;border-bottom:1px solid var(--border);white-space:nowrap;user-select:none;
+}
+.tbl thead th.num{text-align:right}
+.tbl td{padding:7px 10px;border-bottom:1px solid var(--line);vertical-align:middle;overflow:hidden;text-overflow:ellipsis;line-height:1.45}
+.tbl tbody tr{transition:background var(--dur) var(--ease)}
+.tbl tbody tr:hover{background:color-mix(in srgb,var(--surface-2) 55%,transparent)}
+.tbl tbody tr.hl{background:var(--accent-dim)}
+.tbl tbody tr.clickable{cursor:pointer}
+.tbl tbody tr.sel{background:color-mix(in srgb,var(--surface-2) 80%,transparent)}
+/* 排序表头（F）：三态 = 默认 → 升 → 降 → 默认；空值两个方向都排最后（lib/table-sort.ts） */
+th.sortable{cursor:pointer}
+th.sortable:hover{color:var(--text);background:var(--surface-2)}
+th.sortable::after{content:"⇅";margin-left:6px;font-size:10px;opacity:.30}
+th.sortable[data-dir="asc"]::after{content:"▲";opacity:1;color:var(--text);font-size:8px}
+th.sortable[data-dir="desc"]::after{content:"▼";opacity:1;color:var(--text);font-size:8px}
+/* 分组分隔行（O）：评分「未测量」单独成组 */
+tr.group-sep td{background:var(--bg);color:var(--text-ter);font-size:11px;font-weight:600;
+  padding:7px 10px;border-bottom:1px solid var(--border);border-top:1px solid var(--border)}
+/* 行内下钻（O）：<tr class="row-detail"> + colspan，不动导航 */
+tr.row-detail>td{padding:0;background:var(--bg);border-bottom:1px solid var(--border)}
+.detail{padding:14px 16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;font-size:12.5px}
+.detail h4{font-size:11px;font-weight:700;color:var(--text-ter);letter-spacing:.05em;margin-bottom:8px}
+.detail .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font-size:12px}
+.detail .kv dt{color:var(--text-ter)}
+.detail .kv dd{font-family:var(--mono);color:var(--text);overflow-wrap:anywhere}
+.reasons{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.reason{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:var(--r-full);font-size:11px;font-weight:600}
+.reason.r-warn{background:var(--s-warn-dim);color:var(--s-warn)}
+.reason.r-bad{background:var(--s-bad-dim);color:var(--s-bad)}
+.reason.r-mut{background:var(--s-mut-dim);color:var(--text-ter)}
+.evtl{display:flex;flex-direction:column;gap:5px;margin-top:2px}
+.evtl .ev{display:grid;grid-template-columns:96px 96px 1fr;gap:8px;align-items:baseline;font-size:11.5px}
+.evtl .t{color:var(--text-ter);font-family:var(--mono);font-size:11px}
+.evtl .ty{font-size:10.5px;font-weight:700;border-radius:var(--r-xs);padding:1px 6px;text-align:center;
+  background:var(--surface-2);color:var(--text-sec)}
+.evtl .ty.bad{background:var(--s-bad-dim);color:var(--s-bad)}
+.evtl .ty.ok{background:var(--s-ok-dim);color:var(--s-ok)}
+.evtl .ty.warn{background:var(--s-warn-dim);color:var(--s-warn)}
+.evtl .d{color:var(--text-sec);overflow-wrap:anywhere}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⑧ 评分列 / 轴条 / 分档徽章 / 无数据占位（O · 本方向的核心新增）
+   ══════════════════════════════════════════════════════════════════════════ */
+.score{display:flex;align-items:center;gap:8px;min-width:0}
+.score .axis{position:relative;width:46px;height:5px;border-radius:var(--r-full);background:var(--surface-2);overflow:hidden;flex:none}
+.score .axis>i{display:block;height:100%;border-radius:var(--r-full)}
+.score .n{font-size:12.5px;font-weight:700;font-family:var(--mono);min-width:20px}
+.score .n.g{color:var(--s-ok)}.score .n.w{color:var(--s-warn)}.score .n.b{color:var(--s-bad)}
+/* AxisNoData（F）：虚线空条 + 「无数据」文案。
+   freellm model-table.tsx:42-46 的注释：把未测量的先验值画成实心条 = 一条「像真测量」的假数据。 */
+.score .axis-empty{background:transparent;border:1px dashed var(--border-strong);height:6px}
+.nd{font-size:11.5px;color:var(--text-ter);font-weight:600;white-space:nowrap}
+.nd-sub{font-size:10.5px;color:var(--text-ter);opacity:.75;white-space:nowrap}
+.tier{flex:none;font-size:10px;font-weight:700;border-radius:var(--r-full);padding:1px 7px;letter-spacing:.02em}
+.tier.t-ok{background:var(--s-ok-dim);color:var(--s-ok)}
+.tier.t-warn{background:var(--s-warn-dim);color:var(--s-warn)}
+.tier.t-bad{background:var(--s-bad-dim);color:var(--s-bad)}
+.tier.t-mut{background:var(--s-mut-dim);color:var(--text-ter)}
+/* 柱内轴条：成功率/占比共用 */
+.bar{display:inline-block;width:40px;height:5px;border-radius:var(--r-full);background:var(--surface-2);
+  overflow:hidden;vertical-align:middle;margin-right:7px}
+.bar>i{display:block;height:100%;border-radius:var(--r-full)}
+.rate{font-family:var(--mono);font-size:12.5px}
+.rate.ok{color:var(--s-ok)}.rate.warn{color:var(--s-warn)}.rate.bad{color:var(--s-bad)}
+.rate .n{color:var(--text-ter);font-size:11px;font-weight:400}
+
+/* 状态徽章（F）：Badge 变体思路；语义色令牌化（O） */
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2px 9px;border-radius:var(--r-full);
+  font-size:11.5px;font-weight:600;white-space:nowrap}
+.badge .bdot{width:5px;height:5px;border-radius:50%;flex:none}
+.badge.available{background:var(--s-ok-dim);color:var(--s-ok)}.badge.available .bdot{background:var(--s-ok)}
+.badge.exhausted{background:var(--s-warn-dim);color:var(--s-warn)}.badge.exhausted .bdot{background:var(--s-warn)}
+.badge.dead{background:var(--s-bad-dim);color:var(--s-bad)}.badge.dead .bdot{background:var(--s-bad)}
+.badge.idle{background:var(--s-mut-dim);color:var(--text-ter)}.badge.idle .bdot{background:var(--text-ter)}
+.tag{display:inline-flex;align-items:center;padding:1px 7px;border-radius:var(--r-sm);font-size:10.5px;
+  font-weight:600;vertical-align:1px;margin-left:6px}
+.tag.cur{background:var(--accent-dim);color:var(--accent)}
+.tag.man{background:var(--surface-2);color:var(--text-sec)}
+.node-name{font-weight:600;font-size:12.6px;display:block;line-height:1.3}
+.node-sub{font-size:10px;color:var(--text-ter);font-family:var(--mono);display:block;line-height:1.3}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⑨ C-5 节点层告警横幅（O · freellm 没有对应物）
+   ══════════════════════════════════════════════════════════════════════════ */
+.node-alert{display:none;gap:11px;padding:13px 15px;margin:0 0 14px;border:1px solid var(--s-bad-line);
+  border-left-width:3px;border-radius:var(--r-lg);background:var(--s-bad-dim);font-size:12.5px;line-height:1.6}
+.node-alert.on{display:flex}
+.node-alert.warn{border-color:var(--s-warn-line);background:var(--s-warn-dim)}
+/* 第三种形态（原型演示）：窗口内 0 样本 → 不构成告警，但同一个字段仍要能渲染为「无数据」 */
+.node-alert.info{border-color:var(--border-strong);background:var(--surface-2)}
+.node-alert .na-ico{flex-shrink:0;width:19px;height:19px;border-radius:50%;background:var(--s-bad);color:var(--bg);
+  font-weight:800;font-size:12px;display:flex;align-items:center;justify-content:center;margin-top:1px}
+.node-alert.warn .na-ico{background:var(--s-warn)}
+.node-alert.info .na-ico{background:var(--text-ter)}
+.node-alert .na-body{flex:1;min-width:0}
+.node-alert .na-title{font-weight:700;color:var(--s-bad);display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.node-alert.warn .na-title{color:var(--s-warn)}
+.node-alert.info .na-title{color:var(--text-sec)}
+.na-dur{font-size:11px;font-weight:700;background:var(--s-bad);color:var(--bg);border-radius:var(--r-full);padding:1px 8px}
+.node-alert .na-meta{color:var(--text-sec);font-size:11.5px;margin-top:3px;font-family:var(--mono);line-height:1.7}
+.na-cmp{color:var(--text-ter);font-size:11.5px;margin-top:5px;border-top:1px dashed var(--border);padding-top:5px}
+
+/* 待接入提示条 */
+.pending{display:flex;gap:9px;align-items:flex-start;padding:9px 13px;margin:0 0 14px;border:1px dashed var(--s-warn-line);
+  border-radius:var(--r-lg);background:var(--s-warn-dim);font-size:12px;line-height:1.65;color:var(--text-sec)}
+.pending b{color:var(--s-warn)}
+.pending code{font-family:var(--mono);font-size:11.5px;background:var(--bg);border:1px solid var(--border);
+  border-radius:var(--r-xs);padding:0 4px}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⑩ 失败构成 / 出口来源 / 骨架 / 空态 / 趋势
+   ══════════════════════════════════════════════════════════════════════════ */
+.sumgrid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px}
+@media (max-width:1100px){.sumgrid{grid-template-columns:1fr}}
+.stack{display:flex;height:10px;border-radius:var(--r-full);overflow:hidden;background:var(--surface-2);margin:2px 0 10px}
+.stack>i{display:block;height:100%}
+.mixlist{display:flex;flex-direction:column;gap:5px;font-size:12px}
+.mixrow{display:grid;grid-template-columns:10px 1fr auto auto;gap:9px;align-items:center}
+.mixrow .sw{width:9px;height:9px;border-radius:2px}
+.mixrow .nm{color:var(--text-sec);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mixrow .nm b{color:var(--text);font-weight:600}
+.mixrow .ct{font-family:var(--mono);color:var(--text-ter);font-size:11.5px}
+.mixrow .pc{font-family:var(--mono);font-weight:700;min-width:44px;text-align:right}
+.flow-note{font-size:11px;color:var(--text-ter);margin-top:9px;line-height:1.6}
+
+/* 骨架屏（F）：与真实行同形同数量 —— freellm「the layout keeps its shape while data arrives」 */
+@keyframes sk{0%{opacity:.55}50%{opacity:.18}100%{opacity:.55}}
+.sk{background:var(--surface-2);border-radius:var(--r-sm);height:11px;animation:sk 1.5s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.sk{animation:none;opacity:.35}.conn .pulse::after{animation:none}}
+/* 空态（F）：空态没有下一步就是死路（empty-state.tsx:4-6） */
+.empty-card{display:flex;flex-direction:column;align-items:center;gap:9px;padding:34px 20px;text-align:center;
+  border:1px dashed var(--border-strong);border-radius:var(--r-xl);background:transparent}
+.empty-card .ec-ic{width:34px;height:34px;border-radius:var(--r-lg);background:var(--surface-2);display:grid;place-items:center;color:var(--text-ter)}
+.empty-card .ec-t{font-size:13.5px;font-weight:650}
+.empty-card .ec-d{font-size:12px;color:var(--text-ter);max-width:420px;line-height:1.7}
+.empty-hint{text-align:center;color:var(--text-ter);padding:0;font-size:13px}
+
+/* 趋势（原型用纯 CSS：生产实现保留现有 ECharts 调用，不动） */
+.trend{display:flex;align-items:flex-end;gap:3px;height:120px;padding-top:6px}
+.trend .b{flex:1;display:flex;flex-direction:column;justify-content:flex-end;height:100%;position:relative;min-width:0}
+.trend .b .stackbar{display:flex;flex-direction:column-reverse;border-radius:3px 3px 0 0;overflow:hidden}
+.trend .b .ok{background:color-mix(in srgb,var(--s-ok) 62%,var(--surface-2))}
+.trend .b .fail{background:var(--s-bad)}
+.trend .b:hover .stackbar{outline:1px solid var(--border-strong)}
+.trend .tip{position:absolute;bottom:calc(100% + 5px);left:50%;transform:translateX(-50%);display:none;
+  background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r-sm);padding:4px 8px;
+  font-size:11px;white-space:nowrap;z-index:9;font-family:var(--mono)}
+.trend .b:hover .tip{display:block}
+.trend-x{display:flex;gap:3px;margin-top:6px;font-size:10px;color:var(--text-ter);font-family:var(--mono)}
+.trend-x span{flex:1;text-align:center;overflow:hidden;white-space:nowrap}
+.legend-inline{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--text-sec);margin-top:10px}
+.legend-inline i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px;vertical-align:0}
+.legend-inline i.g{background:color-mix(in srgb,var(--s-ok) 62%,var(--surface-2))}
+.legend-inline i.r{background:var(--s-bad)}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   ⑪ 页面 / toast / 表单 / 其它沿用结构
+   ══════════════════════════════════════════════════════════════════════════ */
+.page{display:none}
+.page.active{display:block;animation:fadeIn .18s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(3px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.page.active{animation:none}}
+#toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(16px);background:var(--text);
+  color:var(--bg);padding:10px 20px;border-radius:var(--r-lg);font-size:13px;font-weight:600;opacity:0;
+  pointer-events:none;transition:all .22s var(--ease);z-index:999;box-shadow:var(--shadow)}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.error{background:var(--s-bad);color:#fff}
+.field label{display:block;font-size:11.5px;font-weight:600;color:var(--text-sec);margin-bottom:5px;letter-spacing:.02em}
+.field input,.field select{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:var(--r-md);
+  font-size:12.5px;font-family:var(--mono);background:var(--bg);color:var(--text)}
+.field input:focus,.field select:focus{outline:none;border-color:var(--border-strong)}
+.field .hint{font-size:11px;color:var(--text-ter);margin-top:4px;line-height:1.5}
+.gw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px}
+.gw-box{border:1px solid var(--border);border-radius:var(--r-lg);padding:10px 12px;background:var(--bg)}
+.gw-label{font-size:11.5px;color:var(--text-ter);margin-bottom:5px}
+.gw-copy{display:flex;align-items:center;gap:6px;background:none;border:none;padding:0;cursor:pointer;
+  color:var(--text);font-family:var(--mono);font-size:12.5px}
+.gw-copy:hover{color:var(--accent)}
+.unchanged{display:inline-flex;align-items:center;gap:7px;font-size:11px;font-weight:600;color:var(--text-ter);
+  border:1px dashed var(--border-strong);border-radius:var(--r-full);padding:2px 10px;margin-bottom:12px}
+.tipbox{border:1px dashed var(--border-strong);border-radius:var(--r-lg);padding:10px 13px;font-size:11.5px;
+  color:var(--text-ter);line-height:1.7;margin-top:12px}
+.tipbox b{color:var(--text-sec)}
+/* 窄屏：原型工具条必须收成一行，否则它会把整个首屏吃掉（实测 390px 下占满 844px） */
+@media(max-width:900px){
+  .proto{position:static;padding:8px 10px;gap:7px}
+  .proto-group{display:none}
+  .proto-tag:nth-of-type(2){display:none}
+}
+@media(max-width:980px){
+  .sidebar{width:64px;padding:16px 8px}
+  .nav button span,.logo-text,.logo-sub,.mini{display:none}
+  .nav button{justify-content:center}
+  .main{padding:18px 14px 60px}
+  .stats-row{grid-template-columns:repeat(2,1fr)}
+  .card{padding:14px}
+  .sumgrid{grid-template-columns:1fr}
+}
+@media(max-width:560px){.stats-row{grid-template-columns:1fr}}
+/* 窄屏表格：横向滚动（与 freellm §4.6 的做法一致，它也没做卡片化堆叠）。
+   这条提示只在窄屏出现，落地时按需改成「名称+状态+评分+成功率」的窄表降级。 */
+.only-narrow{display:none}
+@media(max-width:900px){
+  .only-narrow{display:block}
+  /* 窄屏给表格一个可滚动的最小宽度：table-layout:fixed 在 390px 下会把 10 列压到不可读，
+     与其压扁不如让它横滚（与 freellm 的 overflow-x-auto 行为一致）。 */
+  #nodeTable{min-width:880px}
+  #callTable{min-width:920px}
+}
+</style>
+</head>
+<body data-marks="on">
+
+<!-- ═══════════════ 原型工具条（模造物 · 不进生产） ═══════════════ -->
+<div class="proto" role="toolbar" aria-label="原型演示工具条">
+  <span class="proto-tag">方向 C · 表格优先</span>
+  <span class="proto-tag" style="background:var(--s-mut-dim);color:var(--text-ter)">原型工具 · 不进生产实现</span>
+  <span class="proto-group"><b>表格状态</b>
+    <button class="pbtn" data-demo="normal" onclick="demoState('normal')">正常</button>
+    <button class="pbtn" data-demo="loading" onclick="demoState('loading')">加载骨架</button>
+    <button class="pbtn" data-demo="empty" onclick="demoState('empty')">空态</button>
+  </span>
+  <span class="proto-group"><b>节点层告警</b>
+    <select id="alertSel" onchange="setAlert(this.value)">
+      <option value="rate0">窗口成功率 0%（判据 A）</option>
+      <option value="pool0">池内可用 = 0（判据 B）</option>
+      <option value="nodata">窗口 0 样本（不告警）</option>
+      <option value="off">不告警</option>
+    </select>
+  </span>
+  <span class="proto-group"><b>评分数据</b>
+    <select id="scoreSel" onchange="setScoreMode(this.value)">
+      <option value="mixed">部分有分 / 部分无数据</option>
+      <option value="none">全表无数据（机制未接入）</option>
+    </select>
+  </span>
+  <span class="spacer"></span>
+  <button class="pbtn on" id="mkBtn" onclick="toggleMarks()">F / O 来源标记</button>
+  <button class="pbtn" onclick="toggleLegend()">设计来源图例</button>
+  <button class="pbtn" onclick="toggleTheme()">切换主题</button>
+</div>
+
+<!-- ═══════════════ 设计来源图例 ═══════════════ -->
+<div class="legend" id="legend">
+  <div class="legend-in">
+    <h2>设计来源图例 · 照抄 vs 自研</h2>
+    <div class="lg-sub">
+      本方向的价值全部押在这一页上：<b>哪些直接照抄 freellm（省下设计决策）</b>、<b>哪些必须自己造（freellm 给不了）</b>。
+      结论沿 U1 §5.3 —— <code>设计决策 ≈ 95% 可抄，代码 ≈ 10% 可抄</code>（唯一可逐行复制的是 <code>lib/table-sort.ts</code>）。
+      页内 <span class="mk mk-f mk-static">F</span> 标记照抄项、<span class="mk mk-o mk-static">O</span> 标记自研项，可用工具条开关。
+    </div>
+    <div class="lg-cols">
+      <div class="lg-col f">
+        <h3><span class="mk mk-f mk-static">F</span>照抄 freellm（token / 组件 / 交互契约）</h3>
+        <ul>
+          <li><b>中性色板去彩度</b>：bg/card/muted/border 全部 chroma=0；暗色 <code>border = 纯白 10%</code>，不是我们的蓝灰</li>
+          <li><b>主色 = 近白（暗）/ 近黑（亮）</b>：品牌蓝不再当主按钮与导航激活色</li>
+          <li><b>字号刻度</b>：正文/表体 12–14、标签 11、微徽章 10、统计值 20、页面标题 24</li>
+          <li><b>全局 <code>tnum</code> 等宽数字</b>：body 级，替掉我们逐处 <code>.num</code> 的漏标</li>
+          <li><b>圆角刻度</b>：卡片 24 / 表格容器 16 / 控件 8–12 / 徽章与进度条 999</li>
+          <li><b>不用阴影分层</b>：靠 <code>border + bg-card</code>；去掉现有 card hover 阴影</li>
+          <li><b>间距 4px 基数</b>：卡片 padding 16–20、卡片间距 16、栅格 gap 12</li>
+          <li><b>排序三态 + 空值双向排最后 + 按表持久化</b>（<code>lib/table-sort.ts</code> 可逐行翻译）</li>
+          <li><b>AxisBar 轴条</b> 与 <b>AxisNoData 虚线空条 + 「无数据」</b>诚实占位</li>
+          <li><b>骨架屏与真实行同形同数量</b>（避免 reflow）</li>
+          <li><b>带动作的空状态</b>（「没有下一步的空态是死路」）</li>
+          <li><b>Panel 卡片头</b>（标题 + 右侧 actions 槽 + 分隔线）</li>
+          <li><b>分段控件</b>用 <code>aria-selected</code> 而不是自定义 class 切换</li>
+          <li><b>「排序只覆盖已加载行」显式提示</b></li>
+        </ul>
+      </div>
+      <div class="lg-col o">
+        <h3><span class="mk mk-o mk-static">O</span>我们自己的（freellm 没有，或语义不同）</h3>
+        <ul>
+          <li><b>状态语义三档令牌</b> <code>--s-ok/--s-warn/--s-bad</code>：freellm 把状态色硬编码在组件里，我们令牌化</li>
+          <li><b>节点评分列</b>：freellm 是「模型三轴 + 总分」；我们的评分语义是出口可用性，且<b>必须带样本量</b></li>
+          <li><b>成功率与样本量同格</b> <code>96.4% (3.2K)</code>：freellm 的样本量是独立列，看不出「52% 只有 240 个样本」</li>
+          <li><b>「未测量」独立分组 + 恒排末尾</b>：freellm 只把 0 样本降级，不分组</li>
+          <li><b>行内展开下钻</b>（<code>&lt;tr class="row-detail"&gt;</code>）：freellm 是独立路由页，我们不动导航</li>
+          <li><b>C-5 节点层告警横幅</b>：没有任何对应物，是本项目专属的整层故障面</li>
+          <li><b>失败构成 + 直连三类细分</b>：我们特有的口径（闸门/连接/429/403/5xx/其它）</li>
+          <li><b>列宽稳定</b>：<code>&lt;colgroup&gt; + table-layout:fixed</code>；freellm 靠 Tailwind 表格默认值</li>
+          <li><b>粘性表头</b>：freellm 没做（它的表格外层是 <code>overflow-x-auto</code>）</li>
+          <li><b>保留左侧栏 + 5 分区导航</b>：不学 freellm 的顶部横条（U1 §7.8）</li>
+          <li><b>保留 CJK 系统字体栈</b>：Geist 11 个 woff2 全是 Latin，中文零收益（U1 §7.3）</li>
+          <li><b>保留 ECharts 与现有 onclick 事件模型</b>：CSP/React/构建链物理上搬不进 go:embed 单文件</li>
+        </ul>
+      </div>
+      <div class="lg-col x">
+        <h3>明确不抄（✗ · 附理由）</h3>
+        <ul>
+          <li><b>React / Vite / Tailwind 构建链</b> —— 产物 1.68 MB JS + 102 KB CSS，且 <code>discev_test.go:29</code> 依赖「前端是文本资产」这个契约</li>
+          <li><b>CSP <code>script-src-attr 'none'</code></b> —— 我们有 75 处 <code>onclick</code>；改事件模型是另一件独立的事（U1 §7.1）</li>
+          <li><b>自托管 Geist 字体</b> —— 无 CJK 字形，只增体积</li>
+          <li><b>60 个 locale 的 i18n</b> —— 比我们整个面板大 30 倍</li>
+          <li><b>顶部横条导航 / 多产品面</b> —— 我们是单一用途本地代理面板</li>
+          <li><b>后台标签页不轮询</b>（<code>refetchIntervalInBackground:false</code>）—— 运维台把面板挂在后台当监控，这条会看出 30 秒前的状态（U1 §7.7）</li>
+          <li><b>关键信息只放 hover tooltip</b> —— 触屏直接丢信息；本原型的解释都同时出现在行内展开区（U1 §7.6）</li>
+          <li><b>三轴强行凑齐</b> —— 后端没给的维度不画条，宁可只放一列评分（U1 §7.5）</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ 面板本体（结构与 static/admin.html 一一对应） ═══════════════ -->
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo-mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20l6-8h4l-6 8z"/><path d="M4 20h4"/><path d="M12 10V4a2 2 0 00-2-2H4a2 2 0 00-2 2v9"/></svg></div>
+      <div>
+        <div class="logo-text">opencode<span class="logo-accent">2api</span></div>
+        <div class="logo-sub">ADMIN · LOCAL PROXY</div>
+      </div>
+    </div>
+    <nav class="nav" id="nav">
+      <button data-page="overview" class="active" onclick="showPage('overview')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg><span>概览</span></button>
+      <button data-page="nodes" onclick="showPage('nodes')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="15" cy="15" r="1.2" fill="currentColor"/><path d="M9 15l6-6"/></svg><span>节点池</span></button>
+      <button data-page="subs" onclick="showPage('subs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10l3-3h3v14H4z"/><path d="M4 8v11a1 1 0 001 1h15"/></svg><span>订阅与配额</span></button>
+      <button data-page="misc" onclick="showPage('misc')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="15" cy="6" r="2.4" fill="var(--surface)"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="18" r="2.4" fill="var(--surface)"/></svg><span>代理与模型</span></button>
+      <button data-page="logs" onclick="showPage('logs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg><span>运行日志</span></button>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="mini mono">localhost:8000</div>
+      <div class="conn"><span class="pulse"></span><span>已连接 · 深色</span></div>
+      <button class="btn btn-ghost btn-sm" style="justify-content:center" onclick="toggleTheme()">主题切换</button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <h1 id="pageTitle">概览 <span class="crumb" id="pageCrumb">OPENCODE TO API</span></h1>
+      <span class="muted" style="font-size:11.5px;font-family:var(--mono)">最近 24 小时 · 数据截至 13:38</span>
+      <button class="btn btn-ghost btn-sm" onclick="toast('已刷新会话 &amp; 模型')">刷新会话 &amp; 模型</button>
+      <button class="btn btn-primary btn-sm" onclick="toast('已刷新数据')">刷新数据</button>
+    </div>
+
+    <!-- ══════════════ 概览（结构一字未动，只换 token） ══════════════ -->
+    <section id="page-overview" class="page active">
+      <div class="stats-row">
+        <div class="stat"><div class="k">节点总数</div><div class="v blue" id="ovTotal">-</div><div class="sub">3 订阅源 + 手动 1</div></div>
+        <div class="stat"><div class="k">可用</div><div class="v green" id="ovHealthy">-</div><div class="sub" id="ovActive">当前: -</div></div>
+        <div class="stat"><div class="k">配额冷却</div><div class="v orange" id="ovExhausted">-</div><div class="sub">1h 自动恢复</div></div>
+        <div class="stat"><div class="k">故障</div><div class="v red" id="ovDead">-</div><div class="sub">60s 后自动重试</div></div>
+      </div>
+
+      <div class="card hero-usage-card">
+        <div class="uh-head">
+          <div class="uh-lead">
+            <span class="uh-glyph" aria-hidden="true"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></span>
+            <div>
+              <div class="uh-label">真实消耗 Tokens</div>
+              <div class="uh-value-line"><span class="uh-value" id="tcTotalToken">—</span><span class="uh-badge" id="tcTotalTokenShort">≈ —</span></div>
+            </div>
+          </div>
+          <div class="uh-req"><span class="uh-req-k">总请求数</span><span class="uh-req-v"><span id="tcTotalReq">—</span></span></div>
+        </div>
+        <div class="uh-grid">
+          <div class="uh-cell"><div class="uh-cell-l">新增输入</div><div class="uh-cell-v" id="gIn">—</div></div>
+          <div class="uh-cell"><div class="uh-cell-l">Output</div><div class="uh-cell-v" id="gOut">—</div></div>
+          <div class="uh-cell"><div class="uh-cell-l">命中</div><div class="uh-cell-v" id="gCR">—</div></div>
+          <div class="uh-cell"><div class="uh-cell-l">吞吐 tps</div><div class="uh-cell-v" id="tcAvgTps">—</div></div>
+          <div class="uh-cell uh-hit">
+            <div class="uh-hit-top"><span class="uh-cell-l">缓存命中率</span><span class="uh-hit-v" id="tcCacheRate">—</span></div>
+            <div class="uh-hit-bar"><i id="tcCacheBar" style="width:0"></i></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd">
+          <h2>24 小时请求与失败<span class="mk mk-f" title="照抄 freellm：Panel 卡片头 + 稀疏纵轴">F</span></h2>
+          <span class="hd-sub">柱高 = 请求数，柱内红色 = 失败</span>
+          <span class="hd-act"><span class="muted" style="font-size:11.5px;font-family:var(--mono)">共 3,902 请求 · 成功 88.5%</span></span>
+        </div>
+        <div class="trend" id="trend"></div>
+        <div class="trend-x" id="trendX"></div>
+        <div class="legend-inline">
+          <span><i class="g"></i>成功</span><span><i class="r"></i>失败</span>
+          <span class="muted">▎10:04 起节点层整体失败（红柱抬升即故障窗口）</span>
+        </div>
+        <div class="tipbox">
+          <b>口径</b>：请求级，分母 = 窗口内全部调用记录（含直连），分子 = <code style="font-family:var(--mono)">status==="ok"</code>。
+          与「出口尝试级」不是同一个分母 —— 一次请求可以消耗多次出口尝试，所以尝试级成功率（75.9%）低于请求级（88.5%）是正常的，不是矛盾。
+          <br><b>原型说明</b>：本图用纯 CSS 柱状图替代 ECharts（保证 file:// 离线可开）。<b>落地时保留现有 ECharts 调用一行不改</b>，只换容器与坐标轴样式。
+        </div>
+      </div>
+
+      <div class="sumgrid">
+        <div class="card" style="margin:0">
+          <div class="card-hd"><h2>失败构成<span class="mk mk-o" title="我们自己的口径：闸门/连接/429/403/5xx/其它">O</span></h2><span class="hd-sub">24h · 互斥分类</span></div>
+          <div class="stack" id="mixStack"></div>
+          <div class="mixlist" id="mixList"></div>
+          <div class="flow-note">六类互斥且全覆盖：加总 = 失败总数 449。百分比由条数计算（四舍五入到 0.1pp），不另存第二份。与需求 brief 给定值一致（±0.3pp 为取整误差）。</div>
+        </div>
+        <div class="card" style="margin:0">
+          <div class="card-hd"><h2>耗时分布<span class="mk mk-o" title="我们自己的：p50/p95 直接给数字，不画分布图">O</span></h2><span class="hd-sub">仅统计成功请求</span></div>
+          <div class="mixlist">
+            <div class="mixrow"><span class="sw" style="background:var(--s-ok)"></span><span class="nm"><b>p50</b> 中位耗时</span><span class="ct">3,453 条</span><span class="pc" style="color:var(--s-ok)">11.4s</span></div>
+            <div class="mixrow"><span class="sw" style="background:var(--s-warn)"></span><span class="nm"><b>p95</b> 尾部耗时</span><span class="ct">3,453 条</span><span class="pc" style="color:var(--s-warn)">39.3s</span></div>
+            <div class="mixrow"><span class="sw" style="background:var(--text-ter)"></span><span class="nm">均值</span><span class="ct">3,453 条</span><span class="pc">16.8s</span></div>
+            <div class="mixrow"><span class="sw" style="background:var(--text-ter)"></span><span class="nm">p95 / p50 倍率</span><span class="ct">尾部风险</span><span class="pc" style="color:var(--s-warn)">3.4×</span></div>
+          </div>
+          <div class="flow-note">耗时含上游生成时间（流式请求按整段计时），所以 p50 在 10 秒量级是正常的；它衡量的是「用户等多久」，不是「网络多快」。</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd">
+          <h2>模型明细<span class="mk mk-o" title="沿用现有 #statsTable，只加排序与粘性表头">O</span></h2>
+          <span class="hd-sub">数据来自 GET /api/stats?range=today</span>
+          <span class="hd-act"><button class="btn btn-ghost btn-sm" onclick="toast('已刷新统计')">刷新</button></span>
+        </div>
+        <div class="tbl-wrap plain">
+          <table class="tbl" id="statsTable" style="table-layout:auto">
+            <thead><tr>
+              <th class="sortable" data-t="stats" data-k="model">模型</th>
+              <th class="num sortable" data-t="stats" data-k="prompt_tokens">输入</th>
+              <th class="num sortable" data-t="stats" data-k="completion_tokens">输出</th>
+              <th class="num sortable" data-t="stats" data-k="cache_read_tokens">缓存读</th>
+              <th class="num sortable" data-t="stats" data-k="total_tokens">总计</th>
+              <th class="num sortable" data-t="stats" data-k="request_count">请求数</th>
+              <th class="num sortable" data-t="stats" data-k="avg_ttft_ms">TTFT</th>
+              <th class="num sortable" data-t="stats" data-k="throughput_tps">吞吐</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="flow-note">排序只覆盖已加载的 4 行（本表为窗口内全量聚合，无分页）。</div>
+      </div>
+
+      <div class="card">
+        <div class="card-hd"><h2>快速接入</h2></div>
+        <div class="gw-grid">
+          <div class="gw-box"><div class="gw-label">统一 API 地址</div><button class="gw-copy" onclick="toast('已复制统一 API 地址')"><code>http://localhost:8000/v1</code></button></div>
+          <div class="gw-box"><div class="gw-label">统一密钥</div><button class="gw-copy" onclick="toast('已复制统一密钥')"><code>sk-••••••••••••••••</code></button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ 节点池（本方向的主战场） ══════════════ -->
+    <section id="page-nodes" class="page">
+      <!-- C-5 节点层告警：数据来自 /api/nodes 的 node_alert（node_alert.go） -->
+      <div class="node-alert" id="nodeAlert" role="alert">
+        <span class="na-ico" id="naIco">!</span>
+        <div class="na-body">
+          <div class="na-title"><span id="naTitle">节点层告警</span><span class="na-dur" id="naDur"></span></div>
+          <div id="naReason"></div>
+          <div class="na-meta" id="naMeta"></div>
+          <div class="na-cmp" id="naCmp"></div>
+        </div>
+      </div>
+
+      <!-- 评分机制待接入：把「占位」做成显式承诺，而不是假装有数 -->
+      <div class="pending">
+        <span style="color:var(--s-warn);font-weight:700">评分机制待接入</span>
+        <div>
+          评分列与排序入口<b>已占位</b>，数据契约按 U1 §8.4：节点对象新增
+          <code>score:{ value, samples, components[], reasons[] }</code>。
+          后端未产出前，<b>有分按降序在前、无样本单独成组排在末尾</b>，且一律渲染「无数据」虚线占位 ——
+          <b>绝不显示 0 分</b>（0 分语义是「最差」，与「不知道」相反）。
+        </div>
+      </div>
+
+      <div class="filter-chips" id="stateChips" style="margin-bottom:12px">
+        <button class="chip active" data-f="all" onclick="setFilter('all')">全部 <span class="cnt" id="cntAll"></span></button>
+        <button class="chip" data-f="available" onclick="setFilter('available')">可用 <span class="cnt" id="cntAvail"></span></button>
+        <button class="chip" data-f="exhausted" onclick="setFilter('exhausted')">已耗尽 <span class="cnt" id="cntExh"></span></button>
+        <button class="chip" data-f="dead" onclick="setFilter('dead')">故障 <span class="cnt" id="cntDead"></span></button>
+        <button class="chip" data-f="unmeasured" onclick="setFilter('unmeasured')">未测量 <span class="cnt" id="cntUnm"></span></button>
+      </div>
+
+      <div class="actions" style="margin-bottom:14px">
+        <button class="btn btn-primary" onclick="toast('正在重新加载订阅…')">重新加载订阅</button>
+        <button class="btn btn-ghost" onclick="toast('已解除全部标记')">解除全部标记</button>
+        <button class="btn btn-ghost" onclick="toast('测速中…')">测速</button>
+        <button class="btn btn-ghost" onclick="toast('已刷新节点')">刷新节点</button>
+        <span class="muted" style="font-size:11px;font-family:var(--mono);margin-left:auto">
+          节点状态 13:38:02 刷新 · 成功率/请求数 13:37:55 刷新（两个接口节奏不同，同一屏数字可能瞬时不自洽）
+        </span>
+      </div>
+
+      <div class="sumgrid" style="margin-bottom:16px">
+        <div class="card" style="margin:0">
+          <div class="card-hd"><h2>24h 失败构成<span class="mk mk-o" title="我们自己的：表上方的失败形态细分条">O</span></h2><span class="hd-sub">449 条失败</span></div>
+          <div class="stack" id="mixStack2"></div>
+          <div class="mixlist" id="mixList2"></div>
+        </div>
+        <div class="card" style="margin:0">
+          <div class="card-hd">
+            <h2>出口来源健康<span class="mk mk-o" title="我们自己的：直连 vs 订阅源的口径分离">O</span></h2>
+            <span class="hd-sub">24h · 尝试级 5,412 次</span>
+          </div>
+          <div class="mixlist" id="srcList"></div>
+          <div class="flow-note">
+            <b>尝试级 ≠ 请求级</b>：一次请求可经过多个出口。三个来源全天 0%（共 986 次尝试全部失败），
+            直接出口 161/161 全通 —— 这正是 C-5 要盯的形态：<b>池子看起来有人，实际整层不通</b>。
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="padding:14px">
+        <div class="card-hd">
+          <h2>节点表<span class="mk mk-f" title="照抄 freellm：排序三态 / 空值末置 / 骨架 / 带动作空态">F</span><span class="mk mk-o" title="我们自己的：粘性表头 / colgroup 列宽稳定 / 行内下钻 / 评分列">O</span></h2>
+          <span class="hd-sub">默认按评分降序 · 未测量恒排末尾</span>
+          <span class="hd-act"><span class="muted" style="font-size:11px;font-family:var(--mono)" id="nodeCount"></span></span>
+        </div>
+        <div class="tbl-wrap">
+          <table class="tbl" id="nodeTable">
+            <colgroup>
+              <col style="width:15%"><col style="width:9%"><col style="width:14%"><col style="width:12%">
+              <col style="width:8%"><col style="width:8%"><col style="width:8%"><col style="width:9%">
+              <col style="width:12%"><col style="width:5%">
+            </colgroup>
+            <thead>
+              <tr>
+                <th class="sortable" data-t="node" data-k="name">名称</th>
+                <th class="sortable" data-t="node" data-k="state">状态<span class="mk mk-f" title="照抄 freellm Badge 变体">F</span></th>
+                <th class="sortable" data-t="node" data-k="score">评分<span class="mk mk-o" title="我们自己的评分列（freellm 是模型三轴）">O</span></th>
+                <th class="sortable" data-t="node" data-k="rate">成功率 (样本)<span class="mk mk-o" title="我们自己的：成功率与样本量同格">O</span></th>
+                <th class="num sortable" data-t="node" data-k="req">请求数</th>
+                <th class="num sortable" data-t="node" data-k="issues">异常/切换</th>
+                <th class="num sortable" data-t="node" data-k="latency_ms">延迟</th>
+                <th class="sortable" data-t="node" data-k="cooldown_until">冷却至</th>
+                <th>最近错误</th>
+                <th class="num">操作</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="flow-note">
+          原型内嵌 13 行代表样本（真实 227 行：115 可用 / 2 配额冷却 / 110 故障）。排序状态按表存
+          <code style="font-family:var(--mono)">localStorage["c.sort.nodeTable"]</code>；隐私模式下退化为「本会话内生效」，不抛错。
+        </div>
+        <div class="flow-note">
+          粘性表头：<code style="font-family:var(--mono)">&lt;th&gt;{position:sticky;top:0}</code> 作用在
+          <code style="font-family:var(--mono)">.tbl-wrap</code> 这个滚动容器内。原型只有 13 行、一屏放得下，
+          所以默认不触发容器滚动；<b>点开任意一行（行内下钻展开）就会让表体超过容器高度，此时滚动即可看到表头钉住</b>；
+          真实 227 行时常态生效。
+        </div>
+        <div class="flow-note only-narrow" style="color:var(--s-warn)">
+          窄屏：表格横向滚动（与 freellm §4.6 一致，它也没做卡片化堆叠）。若要更好的手机体验，
+          落地时降级为「名称 + 状态 + 评分 + 成功率 (n)」四列窄表，其余列进行内展开区。
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ 订阅与配额（本方向未改） ══════════════ -->
+    <section id="page-subs" class="page">
+      <div class="unchanged">本方向未改动 · 结构与 static/admin.html:604-650 一致</div>
+      <div class="card">
+        <div class="card-hd"><h2>订阅源</h2><span class="hd-sub">Clash YAML / 行式 URI / base64 包裹</span></div>
+        <div class="tbl-wrap plain">
+          <table class="tbl" style="table-layout:auto">
+            <thead><tr><th>名称</th><th>URL</th><th class="num">间隔(h)</th><th class="num">节点数</th><th>流量</th><th>上次拉取</th></tr></thead>
+            <tbody id="subBody"></tbody>
+          </table>
+        </div>
+        <div class="actions" style="margin-top:12px"><button class="btn btn-primary" onclick="toast('已保存订阅与节点')">保存订阅与节点</button></div>
+      </div>
+      <div class="card">
+        <div class="card-hd"><h2>免费额度切换</h2><span class="hd-sub">配额耗尽时自动标记当前节点并切换</span></div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px">
+          <div class="field"><label>单请求最大切换次数</label><input value="5"></div>
+          <div class="field"><label>耗尽冷却（小时）</label><input value="1"></div>
+          <div class="field"><label>故障复探间隔（分钟）</label><input value="1"></div>
+          <div class="field"><label>健康检查间隔（分钟）</label><input value="15"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ 代理与模型（本方向未改） ══════════════ -->
+    <section id="page-misc" class="page">
+      <div class="unchanged">本方向未改动 · 结构与 static/admin.html:653-692 一致</div>
+      <div class="card">
+        <div class="card-hd"><h2>模型映射</h2><span class="hd-sub">以 -free 结尾的免费模型自动映射</span></div>
+        <div class="tbl-wrap plain">
+          <table class="tbl" style="table-layout:auto">
+            <thead><tr><th>别名（请求名）</th><th>实际模型（上游名）</th></tr></thead>
+            <tbody id="aliasBody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-hd"><h2>推理力度映射</h2></div>
+        <div class="tbl-wrap plain">
+          <table class="tbl" style="table-layout:auto">
+            <thead><tr><th>请求值</th><th>映射值</th></tr></thead>
+            <tbody id="effortBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══════════════ 运行日志（调用日志视图改造成表格） ══════════════ -->
+    <section id="page-logs" class="page">
+      <div class="card">
+        <div class="card-hd">
+          <h2>运行日志</h2>
+          <span class="hd-act">
+            <span class="seg" role="tablist" aria-label="日志视图">
+              <button role="tab" id="logTabRaw" onclick="showLogTab('raw')">原始日志</button>
+              <button role="tab" id="logTabCall" aria-selected="true" onclick="showLogTab('call')">调用日志</button>
+            </span>
+          </span>
+        </div>
+
+        <div id="rawLogView" style="display:none">
+          <div class="tbl-wrap plain" style="padding:14px">
+            <div class="empty-card">
+              <div class="ec-ic"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 5h16v14H4z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/></svg></div>
+              <div class="ec-t">原始日志沿用现有 SSE 流视图，本方向不改动</div>
+              <div class="ec-d">本方向只改「调用日志」的列表视图（卡片 → 表格）。原始日志的 <code style="font-family:var(--mono)">.log-wrap</code> / <code style="font-family:var(--mono)">.log-line</code> 结构保持原样。</div>
+              <button class="btn btn-ghost btn-sm" onclick="showLogTab('call')">切到调用日志</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="callLogView">
+          <!-- 摘要条：保留 #clTotal/#clOk/#clFail/#clRealRate/#clIssue 五个 id（现有实现与 verify_ui.py 都读它们） -->
+          <div class="cl-summary" style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-size:12.5px;margin-bottom:12px">
+            <span style="color:var(--text-ter)">24h 共 <b id="clTotal" style="color:var(--text)">0</b> 条</span>
+            <span style="color:var(--s-ok)">成功 <b id="clOk">0</b></span>
+            <span style="color:var(--s-bad)">失败 <b id="clFail">0</b></span>
+            <span style="color:var(--text)">真实成功率 <b id="clRealRate">—</b> <span class="muted">(3.9K)</span></span>
+            <span style="color:var(--s-warn)">异常/切换 <b id="clIssue">0</b></span>
+            <span style="color:var(--text-ter)">p50 <b style="color:var(--text)">11.4s</b> · p95 <b style="color:var(--text)">39.3s</b></span>
+            <span style="margin-left:auto" class="seg" role="tablist">
+              <button role="tab" id="clViewList" aria-selected="true" onclick="clSetView('list')">列表</button>
+              <button role="tab" id="clViewHour" onclick="clSetView('hour')">时段分析</button>
+              <button role="tab" id="clViewNode" onclick="clSetView('node')">节点分析</button>
+            </span>
+          </div>
+          <div class="actions" style="margin-bottom:12px">
+            <input class="input-sm" type="text" placeholder="关键词（模型 / 路径 / 错误 / 请求ID）" style="cursor:text;width:260px" oninput="clRefreshView()" id="clKeyword">
+            <select class="input-sm" id="clDate" onchange="clRefreshView()"><option value="">全部日期</option><option>2026-10-19</option></select>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer"><input type="checkbox" id="clOnlyIssues" onchange="clRefreshView()">只看失败/切换</label>
+            <span class="muted" style="font-size:11px;font-family:var(--mono);margin-left:auto">保留最近 500 条 · 每 5s 刷新</span>
+          </div>
+
+          <div id="clList">
+            <div class="tbl-wrap">
+              <table class="tbl" id="callTable">
+                <colgroup>
+                  <col style="width:11%"><col style="width:7%"><col style="width:15%"><col style="width:11%">
+                  <col style="width:13%"><col style="width:7%"><col style="width:7%"><col style="width:12%"><col style="width:17%">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th class="sortable" data-t="call" data-k="ts">时间</th>
+                    <th class="sortable" data-t="call" data-k="status">状态</th>
+                    <th class="sortable" data-t="call" data-k="model">模型</th>
+                    <th class="sortable" data-t="call" data-k="path">路径</th>
+                    <th>出口链<span class="mk mk-o" title="我们自己的：failover ladder 压缩成一列">O</span></th>
+                    <th class="num sortable" data-t="call" data-k="duration_ms">耗时</th>
+                    <th class="num sortable" data-t="call" data-k="ttft_ms">TTFT</th>
+                    <th class="num sortable" data-t="call" data-k="prompt_tokens">token 入/出</th>
+                    <th>异常<span class="mk mk-o" title="我们自己的：点行展开 failover ladder">O</span></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="flow-note">
+              <b>兼容性设计</b>：本表行仍带 <code style="font-family:var(--mono)">class="cl-item"</code> 且容器仍是
+              <code style="font-family:var(--mono)">#clList</code>，所以 <code style="font-family:var(--mono)">scripts/verify_ui.py:250-255</code>
+              的「调用日志行数 #clList .cl-item ≥ 1」无需修改即可继续通过；空态容器 <code style="font-family:var(--mono)">.cl-empty</code> 同样保留。
+            </div>
+            <div class="flow-note">原型内嵌 14 条样本；真实保留最近 500 条。<b>排序只覆盖已加载的 500 行，不是服务端全量</b>（freellm 的 sortHint 契约：说清楚你排的是哪一段）。</div>
+          </div>
+
+          <div id="clHour" style="display:none"></div>
+          <div id="clNode" style="display:none"></div>
+
+          <div style="display:flex;gap:6px;color:var(--text-ter);font-size:11.5px;margin-top:12px">
+            <span>每 5 秒自动刷新</span><span id="clStatus" style="margin-left:auto;font-family:var(--mono)">2026-10-19 13:38:02 刷新 500 条</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ============================================================================
+   假数据 · 字段名与真实 API 响应逐字一致（见 calllog.go / main.go / node_alert.go）
+   ----------------------------------------------------------------------------
+   /api/call-log  → []CallRecord  { req_id, ts, path, model, stream, route_mode,
+                                    nodes[], node_names[], events[], status,
+                                    prompt_tokens, completion_tokens,
+                                    cache_read_tokens, duration_ms, ttft_ms,
+                                    output_speed, err_msg, dial_ms, final_status }
+   /api/nodes     → { active_fp, active_name, manual_fp, manual_name, healthy,
+                      exhausted_count, dead_count, nodes[], subscriptions[],
+                      node_alert }   节点字段见 main.go:7049 nodeAdminView
+   /api/nodes 的 node_alert → node_alert.go:71 nodeAlertSnapshot
+   score 字段【尚未存在于后端】—— 形状按 U1 §8.4 的建议契约先占位。
+   ============================================================================ */
+
+const TOTALS = { requests:3902, ok:3453, fail:449, rate:88.5, p50:11.4, p95:39.3 };
+
+/* 24 小时请求/失败序列：Σreq = 3902，Σfail = 449（自洽，页面不另存第二份百分比） */
+const HOURLY = {
+  req :[78,62,64,58,55,60,88,142,186,184,211,216,238,241,229,238,252,236,231,198,176,164,152,143],
+  fail:[ 2, 2, 1, 1, 2, 1, 3,  2,  2,  2,  2,  3,  3,  3,  4,  4,  4,  5,  6,  8, 54, 96,132,107]
+};
+/* 故障起点：约 10:04（对应最后 4 个桶），告警 since = 窗口滑满 10 分钟后的 10:14 */
+const INCIDENT = { startHourIdx:20, since:'2026-10-19T10:14:22+08:00', durText:'已持续 3 小时 24 分' };
+
+const FAIL_MIX = [
+  { k:'连接失败', sub:'connect_error',            n:143, color:'var(--s-bad)'  },
+  { k:'闸门拒绝', sub:'quota_halt · blocked',     n: 87, color:'var(--s-warn)' },
+  { k:'其它',     sub:'ttft_timeout / stream_interrupt / 未归类', n:80, color:'var(--text-ter)' },
+  { k:'上游 429', sub:'rate limited',             n: 79, color:'var(--s-warn)' },
+  { k:'上游 403', sub:'FreeTierError',            n: 31, color:'var(--s-bad)'  },
+  { k:'上游 5xx', sub:'upstream_error',           n: 29, color:'var(--s-warn)' }
+];
+
+/* 出口来源（尝试级）：Σattempts = 5412，Σok = 4105 → 75.9% */
+const SOURCES = [
+  { k:'direct',       label:'直连出口',       attempts: 161, ok: 161 },
+  { k:'sub-hk',       label:'香港专线',       attempts:2105, ok:2029 },
+  { k:'sub-jp',       label:'日本池',         attempts:1318, ok:1202 },
+  { k:'sub-us',       label:'美国池',         attempts: 842, ok: 713 },
+  { k:'ws-main',      label:'webshare 主池',  attempts: 486, ok:   0 },
+  { k:'sub-sg',       label:'新加坡池',       attempts: 312, ok:   0 },
+  { k:'manual-tokyo', label:'手动 · 东京',    attempts: 188, ok:   0 }
+];
+
+/* score 字段形状 = U1 §8.4 建议契约；未测量的三种形态都造了样本：
+   ① value=null & samples=0     → 「无数据 · 0 样本」
+   ② value=null & samples=12    → 「无数据 · 样本不足」
+   ③ score 字段整条缺席          → 「无数据 · 字段未接入」 */
+const NODES = [
+  { name:'hk-01 · 香港', protocol:'vless', address:'hk01.example.net', port:443, fingerprint:'a1b2c3d4',
+    state:'available', latency_ms:48, cooldown_until:'', last_error:'', active:true, manual:false,
+    req:3241, rate:0.964, issues:12, last_used_at:'2026-10-19T13:37:12+08:00', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:0.92, samples:3241,
+      components:[{key:'success_rate',label:'成功率',value:0.964,weight:0.6},{key:'stability',label:'稳定性',value:0.88,weight:0.4}],
+      reasons:[] },
+    recent:[{at:'2026-10-19T13:12:41+08:00',type:'connect_error',detail:'dial tcp 203.0.113.7:443: i/o timeout'}] },
+
+  { name:'sg-10 · 新加坡', protocol:'ss', address:'sg10.example.net', port:8388, fingerprint:'5a6b7c8d',
+    state:'available', latency_ms:96, cooldown_until:'', last_error:'', active:false, manual:false,
+    req:780, rate:0.958, issues:9, last_used_at:'2026-10-19T13:36:02+08:00', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:0.90, samples:780,
+      components:[{key:'success_rate',label:'成功率',value:0.958,weight:0.6},{key:'stability',label:'稳定性',value:0.83,weight:0.4}],
+      reasons:[] },
+    recent:[] },
+
+
+  { name:'jp-02 · 东京', protocol:'vless', address:'jp02.example.net', port:443, fingerprint:'e5f6a7b8',
+    state:'available', latency_ms:86, cooldown_until:'', last_error:'', active:false, manual:false,
+    req:1902, rate:0.912, issues:41, last_used_at:'2026-10-19T13:34:48+08:00', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:0.84, samples:1902,
+      components:[{key:'success_rate',label:'成功率',value:0.912,weight:0.6},{key:'stability',label:'稳定性',value:0.72,weight:0.4}],
+      reasons:['recent_errors'] },
+    recent:[{at:'2026-10-19T13:11:02+08:00',type:'connect_error',detail:'dial tcp: connection reset by peer'}] },
+
+
+  { name:'sg-03 · 新加坡', protocol:'trojan', address:'sg03.example.net', port:443, fingerprint:'c9d0e1f2',
+    state:'available', latency_ms:112, cooldown_until:'', last_error:'', active:false, manual:false,
+    req:648, rate:0.881, issues:33, last_used_at:'2026-10-19T13:32:51+08:00', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:0.78, samples:648,
+      components:[{key:'success_rate',label:'成功率',value:0.881,weight:0.6},{key:'stability',label:'稳定性',value:0.62,weight:0.4}],
+      reasons:['recent_errors'] },
+    recent:[{at:'2026-10-19T13:10:22+08:00',type:'upstream_error',detail:'http 429 too many requests'}] },
+
+  { name:'us-04 · 洛杉矶', protocol:'hysteria2', address:'us04.example.net', port:443, fingerprint:'7a8b9c0d',
+    state:'available', latency_ms:184, cooldown_until:'', last_error:'', active:false, manual:false,
+    req:445, rate:0.847, issues:52, last_used_at:'2026-10-19T13:31:44+08:00', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:0.71, samples:445,
+      components:[{key:'success_rate',label:'成功率',value:0.847,weight:0.6},{key:'stability',label:'稳定性',value:0.50,weight:0.4}],
+      reasons:['recent_errors'] },
+    recent:[{at:'2026-10-19T13:09:55+08:00',type:'connect_error',detail:'dial tcp: i/o timeout'}] },
+
+  { name:'de-05 · 法兰克福', protocol:'ss', address:'de05.example.net', port:8388, fingerprint:'3c4d5e6f',
+    state:'available', latency_ms:232, cooldown_until:'', last_error:'', active:false, manual:false,
+    req:212, rate:0.793, issues:44, last_used_at:'2026-10-19T13:28:31+08:00', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:0.64, samples:212,
+      components:[{key:'success_rate',label:'成功率',value:0.793,weight:0.6},{key:'stability',label:'稳定性',value:0.41,weight:0.4}],
+      reasons:['recent_errors','low_samples'] },
+    recent:[{at:'2026-10-19T13:08:12+08:00',type:'ttft_timeout',detail:'no first token within 30s'}] },
+
+  { name:'us-09 · 西雅图', protocol:'trojan', address:'us09.example.net', port:443, fingerprint:'0a1b2c3d',
+    state:'available', latency_ms:205, cooldown_until:'', last_error:'upstream_error: http 429 too many requests',
+    active:false, manual:false, req:142, rate:0.584, issues:39,
+    last_used_at:'2026-10-19T13:26:08+08:00', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:0.59, samples:142,
+      components:[{key:'success_rate',label:'成功率',value:0.584,weight:0.6},{key:'stability',label:'稳定性',value:0.44,weight:0.4}],
+      reasons:['recent_errors','low_samples'] },
+    recent:[{at:'2026-10-19T13:07:40+08:00',type:'upstream_error',detail:'http 429 too many requests'}] },
+
+  { name:'jp-08 · 大阪', protocol:'vless', address:'jp08.example.net', port:443, fingerprint:'4e5f6a7b',
+    state:'exhausted', latency_ms:168, cooldown_until:'2026-10-19T14:20:00+08:00',
+    last_error:'FreeUsageLimitError: free usage limit reached', active:false, manual:false,
+    req:318, rate:0.638, issues:47, last_used_at:'2026-10-19T13:20:00+08:00', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:0.55, samples:318,
+      components:[{key:'success_rate',label:'成功率',value:0.638,weight:0.6},{key:'stability',label:'稳定性',value:0.38,weight:0.4}],
+      reasons:['cooldown','recent_errors'] },
+    recent:[{at:'2026-10-19T13:06:11+08:00',type:'quota_halt',detail:'error.type=FreeUsageLimitError'}] },
+
+  { name:'hk-07 · 香港', protocol:'vless', address:'hk07.example.net', port:443, fingerprint:'8f9a0b1c',
+    state:'available', latency_ms:61, cooldown_until:'', last_error:'connect_error: dial tcp 203.0.113.7:443: i/o timeout',
+    active:false, manual:false, req:240, rate:0.520, issues:58,
+    last_used_at:'2026-10-19T13:24:12+08:00', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:0.41, samples:240,
+      components:[{key:'success_rate',label:'成功率',value:0.520,weight:0.6},{key:'stability',label:'稳定性',value:0.24,weight:0.4}],
+      reasons:['recent_errors','low_samples'] },
+    recent:[
+      {at:'2026-10-19T13:05:31+08:00',type:'connect_error',detail:'dial tcp 203.0.113.7:443: i/o timeout'},
+      {at:'2026-10-19T13:04:02+08:00',type:'connect_error',detail:'dial tcp 203.0.113.7:443: i/o timeout'}] },
+
+  { name:'uk-11 · 伦敦', protocol:'vless', address:'uk11.example.net', port:443, fingerprint:'6d7e8f90',
+    state:'dead', latency_ms:-1, cooldown_until:'2026-10-19T13:52:00+08:00',
+    last_error:'context deadline exceeded (ttft_timeout)', active:false, manual:false,
+    req:96, rate:0.312, issues:61, last_used_at:'2026-10-19T13:03:20+08:00', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:0.33, samples:96,
+      components:[{key:'success_rate',label:'成功率',value:0.312,weight:0.6},{key:'stability',label:'稳定性',value:0.18,weight:0.4}],
+      reasons:['recent_errors','cooldown'] },
+    recent:[{at:'2026-10-19T13:02:44+08:00',type:'ttft_timeout',detail:'no first token within 30s'}] },
+
+  /* ↓↓↓ 未测量三态（评分机制未接入的真实形态） ↓↓↓ */
+  { name:'hn-13 · 海南', protocol:'trojan', address:'hn13.example.net', port:443, fingerprint:'2b3c4d5e',
+    state:'available', latency_ms:220, cooldown_until:'', last_error:'', active:false, manual:false,
+    req:0, rate:null, issues:0, last_used_at:'', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:null, samples:0, components:[], reasons:[] }, recent:[] },
+
+  { name:'xj-14 · 乌鲁木齐', protocol:'ss', address:'xj14.example.net', port:8388, fingerprint:'0c1d2e3f',
+    state:'dead', latency_ms:-1, cooldown_until:'2026-10-19T13:52:00+08:00',
+    last_error:'dial tcp: i/o timeout', active:false, manual:false,
+    req:0, rate:null, issues:0, last_used_at:'', last_probe_at:'2026-10-19T13:30:00+08:00',
+    score:{ value:null, samples:12, components:[], reasons:[] }, recent:[] },
+
+  { name:'自建东京', protocol:'vless', address:'jp.example.com', port:443, fingerprint:'bbccddee',
+    state:'idle', latency_ms:null, cooldown_until:'', last_error:'未探测', active:false, manual:true,
+    req:0, rate:null, issues:0, last_used_at:'', last_probe_at:'',
+    /* ★ 刻意不带 score 字段：验证「字段未接入」与「值为 null」是两条不同的分支 */
+    recent:[] }
+];
+
+/* 调用日志样本（字段与 CallRecord 逐字一致） */
+function rec(o){
+  return Object.assign({ req_id:'', ts:'2026-10-19T13:00:00+08:00', path:'/v1/chat/completions',
+    model:'deepseek-v4-flash-free', stream:true, route_mode:'auto', nodes:[], node_names:[],
+    events:[], status:'ok', prompt_tokens:0, completion_tokens:0, cache_read_tokens:0,
+    duration_ms:0, ttft_ms:0, output_speed:0, err_msg:'', dial_ms:0, final_status:200 }, o);
+}
+const CALLS = [
+  rec({ req_id:'req_9f2c1a', ts:'2026-10-19T13:37:12+08:00', model:'deepseek-v4-flash-free', path:'/v1/chat/completions',
+    nodes:[], node_names:[], duration_ms:8420, ttft_ms:1120, prompt_tokens:1840, completion_tokens:612, output_speed:41.2,
+    events:[{type:'connect_ok',node:'',node_name:'direct',at:'2026-10-19T13:37:12+08:00'}], dial_ms:12 }),
+  rec({ req_id:'req_7b81de', ts:'2026-10-19T13:36:41+08:00', status:'fail', model:'mimo-v2.5-free',
+    nodes:['2b3c4d5e','0c1d2e3f'], node_names:['hn-13','xj-14'], duration_ms:39200,
+    err_msg:'all nodes failed: dial timeout', final_status:0,
+    events:[
+      {type:'connect_error',node:'2b3c4d5e',node_name:'hn-13',detail:'dial tcp: i/o timeout',at:'2026-10-19T13:36:41+08:00'},
+      {type:'switch',node:'2b3c4d5e',node_name:'hn-13',detail:'connect_error',at:'2026-10-19T13:36:53+08:00'},
+      {type:'connect_error',node:'0c1d2e3f',node_name:'xj-14',detail:'dial tcp: i/o timeout',at:'2026-10-19T13:37:05+08:00'},
+      {type:'all_failed',node:'0c1d2e3f',node_name:'xj-14',detail:'1 attempt each, 2 nodes',at:'2026-10-19T13:37:20+08:00'}] }),
+  rec({ req_id:'req_3e40aa', ts:'2026-10-19T13:35:58+08:00', model:'glm-5.2',
+    nodes:['d4e5f6a7','a1b2c3d4'], node_names:['ws-main','hk-01'], duration_ms:19600, ttft_ms:2410,
+    prompt_tokens:2210, completion_tokens:880, output_speed:52.6, dial_ms:8,
+    events:[
+      {type:'connect_error',node:'d4e5f6a7',node_name:'ws-main',detail:'socks5: connection refused',at:'2026-10-19T13:35:58+08:00'},
+      {type:'switch',node:'d4e5f6a7',node_name:'ws-main',detail:'connect_error',at:'2026-10-19T13:36:04+08:00'},
+      {type:'connect_ok',node:'a1b2c3d4',node_name:'hk-01',at:'2026-10-19T13:36:06+08:00'},
+      {type:'complete',node:'a1b2c3d4',node_name:'hk-01',detail:'tokens=3090',at:'2026-10-19T13:36:17+08:00'}] }),
+  rec({ req_id:'req_5c92bb', ts:'2026-10-19T13:34:20+08:00', status:'fail', model:'gpt-5.5',
+    nodes:['6d7e8f90'], node_names:['uk-11'], duration_ms:120000, err_msg:'ttft_timeout: no first token within 30s', final_status:0,
+    events:[
+      {type:'connect_ok',node:'6d7e8f90',node_name:'uk-11',at:'2026-10-19T13:34:20+08:00'},
+      {type:'ttft_timeout',node:'6d7e8f90',node_name:'uk-11',detail:'30000ms',at:'2026-10-19T13:34:50+08:00'},
+      {type:'all_failed',node:'6d7e8f90',node_name:'uk-11',detail:'max switches=5',at:'2026-10-19T13:36:20+08:00'}] }),
+  rec({ req_id:'req_1a7f03', ts:'2026-10-19T13:33:05+08:00', model:'deepseek-v4-flash-free',
+    nodes:['a1b2c3d4'], node_names:['hk-01'], duration_ms:11400, ttft_ms:980,
+    prompt_tokens:1420, completion_tokens:540, output_speed:47.4, dial_ms:9,
+    events:[{type:'connect_ok',node:'a1b2c3d4',node_name:'hk-01',at:'2026-10-19T13:33:05+08:00'},{type:'complete',node:'a1b2c3d4',node_name:'hk-01',at:'2026-10-19T13:33:16+08:00'}] }),
+  rec({ req_id:'req_88dead', ts:'2026-10-19T13:31:47+08:00', status:'fail', model:'mimo-v2.5-free',
+    nodes:['0a1b2c3d'], node_names:['us-09'], duration_ms:2180, err_msg:'upstream http 429', final_status:429,
+    events:[
+      {type:'connect_ok',node:'0a1b2c3d',node_name:'us-09',at:'2026-10-19T13:31:47+08:00'},
+      {type:'upstream_error',node:'0a1b2c3d',node_name:'us-09',detail:'http 429 too many requests',at:'2026-10-19T13:31:49+08:00'},
+      {type:'all_failed',node:'0a1b2c3d',node_name:'us-09',detail:'429 无配额签名，不视为耗尽',at:'2026-10-19T13:31:49+08:00'}] }),
+  rec({ req_id:'req_2f6c71', ts:'2026-10-19T13:29:31+08:00', model:'glm-5.2',
+    nodes:['9e8d7c6b'], node_names:['kr-06'], duration_ms:9870, ttft_ms:1180,
+    prompt_tokens:1980, completion_tokens:702, output_speed:49.8, dial_ms:21,
+    events:[{type:'connect_ok',node:'9e8d7c6b',node_name:'kr-06',at:'2026-10-19T13:29:31+08:00'}] }),
+  rec({ req_id:'req_4d10ee', ts:'2026-10-19T13:27:02+08:00', status:'fail', model:'gpt-5.5',
+    nodes:[], node_names:[], route_mode:'direct', duration_ms:640,
+    err_msg:'gate blocked: free tier budget exhausted', final_status:0,
+    events:[{type:'quota_halt',node:'',node_name:'',detail:'gate blocked: free tier budget exhausted',at:'2026-10-19T13:27:02+08:00'}] }),
+  rec({ req_id:'req_60b3c5', ts:'2026-10-19T13:25:44+08:00', model:'deepseek-v4-flash-free',
+    nodes:['e5f6a7b8','a1b2c3d4'], node_names:['jp-02','hk-01'], duration_ms:16300, ttft_ms:1620,
+    prompt_tokens:1660, completion_tokens:590, output_speed:44.9, dial_ms:14,
+    events:[
+      {type:'connect_ok',node:'e5f6a7b8',node_name:'jp-02',at:'2026-10-19T13:25:44+08:00'},
+      {type:'stream_interrupt',node:'e5f6a7b8',node_name:'jp-02',detail:'unexpected EOF after 2.1s',at:'2026-10-19T13:25:47+08:00'},
+      {type:'switch',node:'e5f6a7b8',node_name:'jp-02',detail:'stream_interrupt',at:'2026-10-19T13:25:48+08:00'},
+      {type:'connect_ok',node:'a1b2c3d4',node_name:'hk-01',at:'2026-10-19T13:25:50+08:00'},
+      {type:'complete',node:'a1b2c3d4',node_name:'hk-01',at:'2026-10-19T13:26:00+08:00'}] }),
+  rec({ req_id:'req_a77b12', ts:'2026-10-19T13:23:19+08:00', status:'fail', model:'mimo-v2.5-free',
+    nodes:['8f9a0b1c'], node_names:['hk-07'], duration_ms:3040, err_msg:'http 403 FreeTierError', final_status:403,
+    events:[
+      {type:'connect_ok',node:'8f9a0b1c',node_name:'hk-07',at:'2026-10-19T13:23:19+08:00'},
+      {type:'upstream_error',node:'8f9a0b1c',node_name:'hk-07',detail:'http 403 FreeTierError',at:'2026-10-19T13:23:21+08:00'},
+      {type:'all_failed',node:'8f9a0b1c',node_name:'hk-07',detail:'403 无配额签名',at:'2026-10-19T13:23:22+08:00'}] }),
+  rec({ req_id:'req_e2c908', ts:'2026-10-19T13:21:57+08:00', model:'glm-5.2',
+    nodes:['5a6b7c8d'], node_names:['sg-10'], duration_ms:6900, ttft_ms:880,
+    prompt_tokens:1120, completion_tokens:410, output_speed:41.2, dial_ms:17,
+    events:[{type:'connect_ok',node:'5a6b7c8d',node_name:'sg-10',at:'2026-10-19T13:21:57+08:00'}] }),
+  rec({ req_id:'req_31f5d0', ts:'2026-10-19T13:20:33+08:00', status:'fail', model:'gpt-5.5',
+    nodes:['1f2e3d4c'], node_names:['nl-12'], duration_ms:22100, err_msg:'stream_interrupt: unexpected EOF',
+    events:[
+      {type:'connect_ok',node:'1f2e3d4c',node_name:'nl-12',at:'2026-10-19T13:20:33+08:00'},
+      {type:'stream_interrupt',node:'1f2e3d4c',node_name:'nl-12',detail:'unexpected EOF after 18.4s',at:'2026-10-19T13:20:52+08:00'},
+      {type:'all_failed',node:'1f2e3d4c',node_name:'nl-12',detail:'max switches=5',at:'2026-10-19T13:20:54+08:00'}] }),
+  rec({ req_id:'req_9a0b77', ts:'2026-10-19T13:19:02+08:00', model:'deepseek-v4-flash-free',
+    nodes:['a1b2c3d4'], node_names:['hk-01'], duration_ms:14300, ttft_ms:1310,
+    prompt_tokens:2460, completion_tokens:940, output_speed:45.1, dial_ms:11,
+    events:[{type:'connect_ok',node:'a1b2c3d4',node_name:'hk-01',at:'2026-10-19T13:19:02+08:00'}] }),
+  rec({ req_id:'req_55c1e4', ts:'2026-10-19T13:17:26+08:00', model:'mimo-v2.5-free',
+    nodes:['7a8b9c0d'], node_names:['us-04'], duration_ms:27600, ttft_ms:2040,
+    prompt_tokens:3180, completion_tokens:1240, output_speed:38.7, dial_ms:26, final_status:200,
+    events:[{type:'connect_ok',node:'7a8b9c0d',node_name:'us-04',at:'2026-10-19T13:17:26+08:00'}], status:'ok' })
+];
+
+const STATS_MODELS = {
+  'deepseek-v4-flash-free':{request_count:1642,prompt_tokens:2841000,completion_tokens:912400,total_tokens:3753400,cache_read_tokens:1180000,avg_ttft_ms:1120,throughput_tps:44.9},
+  'mimo-v2.5-free':        {request_count: 918,prompt_tokens:1612000,completion_tokens:508800,total_tokens:2120800,cache_read_tokens: 640000,avg_ttft_ms:1360,throughput_tps:39.2},
+  'glm-5.2':               {request_count: 742,prompt_tokens:1408000,completion_tokens:462000,total_tokens:1870000,cache_read_tokens: 512000,avg_ttft_ms: 980,throughput_tps:51.4},
+  'gpt-5.5':               {request_count: 600,prompt_tokens:1188000,completion_tokens:394600,total_tokens:1582600,cache_read_tokens: 388000,avg_ttft_ms:1240,throughput_tps:36.8}
+};
+
+/* ============================================================================
+   工具 · 排序（照抄 freellm client/src/lib/table-sort.ts 的语义，逐行翻译成原生 JS）
+   ============================================================================ */
+const SORTPFX = 'c.sort.';
+function lsGet(k,d){ try{ const v=localStorage.getItem(k); return v===null?d:JSON.parse(v) }catch(_){ return d } }
+function lsSet(k,v){ try{ localStorage.setItem(k,JSON.stringify(v)) }catch(_){} }
+
+/* 三态循环：null → asc → desc → null（table-sort.ts 的 nextSort） */
+function nextSort(cur){ return cur===null?'asc':cur==='asc'?'desc':null }
+/* 空值判定：null / undefined / '' / NaN / ±Inf 都算「无值」 */
+function isNil(v){ return v===null||v===undefined||v===''||(typeof v==='number'&&!isFinite(v)) }
+/* ★ table-sort.ts:63-70 的关键契约：空值【两个方向都排最后】
+   —— 所以 nil 判断必须在 dir 取反【之前】，不能先排完再 reverse。 */
+function sortRows(rows,get,dir){
+  if(!dir) return rows.slice();
+  return rows.slice().sort((A,B)=>{
+    const a=get(A), b=get(B);
+    const an=isNil(a), bn=isNil(b);
+    if(an&&bn) return 0;
+    if(an) return 1;
+    if(bn) return -1;
+    const c=(typeof a==='number'&&typeof b==='number') ? a-b : String(a).localeCompare(String(b),'zh-Hans-CN');
+    return dir==='asc' ? c : -c;
+  });
+}
+const SORT = {
+  node: lsGet(SORTPFX+'nodeTable',{k:'score',d:null}),   /* 默认按评分降序（U1 §8.2③） */
+  call: lsGet(SORTPFX+'callTable',{k:'ts',d:'desc'}),
+  stats: lsGet(SORTPFX+'statsTable',{k:'total_tokens',d:'desc'})
+};
+function bindSort(){
+  document.querySelectorAll('th.sortable').forEach(th=>{
+    const t=th.dataset.t,k=th.dataset.k;
+    const st=SORT[t];
+    th.dataset.dir = (st && st.k===k && st.d) ? st.d : 'none';
+    th.setAttribute('aria-sort', st&&st.k===k&&st.d ? (st.d==='asc'?'ascending':'descending') : 'none');
+    th.onclick=()=>{
+      const cur=(SORT[t]&&SORT[t].k===k)?SORT[t].d:null;
+      const nxt=nextSort(cur);
+      SORT[t]={k:k,d:nxt};
+      lsSet(SORTPFX+(t==='node'?'nodeTable':t==='call'?'callTable':'statsTable'),SORT[t]);
+      bindSort(); renderAll();
+    };
+  });
+}
+
+/* ============================================================================
+   渲染 · 概览
+   ============================================================================ */
+function fmt(n){ return Number(n||0).toLocaleString('en-US') }
+function fmtK(n){ return n>=1000 ? (n/1000).toFixed(n>=10000?0:1)+'K' : String(n) }
+function rateClass(p){ return p>=0.9?'ok':p>=0.6?'warn':'bad' }
+function pctText(p,digits){ return (p*100).toFixed(digits===undefined?1:digits)+'%' }
+
+function renderOverview(){
+  document.getElementById('ovTotal').textContent='227';
+  document.getElementById('ovHealthy').textContent='115';
+  document.getElementById('ovExhausted').textContent='2';
+  document.getElementById('ovDead').textContent='110';
+  document.getElementById('ovActive').textContent='当前: hk-01 · 香港';
+  document.getElementById('tcTotalToken').textContent='9,326,800';
+  document.getElementById('tcTotalTokenShort').textContent='≈ 932.68 万';
+  document.getElementById('tcTotalReq').textContent='3,902';
+  document.getElementById('gIn').textContent='7,049,000';
+  document.getElementById('gOut').textContent='2,277,800';
+  document.getElementById('gCR').textContent='2,720,000';
+  document.getElementById('tcAvgTps').textContent='42.1 t/s';
+  document.getElementById('tcCacheRate').textContent='27.8%';
+  document.getElementById('tcCacheBar').style.width='27.8%';
+
+  /* 趋势：Σreq 与 Σfail 直接来自 HOURLY，页面不另存第二份 */
+  const max=Math.max.apply(null,HOURLY.req);
+  const t=document.getElementById('trend'), tx=document.getElementById('trendX');
+  t.innerHTML=HOURLY.req.map((r,i)=>{
+    const f=HOURLY.fail[i], ok=Math.max(0,r-f);
+    const h=r/max*100, fh=f/r*100, oh=100-fh;
+    const hh=String((13-23+i+48)%24).padStart(2,'0');
+    return '<div class="b"><div class="tip">'+hh+':00 · '+r+' 请求 · 失败 '+f+' ('+pctText(f/r,1)+')</div>'+
+      '<div class="stackbar" style="height:'+h.toFixed(1)+'%">'+
+        '<div class="fail" style="height:'+fh.toFixed(1)+'%"></div>'+
+        '<div class="ok" style="height:'+oh.toFixed(1)+'%"></div>'+
+      '</div></div>';
+  }).join('');
+  tx.innerHTML=HOURLY.req.map((_,i)=> i%4===3 ? '<span>'+String((13-23+i+48)%24).padStart(2,'0')+'</span>' : '<span></span>').join('');
+
+  /* 失败构成：百分比由条数算，不写死 */
+  const total=FAIL_MIX.reduce((s,x)=>s+x.n,0);
+  document.getElementById('mixStack').innerHTML=FAIL_MIX.map(x=>'<i style="width:'+(x.n/total*100)+'%;background:'+x.color+'"></i>').join('');
+  document.getElementById('mixList').innerHTML=FAIL_MIX.map(x=>
+    '<div class="mixrow"><span class="sw" style="background:'+x.color+'"></span>'+
+    '<span class="nm"><b>'+x.k+'</b> · '+x.sub+'</span>'+
+    '<span class="ct">'+x.n+'</span><span class="pc">'+pctText(x.n/total,1)+'</span></div>').join('');
+
+  /* 模型明细（可排序） */
+  const keys=Object.keys(STATS_MODELS);
+  const st=SORT.stats;
+  const getter={
+    model:r=>r, prompt_tokens:r=>STATS_MODELS[r].prompt_tokens, completion_tokens:r=>STATS_MODELS[r].completion_tokens,
+    cache_read_tokens:r=>STATS_MODELS[r].cache_read_tokens, total_tokens:r=>STATS_MODELS[r].total_tokens,
+    request_count:r=>STATS_MODELS[r].request_count, avg_ttft_ms:r=>STATS_MODELS[r].avg_ttft_ms,
+    throughput_tps:r=>STATS_MODELS[r].throughput_tps
+  };
+  const rows=sortRows(keys,getter[st.k],st.d);
+  document.querySelector('#statsTable tbody').innerHTML=rows.map(k=>{
+    const m=STATS_MODELS[k];
+    return '<tr><td class="mono ell">'+k+'</td>'+
+      '<td class="num">'+fmt(m.prompt_tokens)+'</td>'+
+      '<td class="num">'+fmt(m.completion_tokens)+'</td>'+
+      '<td class="num">'+fmt(m.cache_read_tokens)+'</td>'+
+      '<td class="num" style="font-weight:700">'+fmt(m.total_tokens)+'</td>'+
+      '<td class="num">'+fmt(m.request_count)+'</td>'+
+      '<td class="num">'+m.avg_ttft_ms+'ms</td>'+
+      '<td class="num">'+m.throughput_tps.toFixed(1)+' t/s</td></tr>';
+  }).join('');
+}
+
+/* ============================================================================
+   渲染 · 节点池（本方向重点）
+   ============================================================================ */
+let filter='all', alertMode='rate0', scoreMode='mixed';
+const TIER=[{min:80,cls:'t-ok',t:'优秀',c:'var(--s-ok)'},{min:60,cls:'t-warn',t:'一般',c:'var(--s-warn)'},{min:0,cls:'t-bad',t:'较差',c:'var(--s-bad)'}];
+function tierOf(v){ for(const t of TIER){ if(v>=t.min) return t } return TIER[2] }
+
+/* nodeAlertSnapshot 的三种真实形态（node_alert.go:71） */
+function alertData(){
+  if(alertMode==='off') return {active:false};
+  if(alertMode==='pool0') return { active:true, reason:'节点池无可用节点：available=0（共 227 个），流量只能走 direct 出口',
+    since:'2026-10-19T12:41:07+08:00', window_minutes:10, window_attempts:0, window_successes:0,
+    window_success_rate:null, pool_available:0, pool_total:227 };
+  /* 原型第三态：窗口内 0 样本 —— 后端不会因此告警，但同一个 window_success_rate 字段
+     在快照里恒为 null，面板必须渲染「无数据」而不是 0%（node_alert.go:69 的硬约束）。 */
+  if(alertMode==='nodata') return { active:true, demo:'info', reason:'最近 10 分钟窗口内没有任何节点出口尝试（这段时间没流量）',
+    since:'2026-10-19T13:28:00+08:00', window_minutes:10, window_attempts:0, window_successes:0,
+    window_success_rate:null, pool_available:115, pool_total:227 };
+  return { active:true, reason:'最近 10m0s 内 42 次节点出口尝试成功率 0%（全部没拿到上游响应）',
+    since:INCIDENT.since, window_minutes:10, window_attempts:42, window_successes:0,
+    window_success_rate:0, pool_available:115, pool_total:227 };
+}
+function renderNodeAlert(){
+  const a=alertData(), el=document.getElementById('nodeAlert');
+  el.classList.toggle('on', !!a.active);
+  el.classList.toggle('warn', alertMode==='pool0');
+  el.classList.toggle('info', a.demo==='info');
+  if(!a.active) return;
+  document.getElementById('naIco').textContent = a.demo==='info' ? 'i' : '!';
+  document.getElementById('naTitle').textContent = a.demo==='info'
+    ? '节点层状态：窗口内无样本（不构成告警）'
+    : alertMode==='pool0' ? '节点层告警：池内一个可用节点都没有'
+    : '节点层告警：节点出口整体不可用';
+  document.getElementById('naDur').textContent = a.demo==='info' ? '演示态' : INCIDENT.durText;
+  document.getElementById('naReason').textContent=a.reason;
+  /* ★ 无样本 → 「无数据」，绝不是 0%（node_alert.go:69 的硬约束） */
+  const rate=(a.window_success_rate===null||a.window_success_rate===undefined) ? '无数据（窗口内 0 次尝试）'
+    : pctText(a.window_success_rate,1);
+  document.getElementById('naMeta').textContent =
+    '最近 '+(a.window_minutes||10)+' 分钟：'+a.window_attempts+' 次节点出口尝试，成功率 '+rate+
+    ' · 池内可用 '+a.pool_available+' / '+a.pool_total+
+    ' · 始于 '+new Date(a.since).toLocaleString('zh-CN');
+  document.getElementById('naCmp').textContent = a.demo==='info'
+    ? '这一态刻意不弹红色横幅：n=0 的意思是「这段时间没流量」，不是「节点全挂了」。同一个字段若被渲染成 0%，运维会误判为整层故障。'
+    : '对照 24 小时窗口：节点出口尝试级成功率 75.9%（4,105 / 5,412）—— 说明这是【刚发生】的整层故障，不是全天如此；direct 出口同期 161/161 全通。';
+}
+
+function scoreCell(n){
+  const s=n.score;
+  /* 分支①：字段整条缺席 → 评分机制尚未接入 */
+  if(!s) return '<span class="nd">无数据</span><span class="nd-sub">字段未接入</span>';
+  /* 分支②：样本 0 或 value=null → 一律「无数据」，绝不渲染 0 分（U1 §8.2⑤） */
+  if(s.value===null||s.value===undefined||s.samples===0){
+    const sub = s.samples===0 ? '0 样本' : '样本不足 ('+s.samples+')';
+    return '<span class="axis axis-empty"></span><span class="nd">无数据</span><span class="nd-sub">'+sub+'</span>';
+  }
+  const v=Math.round(s.value*100), t=tierOf(v);
+  return '<span class="axis"><i style="width:'+v+'%;background:'+t.c+'"></i></span>'+
+         '<span class="n '+t.cls.slice(2,3)+'" style="color:'+t.c+'">'+v+'</span>'+
+         '<span class="tier '+t.cls+'">'+t.t+'</span>';
+}
+function isUnmeasured(n){ return !n.score || n.score.value===null || n.score.value===undefined || n.score.samples===0 }
+
+function renderNodeTable(){
+  const tb=document.querySelector('#nodeTable tbody');
+  const cnt=(f)=>NODES.filter(n=>f(n)).length;
+  document.getElementById('cntAll').textContent='227';
+  document.getElementById('cntAvail').textContent='115';
+  document.getElementById('cntExh').textContent='2';
+  document.getElementById('cntDead').textContent='110';
+  document.getElementById('cntUnm').textContent=NODES.filter(isUnmeasured).length+' / 227';
+
+  /* 演示形态切换 */
+  if(DEMO==='empty'){
+    tb.innerHTML='<tr><td colspan="10" class="empty-hint">'+
+      '<div class="empty-card" style="margin:8px">'+
+      '<div class="ec-ic">◇</div>'+
+      '<div class="ec-t">暂无节点</div>'+
+      '<div class="ec-d">可在「订阅与配额」页添加订阅源或手动节点 —— 空态必须给出下一步，否则用户只能干等（freellm empty-state.tsx 的原始注释：an empty state without a next step is a dead end）。</div>'+
+      '<button class="btn btn-primary btn-sm" onclick="showPage(\'subs\')">去「订阅与配额」添加订阅源</button>'+
+      '</div></td></tr>';
+    document.getElementById('nodeCount').textContent='0 / 227';
+    /* verify_ui.py:273 断言空态时 #cntAll 的文本必须是 "0" */
+    document.getElementById('cntAll').textContent='0';
+    return;
+  }
+  if(DEMO==='loading'){
+    /* 骨架屏：与真实表同形（同列数、同 12 行），数据到达后页面不纵向跳动 */
+    tb.innerHTML=Array.from({length:12},()=>
+      '<tr>'+[70,60,80,72,40,40,44,60,90,30].map(w=>'<td><div class="sk" style="width:'+w+'%"></div></td>').join('')+'</tr>').join('');
+    document.getElementById('nodeCount').textContent='加载中…';
+    return;
+  }
+
+  let rows=NODES.filter(n=>{
+    if(filter==='all') return true;
+    if(filter==='unmeasured') return isUnmeasured(n);
+    return n.state===filter;
+  });
+  const measured=rows.filter(n=>!isUnmeasured(n)), unmeasured=rows.filter(isUnmeasured);
+  const st=SORT.node, key=st.k||'score', dir=st.d;
+  const getter={
+    name:n=>n.name, state:n=>n.state, score:n=>isUnmeasured(n)?null:Math.round(n.score.value*100),
+    rate:n=>n.rate, req:n=>n.req, issues:n=>n.issues, latency_ms:n=>n.latency_ms, cooldown_until:n=>n.cooldown_until||null
+  };
+  /* 默认（dir=null）按评分降序 —— U1 §8.2③「节点表的默认视图应该是最该关心的排最前」。
+     这是对 lib/table-sort 的一处有意偏离：它的 null 表示「接口顺序」，我们没有有意义的接口顺序。 */
+  const measuredSorted = (dir===null && key==='score')
+    ? measured.slice().sort((a,b)=>b.score.value-a.score.value)
+    : sortRows(measured,getter[key],dir);
+  const tail=unmeasured.slice().sort((a,b)=>a.name.localeCompare(b.name,'zh-Hans-CN'));
+  const ordered=measuredSorted.concat(tail);
+  const showGroupSep = tail.length>0;
+
+  /* 全表无数据时，评分列整体走占位（scoreMode='none' 模拟机制未接入） */
+  tb.innerHTML =
+    ordered.map((n,i)=>{
+      const unm=isUnmeasured(n);
+      const cell = scoreMode==='none'
+        ? '<span class="axis axis-empty"></span><span class="nd">无数据</span><span class="nd-sub">字段未接入</span>'
+        : scoreCell(n);
+      const lat = (n.latency_ms===null||n.latency_ms===undefined) ? '<span class="muted">未探测</span>'
+                : n.latency_ms<0 ? '<span class="muted">超时</span>' : n.latency_ms+' ms';
+      const rateCell = (n.rate===null||n.rate===undefined)
+        ? '<span class="nd">无数据</span><span class="nd-sub">0 样本</span>'
+        : '<span class="bar"><i style="width:'+(n.rate*100)+'%;background:var(--s-'+rateClass(n.rate)+')"></i></span>'+
+          '<span class="rate '+rateClass(n.rate)+'">'+pctText(n.rate,1)+'</span>'+
+          '<span class="rate n"> ('+fmtK(n.req)+')</span>';
+      const badge = {available:'<span class="badge available"><span class="bdot"></span>可用</span>',
+                     exhausted:'<span class="badge exhausted"><span class="bdot"></span>已耗尽</span>',
+                     dead:'<span class="badge dead"><span class="bdot"></span>故障</span>'}[n.state]
+                    || '<span class="badge idle"><span class="bdot"></span>未探测</span>';
+      const head = (showGroupSep && unm && (i===0 || !isUnmeasured(ordered[i-1])))
+        ? '<tr class="group-sep"><td colspan="10">未测量 · '+tail.length+' 个（共 227）· 评分机制待接入 —— 恒排末尾，不参与排序，绝不渲染为 0 分</td></tr>'
+        : '';
+      return head +
+        '<tr class="clickable'+(n.active?' hl':'')+(expanded[n.fingerprint]?' sel':'')+'" onclick="toggleRow(\''+n.fingerprint+'\')" tabindex="0" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();toggleRow(\''+n.fingerprint+'\')}">'+
+        '<td><span class="node-name ell">'+n.name+(n.active?'<span class="tag cur">当前</span>':'')+(n.manual?'<span class="tag man">手动</span>':'')+'</span>'+
+          '<span class="node-sub">'+n.protocol+' · '+n.fingerprint+'</span></td>'+
+        '<td>'+badge+'</td>'+
+        '<td><div class="score">'+cell+'</div></td>'+
+        '<td>'+rateCell+'</td>'+
+        '<td class="num">'+n.req+'</td>'+
+        '<td class="num">'+n.issues+'</td>'+
+        '<td class="num">'+lat+'</td>'+
+        '<td class="ell" style="font-family:var(--mono);font-size:11.5px">'+(n.cooldown_until? n.cooldown_until.slice(11,16):'—')+'</td>'+
+        '<td class="ell muted" style="font-size:11.5px" title="'+n.last_error+'">'+(n.last_error||'—')+'</td>'+
+        '<td class="num" style="white-space:nowrap"><button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();toast(\'已切换到 '+n.name+'\')">切换</button>'+
+          '<button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();toast(\'已解除标记\')">解除</button></td>'+
+        '</tr>' + (expanded[n.fingerprint]? detailRow(n):'');
+    }).join('');
+
+  document.getElementById('nodeCount').textContent=rows.length===NODES.length?('展示 '+rows.length+' / 227 行样本'):('筛选后 '+rows.length+' 行（样本）');
+
+  if(!rows.length){
+    tb.innerHTML='<tr><td colspan="10" class="empty-hint"><div class="empty-card" style="margin:8px">'+
+      '<div class="ec-ic">◇</div><div class="ec-t">没有匹配「'+filter+'」的节点</div>'+
+      '<div class="ec-d">池内共 227 个节点，但该状态下没有节点。放宽筛选即可。</div>'+
+      '<button class="btn btn-primary btn-sm" onclick="setFilter(\'all\')">显示全部节点</button></div></td></tr>';
+  }
+}
+
+/* 行内下钻：评分构成 + reasons + 最近失败时间轴 + 当前冷却来源 */
+const REASON_TEXT={recent_errors:['r-warn','最近有失败记录'],cooldown:['r-warn','处于冷却中'],
+  low_samples:['r-mut','样本偏少（置信度低）']};
+function detailRow(n){
+  const s=n.score, unm=isUnmeasured(n);
+  const comps = (s&&s.components&&s.components.length)
+    ? s.components.map(c=>'<div class="mixrow"><span class="sw" style="background:'+tierOf(Math.round(c.value*100)).c+'"></span>'+
+        '<span class="nm">'+c.label+' <span class="muted">权重 '+(c.weight*100).toFixed(0)+'%</span></span>'+
+        '<span class="ct"></span><span class="pc">'+Math.round(c.value*100)+'</span></div>').join('')
+    : '<div class="muted" style="font-size:11.5px">后端未给出 components —— UI 按数组长度渲染，不假设轴的个数（U1 §8.4）</div>';
+  const reasons = (s&&s.reasons&&s.reasons.length)
+    ? s.reasons.map(r=>{const x=REASON_TEXT[r]||['r-mut',r];return '<span class="reason '+x[0]+'">'+x[1]+'</span>'}).join('')
+    : '<span class="reason r-mut">无额外理由</span>';
+  const evs = (n.recent&&n.recent.length)
+    ? n.recent.map(e=>{const cls=/connect_error|all_failed|ttft_timeout|stream_interrupt|quota_halt/.test(e.type)?'bad':/switch/.test(e.type)?'warn':'ok';
+        return '<div class="ev"><span class="t">'+(e.at||'').slice(11,19)+'</span><span class="ty '+cls+'">'+e.type+'</span><span class="d">'+e.detail+'</span></div>'}).join('')
+    : '<div class="muted" style="font-size:11.5px">该节点在窗口内没有失败事件</div>';
+  return '<tr class="row-detail"><td colspan="10"><div class="detail">'+
+    '<div><h4>评分构成</h4>'+
+      (unm
+        ? '<div class="nd" style="margin-bottom:6px">无数据 —— 不渲染为 0 分</div>'+
+          '<div class="muted" style="font-size:11.5px;line-height:1.7">'+
+            (!s ? '该节点的 <code>score</code> 字段整个缺席 ⇒ 评分机制尚未接入。' :
+             s.samples===0 ? '样本数 = 0 ⇒ 窗口内没有任何成功/失败样本，评分没有分母。' :
+             '样本数 = '+s.samples+' ⇒ 低于评分机制的最小样本门槛，输出 null 而不是一个不可信的分。')+
+          '</div>'
+        : '<div class="mixrow" style="margin-bottom:6px"><span class="sw" style="background:'+tierOf(Math.round(s.value*100)).c+'"></span>'+
+            '<span class="nm"><b>总分</b></span><span class="ct">'+s.samples+' 样本</span>'+
+            '<span class="pc" style="color:'+tierOf(Math.round(s.value*100)).c+'">'+Math.round(s.value*100)+'</span></div>'+comps)+
+      '<div class="reasons">'+reasons+'</div></div>'+
+    '<div><h4>最近失败事件（来自 /api/call-log）</h4><div class="evtl">'+evs+'</div></div>'+
+    '<div><h4>运行时</h4><dl class="kv">'+
+      '<dt>指纹</dt><dd>'+n.fingerprint+'</dd>'+
+      '<dt>地址</dt><dd>'+n.address+':'+n.port+'</dd>'+
+      '<dt>请求数</dt><dd>'+n.req+'</dd>'+
+      '<dt>异常/切换</dt><dd>'+n.issues+'</dd>'+
+      '<dt>冷却至</dt><dd>'+(n.cooldown_until||'—')+'</dd>'+
+      '<dt>最近使用</dt><dd>'+(n.last_used_at||'—')+'</dd>'+
+      '<dt>最近探测</dt><dd>'+(n.last_probe_at||'—')+'</dd>'+
+      '<dt>最近延迟</dt><dd>'+(n.latency_ms===null?'未探测':n.latency_ms<0?'超时':n.latency_ms+' ms')+'</dd>'+
+    '</dl></div>'+
+    '</div></td></tr>';
+}
+let expanded={};
+function toggleRow(fp){ expanded[fp]=!expanded[fp]; renderNodeTable() }
+function setFilter(f){ filter=f;
+  document.querySelectorAll('#stateChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.f===f));
+  renderNodeTable() }
+function setAlert(v){ alertMode=v; renderNodeAlert() }
+function setScoreMode(v){ scoreMode=v; renderNodeTable() }
+
+function renderSources(){
+  const total=SOURCES.reduce((s,x)=>s+x.attempts,0);
+  document.getElementById('srcList').innerHTML=SOURCES.map(s=>{
+    const p=s.ok/s.attempts, zero=p===0;
+    return '<div class="mixrow" style="grid-template-columns:1fr auto 52px auto">'+
+      '<span class="nm"><b>'+s.label+'</b> <span class="mono" style="font-size:10.5px">'+s.k+'</span></span>'+
+      '<span class="ct">'+fmt(s.attempts)+' 次</span>'+
+      '<span class="bar" style="width:40px"><i style="width:'+(p*100)+'%;background:var(--s-'+rateClass(p)+')"></i></span>'+
+      '<span class="pc '+(zero?'':'')+'" style="color:var(--s-'+rateClass(p)+')">'+pctText(p,1)+'</span></div>';
+  }).join('')+
+  '<div class="mixrow" style="border-top:1px solid var(--border);padding-top:6px;margin-top:2px;grid-template-columns:1fr auto 52px auto">'+
+    '<span class="nm"><b>合计</b></span><span class="ct">'+fmt(total)+' 次</span>'+
+    '<span class="bar" style="width:40px"><i style="width:75.9%;background:var(--s-warn)"></i></span>'+
+    '<span class="pc" style="color:var(--s-warn)">75.9%</span></div>';
+  /* 失败构成（节点页复用概览同一份 FAIL_MIX，保证两处数字永远一致） */
+  const ft=FAIL_MIX.reduce((s,x)=>s+x.n,0);
+  document.getElementById('mixStack2').innerHTML=FAIL_MIX.map(x=>'<i style="width:'+(x.n/ft*100)+'%;background:'+x.color+'"></i>').join('');
+  document.getElementById('mixList2').innerHTML=FAIL_MIX.map(x=>
+    '<div class="mixrow"><span class="sw" style="background:'+x.color+'"></span>'+
+    '<span class="nm"><b>'+x.k+'</b> · '+x.sub+'</span><span class="ct">'+x.n+'</span>'+
+    '<span class="pc">'+pctText(x.n/ft,1)+'</span></div>').join('');
+}
+
+/* ============================================================================
+   渲染 · 调用日志（卡片列表 → 表格；保留 #clList / .cl-item / .cl-empty 三处钩子）
+   ============================================================================ */
+let clView='list';
+function clHasIssue(r){ const T=['switch','ttft_timeout','silence_timeout','stream_interrupt','stream_error','connect_error','upstream_error','all_failed'];
+  if(r.status!=='ok') return true; return (r.events||[]).some(e=>T.indexOf(e.type)>=0) }
+function clIssueLabel(r){ for(const e of r.events||[]){ const m={all_failed:'全部节点失败',switch:'已切换节点',ttft_timeout:'首字超时',
+  silence_timeout:'静默超时',stream_interrupt:'流中断',stream_error:'流错误',connect_error:'连接失败',upstream_error:'上游错误',
+  quota_halt:'闸门拒绝'}; if(m[e.type]) return m[e.type] } return '异常' }
+function clDur(ms){ if(!ms||ms<=0) return '—'; return ms<1000? ms+'ms' : (ms/1000).toFixed(1)+'s' }
+function clTime(ts){ return ts.slice(11,19) }
+function clNodes(r){ return (r.nodes||[]).map((fp,i)=>(r.node_names||[])[i]||fp).join(' → ')||'direct' }
+
+function clVisible(){
+  const kw=(document.getElementById('clKeyword').value||'').trim().toLowerCase();
+  const only=document.getElementById('clOnlyIssues').checked;
+  return CALLS.filter(r=>{
+    if(only&&!clHasIssue(r)) return false;
+    if(kw){ const hay=[r.model,r.path,r.err_msg,r.req_id,(r.node_names||[]).join(' '),(r.nodes||[]).join(' ')].join(' ').toLowerCase();
+      if(hay.indexOf(kw)<0) return false }
+    return true;
+  });
+}
+function renderCalls(){
+  const vis=clVisible();
+  const ok=vis.filter(r=>r.status==='ok').length, issue=vis.filter(clHasIssue).length;
+  document.getElementById('clTotal').textContent=vis.length===CALLS.length?'3,902':vis.length;
+  document.getElementById('clOk').textContent=vis.length===CALLS.length?'3,453':ok;
+  document.getElementById('clFail').textContent=vis.length===CALLS.length?'449':(vis.length-ok);
+  document.getElementById('clIssue').textContent=vis.length===CALLS.length?'1,284':issue;
+  document.getElementById('clRealRate').textContent='88.5%';
+  document.getElementById('clList').style.display=clView==='list'?'':'none';
+  document.getElementById('clHour').style.display=clView==='hour'?'':'none';
+  document.getElementById('clNode').style.display=clView==='node'?'':'none';
+  if(clView==='hour') return renderHour();
+  if(clView==='node') return renderNodeView();
+  renderCallTable(vis);
+}
+function renderCallTable(vis){
+  const tb=document.querySelector('#callTable tbody');
+  if(!vis.length){
+    tb.innerHTML='<tr><td colspan="9" class="empty-hint"><div class="empty-card" style="margin:8px">'+
+      '<div class="ec-ic">◇</div><div class="ec-t">没有匹配的调用记录</div>'+
+      '<div class="ec-d">当前筛选条件（关键词 / 只看失败 / 日期）没有命中任何记录。</div>'+
+      '<button class="btn btn-primary btn-sm" onclick="clReset()">清除全部筛选</button></div></td></tr>';
+    return;
+  }
+  const st=SORT.call;
+  const getter={ ts:r=>r.ts, status:r=>r.status, model:r=>r.model, path:r=>r.path,
+    duration_ms:r=>r.duration_ms, ttft_ms:r=>r.ttft_ms||null, prompt_tokens:r=>r.prompt_tokens };
+  const rows=sortRows(vis,getter[st.k],st.d);
+  tb.innerHTML=rows.map(r=>{
+    const issue=clHasIssue(r), exp=expanded[r.req_id];
+    const ok=r.status==='ok';
+    return '<tr class="cl-item clickable'+(exp?' sel':'')+'" onclick="clToggle(\''+r.req_id+'\')" tabindex="0">'+
+      '<td class="mono" style="font-size:11.5px">'+clTime(r.ts)+'</td>'+
+      '<td>'+(ok?'<span class="badge available"><span class="bdot"></span>成功</span>':'<span class="badge dead"><span class="bdot"></span>失败</span>')+'</td>'+
+      '<td class="ell" style="font-family:var(--mono);font-size:11.5px" title="'+r.model+'">'+r.model+'</td>'+
+      '<td class="ell muted" style="font-family:var(--mono);font-size:11px">'+r.path+'</td>'+
+      '<td class="ell" style="font-size:11.5px">'+clNodes(r)+'</td>'+
+      '<td class="num">'+clDur(r.duration_ms)+'</td>'+
+      '<td class="num">'+(r.ttft_ms? r.ttft_ms+'ms':'—')+'</td>'+
+      '<td class="num mono" style="font-size:11.5px">'+fmt(r.prompt_tokens)+' / '+fmt(r.completion_tokens)+'</td>'+
+      '<td class="ell">'+(issue?'<span class="reason r-warn">'+clIssueLabel(r)+'</span>':'<span class="muted">—</span>')+'</td>'+
+      '</tr>'+(exp?callDetail(r):'');
+  }).join('');
+}
+function callDetail(r){
+  const evs=(r.events||[]).map(e=>{
+    const cls=/connect_error|all_failed|ttft_timeout|stream_interrupt|stream_error|upstream_error|quota_halt/.test(e.type)?'bad'
+              :/switch/.test(e.type)?'warn':'ok';
+    return '<div class="ev"><span class="t">'+(e.at||'').slice(11,19)+'</span><span class="ty '+cls+'">'+e.type+'</span>'+
+      '<span class="d">'+((e.node_name||e.node)?('<b>'+e.node_name||e.node+'</b> '):'')+(e.detail||'')+'</span></div>'}).join('');
+  return '<tr class="row-detail cl-item"><td colspan="9"><div class="detail">'+
+    '<div><h4>Failover ladder（这一跳为什么最后是它）</h4><div class="evtl">'+evs+'</div></div>'+
+    '<div><h4>请求元数据</h4><dl class="kv">'+
+      '<dt>req_id</dt><dd>'+r.req_id+'</dd>'+
+      '<dt>route_mode</dt><dd>'+r.route_mode+'</dd>'+
+      '<dt>stream</dt><dd>'+(r.stream?'是':'否')+'</dd>'+
+      '<dt>耗时</dt><dd>'+clDur(r.duration_ms)+'</dd>'+
+      '<dt>缓存读</dt><dd>'+fmt(r.cache_read_tokens)+'</dd>'+
+      '<dt>建连耗时</dt><dd>'+(r.dial_ms||'—')+' ms</dd>'+
+      '<dt>最终状态码</dt><dd>'+(r.final_status||'—')+'</dd>'+
+      '<dt>错误</dt><dd style="color:var(--s-bad)">'+(r.err_msg||'—')+'</dd>'+
+    '</dl></div></div></td></tr>';
+}
+function clToggle(id){ expanded[id]=!expanded[id]; renderCalls() }
+function clReset(){ document.getElementById('clKeyword').value=''; document.getElementById('clOnlyIssues').checked=false; renderCalls() }
+function clSetView(v){ clView=v;
+  ['List','Hour','Node'].forEach(x=>{ const b=document.getElementById('clView'+x);
+    b.setAttribute('aria-selected', String(x.toLowerCase()===v)) });
+  renderCalls() }
+function clRefreshView(){ renderCalls() }
+function renderHour(){
+  const max=Math.max.apply(null,HOURLY.req);
+  const el=document.getElementById('clHour');
+  el.innerHTML='<div class="card-hd" style="margin-top:4px"><h2>时段分析</h2><span class="hd-sub">按小时统计请求分布与成功率（来自保留期内调用日志）</span></div>'+
+    '<div class="trend">'+HOURLY.req.map((r,i)=>{
+      const f=HOURLY.fail[i], p=(r-f)/r;
+      return '<div class="b"><div class="tip">'+String(i).padStart(2,'0')+' 时 · '+r+' 请求 · 成功率 '+pctText(p,1)+'</div>'+
+        '<div class="stackbar" style="height:'+(r/max*100).toFixed(1)+'%">'+
+        '<div class="fail" style="height:'+(f/r*100).toFixed(1)+'%"></div>'+
+        '<div class="ok" style="height:'+((1-f/r)*100).toFixed(1)+'%"></div></div></div>'}).join('')+'</div>'+
+    '<div class="trend-x">'+HOURLY.req.map((_,i)=>'<span>'+(i%2===0?String(i).padStart(2,'0'):'')+'</span>').join('')+'</div>'+
+    '<div class="legend-inline"><span><i class="g"></i>成功</span><span><i class="r"></i>失败</span></div>'+
+    '<div class="tipbox">红色段从第 20 个桶（10:00 起）明显抬升 —— 这就是 C-5 告警对应的时间窗口。</div>';
+}
+function renderNodeView(){
+  const el=document.getElementById('clNode');
+  const total=SOURCES.reduce((s,x)=>s+x.attempts,0);
+  el.innerHTML='<div class="card-hd" style="margin-top:4px"><h2>节点分析</h2>'+
+    '<span class="hd-sub">按最终出口聚合；「直连·*」为未经过节点直接出站的请求；「全部」行分母含直连</span></div>'+
+    '<div class="tbl-wrap plain"><table class="tbl" style="table-layout:auto"><thead><tr>'+
+    '<th>出口</th><th class="num">尝试数</th><th class="num">成功率</th><th class="num">占比</th></tr></thead><tbody>'+
+    SOURCES.map(s=>{const p=s.ok/s.attempts;return '<tr><td class="mono" style="font-size:12px">'+s.label+'</td>'+
+      '<td class="num">'+fmt(s.attempts)+'</td>'+
+      '<td class="num"><span class="bar"><i style="width:'+(p*100)+'%;background:var(--s-'+rateClass(p)+')"></i></span>'+
+      '<span class="rate '+rateClass(p)+'">'+pctText(p,1)+'</span></td>'+
+      '<td class="num muted">'+pctText(s.attempts/total,1)+'</td></tr>'}).join('')+
+    '<tr style="font-weight:700"><td>全部（分母含直连）</td><td class="num">'+fmt(total)+'</td>'+
+    '<td class="num"><span class="rate warn">75.9%</span></td><td class="num muted">100.0%</td></tr>'+
+    '</tbody></table></div>'+
+    '<div class="tipbox">节点页的「出口来源健康」与这里是<b>同一个聚合函数</b>的输出（落地时抽成 <code>aggregateByExitNode()</code>，两处共用），数字必须相等 —— 这是 U1 §6 验收第 1 条。</div>';
+}
+
+/* ============================================================================
+   其它页面（结构保持原样）
+   ============================================================================ */
+function renderStatic(){
+  document.getElementById('subBody').innerHTML=[
+    ['香港专线','https://sub.example.com/hk',24,'105','84.2 GB / 200 GB','2026-10-19 09:12'],
+    ['日本池','https://sub.example.com/jp',24,'62','41.7 GB / 200 GB','2026-10-19 09:12'],
+    ['新加坡池','https://sub.example.com/sg',12,'18','0.4 GB / 50 GB','2026-10-19 08:40'],
+    ['webshare 主池','webshare API',12,'42','—','2026-10-18 22:05']
+  ].map(r=>'<tr><td>'+r[0]+'</td><td class="mono ell" style="font-size:11.5px">'+r[1]+'</td><td class="num">'+r[2]+'</td>'+
+    '<td class="num">'+r[3]+'</td><td class="mono" style="font-size:11.5px">'+r[4]+'</td><td class="mono" style="font-size:11.5px">'+r[5]+'</td></tr>').join('');
+  document.getElementById('aliasBody').innerHTML=[
+    ['deepseek-v4-flash-free','deepseek-v4-flash'],['mimo-v2.5-free','mimo-v2.5'],
+    ['gpt-5.5','gpt-5.5'],['glm-5.2','glm-5.2']
+  ].map(r=>'<tr><td class="mono">'+r[0]+'</td><td class="mono">'+r[1]+'</td></tr>').join('');
+  document.getElementById('effortBody').innerHTML=[['low','minimal'],['high','high']]
+    .map(r=>'<tr><td class="mono">'+r[0]+'</td><td class="mono">'+r[1]+'</td></tr>').join('');
+}
+
+/* ============================================================================
+   壳：导航 / 主题 / toast / 演示开关
+   ============================================================================ */
+const PAGE_TITLES={overview:['概览','OPENCODE TO API'],nodes:['节点池','节点健康与切换'],
+  subs:['订阅与配额','订阅源 / 手动节点 / 免费额度'],misc:['代理与模型','推理 / 别名 / SOCKS5 / 网关'],
+  logs:['运行日志','调用日志（表格化）']};
+function showPage(id){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.page===id));
+  document.getElementById('pageTitle').firstChild.textContent=PAGE_TITLES[id][0]+' ';
+  document.getElementById('pageCrumb').textContent=PAGE_TITLES[id][1];
+  window.scrollTo(0,0);
+}
+function toggleTheme(){
+  const cur=document.documentElement.getAttribute('data-theme');
+  document.documentElement.setAttribute('data-theme',cur==='dark'?'light':'dark');
+}
+function toggleMarks(){
+  const b=document.body, on=b.dataset.marks==='on';
+  b.dataset.marks=on?'off':'on';
+  document.getElementById('mkBtn').classList.toggle('on',!on);
+}
+function toggleLegend(){ document.getElementById('legend').classList.toggle('open') }
+let toastT;
+function toast(msg){
+  const e=document.getElementById('toast');
+  e.textContent=msg; e.className='show';
+  clearTimeout(toastT); toastT=setTimeout(()=>e.className='',2400);
+}
+let DEMO='normal';
+function demoState(s){
+  DEMO=s;
+  document.querySelectorAll('[data-demo]').forEach(b=>b.classList.toggle('on',b.dataset.demo===s));
+  renderNodeTable();
+}
+
+/* 启动 */
+function renderAll(){ renderOverview(); renderNodeAlert(); renderNodeTable(); renderSources(); renderCalls() }
+window.addEventListener('DOMContentLoaded',()=>{
+  renderStatic();
+  bindSort();
+  renderAll();
+});
+</script>
+</body>
+</html>

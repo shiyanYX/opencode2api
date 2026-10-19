@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="zh-CN" data-view="blueprint">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>U2a · Shell 蓝图 · opencode2api 面板大改</title>
+<!--
+  U2a shell-blueprint.html
+  ============================================================================
+  单文件、离线、零外链（无 CDN / 无字体 / 无图片）。双击即可打开。
+  作用：把「照 freellm 的大框架改造 opencode2api 面板」的 shell 骨架做成可点击原型。
+  证据来源：docs/research/U2a-freellm-shell-and-stack.md
+    · freellm 顶栏结构  -> /home/jingyx/freellmapi/client/src/App.tsx:226-383
+    · 内容容器 max-w-6xl -> client/src/App.tsx:412-420（实测宽 1152px）
+    · 页面头 PageHeader   -> client/src/components/page-header.tsx:8-25
+    · 断点 md=768 折叠导航 -> App.tsx:252 / :321
+    · 命令面板 ⌘K/Ctrl+K   -> components/command-palette.tsx:76-89
+  交互（全部原生 JS，无框架）：
+    · 点顶部导航切换 5 个分区（对应我们现有的 5 个 section）
+    · 移动端自动折叠为「汉堡 → 下拉菜单」（<768px）
+    · 「区域标注」开关：显示每个区域是 照搬 / 改造 / 放弃
+    · 「对照现状」开关：显示我们现在的左侧栏结构（改造前）
+  ============================================================================
+-->
+<style>
+:root{
+  --bg:#f7f8fa; --surface:#fff; --surface-2:#f1f3f6; --border:#e3e6ec; --border-strong:#cfd4de;
+  --text:#14171f; --text-sec:#5b6373; --text-mut:#8a92a3;
+  --accent:#2f6df6; --accent-dim:#e8efff; --ok:#16a34a; --warn:#d97706; --bad:#dc2626;
+  --radius:16px; --radius-sm:9px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06);
+  --nav-h:52px;
+}
+html[data-theme="dark"]{
+  --bg:#0f1115; --surface:#171a21; --surface-2:#1e222b; --border:#2a2f3a; --border-strong:#3a4150;
+  --text:#e8ebf2; --text-sec:#a3abbd; --text-mut:#7b8396;
+  --accent:#5b8dff; --accent-dim:#1b2740; --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 1px 3px rgba(0,0,0,.4);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text); min-height:100vh;
+  font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Noto Sans SC",Segoe UI,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;cursor:pointer}
+kbd{font:11px/1 var(--mono);color:var(--text-mut);border:1px solid var(--border);
+    border-radius:5px;padding:3px 5px;background:var(--surface-2)}
+
+/* ============ ① 顶栏（照搬 freellm 的 shell 骨架） ============ */
+header.topbar{
+  position:sticky; top:0; z-index:40; height:var(--nav-h);
+  background:color-mix(in srgb,var(--surface) 80%,transparent);
+  backdrop-filter:blur(8px); border-bottom:1px solid var(--border);
+}
+.topbar-in{max-width:1152px;margin:0 auto;height:100%;display:flex;align-items:center;padding:0 24px}
+.brand{display:flex;align-items:center;gap:8px;font-weight:650;font-size:14px;letter-spacing:-.01em}
+.brand .dot{width:8px;height:8px;border-radius:50%;background:var(--text);display:inline-block}
+nav.primary{display:flex;align-items:center;gap:24px;margin-left:40px}
+nav.primary .item{position:relative;padding:4px 0;font-size:14px;color:var(--text-sec);transition:color .15s}
+nav.primary .item:hover{color:var(--text)}
+nav.primary .item[aria-current="page"]{color:var(--text)}
+nav.primary .item[aria-current="page"]::after{content:"";position:absolute;left:0;right:0;bottom:-15px;height:1px;background:var(--text)}
+.split{display:flex;align-items:center;gap:2px}
+.split .chev{border:0;background:none;border-radius:6px;padding:2px 3px;color:var(--text-mut);line-height:0}
+.split .chev:hover{color:var(--text)}
+.right{margin-left:auto;display:flex;align-items:center;gap:4px}
+.cmdbtn{display:flex;align-items:center;gap:6px;border:0;background:none;border-radius:8px;padding:6px 8px}
+.cmdbtn:hover{background:var(--surface-2)}
+.iconbtn{border:0;background:none;border-radius:8px;padding:6px;line-height:0}
+.iconbtn:hover{background:var(--surface-2)}
+.hamburger{display:none}
+
+/* ============ ② 内容容器（照搬：max-w-6xl + px-6 + py-8） ============ */
+main.page{max-width:1152px;margin:0 auto;width:100%;padding:32px 24px 72px}
+
+/* 页面头（照搬 freellm PageHeader 的形态） */
+.pagehead{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:24px;margin-bottom:24px}
+.pagehead h1{margin:0;font-size:24px;font-weight:650;letter-spacing:-.02em}
+.pagehead p{margin:4px 0 0;font-size:14px;color:var(--text-sec)}
+.pagehead .actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.stack{display:flex;flex-direction:column;gap:24px}
+
+/* ============ ③ 区域占位（wireframe） ============ */
+.region{
+  border:1px dashed var(--border-strong); border-radius:var(--radius);
+  background:var(--surface); padding:16px; position:relative;
+}
+.region > .rlabel{
+  position:absolute; top:-9px; left:14px; background:var(--bg);
+  padding:0 6px; font-size:11px; color:var(--text-mut); letter-spacing:.02em;
+}
+.region .rhint{margin:6px 0 0;font-size:12px;color:var(--text-mut)}
+.card{border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);padding:20px;box-shadow:var(--shadow)}
+.card h2{margin:0 0 4px;font-size:14px;font-weight:600}
+.card .sub{margin:0;font-size:12px;color:var(--text-sec)}
+section.block > h2{margin:0 0 12px;font-size:14px;font-weight:600}
+.grid{display:grid;gap:12px}
+.g-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.g-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.stat{border:1px solid var(--border);border-radius:12px;background:var(--surface);padding:14px}
+.stat .k{font-size:11px;color:var(--text-mut);text-transform:uppercase;letter-spacing:.04em}
+.stat .v{font-size:20px;font-weight:650;margin-top:6px;font-variant-numeric:tabular-nums}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{border:1px solid var(--border);background:var(--surface);border-radius:999px;padding:4px 11px;font-size:12px;color:var(--text-sec)}
+.chip[aria-pressed="true"]{background:var(--accent-dim);border-color:transparent;color:var(--accent);font-weight:600}
+.btn{border:1px solid var(--border);background:var(--surface);border-radius:9px;padding:7px 12px;font-size:13px}
+.btn:hover{background:var(--surface-2)}
+.btn-primary{background:var(--accent);border-color:transparent;color:#fff}
+.btn-primary:hover{filter:brightness(1.06)}
+.btn-danger{background:transparent;border-color:color-mix(in srgb,var(--bad) 40%,transparent);color:var(--bad)}
+.rows{display:flex;flex-direction:column}
+.row{display:flex;align-items:center;gap:12px;padding:11px 0;border-top:1px solid var(--border);font-size:13px}
+.row:first-child{border-top:1px solid var(--border)}
+.row .nm{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge{font-size:11px;border-radius:999px;padding:2px 8px;border:1px solid var(--border);color:var(--text-sec);white-space:nowrap}
+.badge.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 35%,transparent);background:color-mix(in srgb,var(--ok) 10%,transparent)}
+.badge.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent);background:color-mix(in srgb,var(--warn) 10%,transparent)}
+.badge.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 35%,transparent);background:color-mix(in srgb,var(--bad) 10%,transparent)}
+.muted{color:var(--text-mut)}
+.sk{height:11px;border-radius:6px;background:var(--surface-2);animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+@media (prefers-reduced-motion:reduce){.sk{animation:none}}
+
+/* ============ ④ 标注层（照搬/改造/放弃） ============ */
+.tag{position:absolute;top:-9px;right:12px;font-size:11px;border-radius:999px;padding:1px 8px;
+     border:1px solid var(--border);background:var(--bg);display:none}
+html[data-annot="on"] .tag{display:inline-block}
+.tag.keep{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
+.tag.adapt{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
+.tag.drop{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+html[data-annot="on"] .region{border-style:solid;border-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+
+/* ============ ⑤ 手机端（<768px 折叠，照搬 freellm 的 md 断点） ============ */
+@media (max-width:767px){
+  .topbar-in{padding:0 16px}
+  nav.primary,.right{display:none}
+  .hamburger{display:inline-flex;margin-left:auto}
+  main.page{padding:24px 16px 56px}
+  .g-2,.g-4{grid-template-columns:minmax(0,1fr)}
+  .pagehead{align-items:flex-start}
+  .pagehead .actions{width:100%}
+  .row .hide-sm{display:none}
+}
+/* 移动端下拉菜单（照搬 freellm：w-52 + 分隔线 + 账号组） */
+.sheet{position:fixed;inset:0;z-index:60;display:none}
+.sheet[data-open="true"]{display:block}
+.sheet .scrim{position:absolute;inset:0;background:rgba(10,12,16,.35)}
+.sheet .panel{position:absolute;top:8px;right:8px;width:208px;background:var(--surface);
+  border:1px solid var(--border);border-radius:12px;box-shadow:0 12px 32px rgba(16,24,40,.18);padding:4px}
+.sheet .panel button{display:block;width:100%;text-align:left;border:0;background:none;
+  border-radius:8px;padding:8px 10px;font-size:13px}
+.sheet .panel button:hover{background:var(--surface-2)}
+.sheet .panel button[aria-current="page"]{background:var(--accent-dim);color:var(--accent);font-weight:600}
+.sheet .sep{height:1px;background:var(--border);margin:4px 0}
+
+/* ============ ⑥ 对照现状（左栏 = 改造前） ============ */
+.before{display:none}
+html[data-view="before"] .before{display:block}
+html[data-view="before"] .after{display:none}
+.fake-layout{display:flex;gap:0;min-height:520px;border:1px dashed var(--border-strong);border-radius:var(--radius);overflow:hidden}
+.fake-side{width:204px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--border);padding:18px 12px}
+.fake-side .b{display:flex;align-items:center;gap:10px;padding:0 6px 16px;border-bottom:1px solid var(--border);margin-bottom:10px;font-weight:650;font-size:14px}
+.fake-side .n{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:9px;font-size:13.5px;color:var(--text-sec);position:relative}
+.fake-side .n[aria-current="page"]{background:var(--accent-dim);color:var(--accent);font-weight:600}
+.fake-side .n[aria-current="page"]::before{content:"";position:absolute;left:0;top:20%;bottom:20%;width:2.5px;border-radius:2px;background:var(--accent)}
+.fake-main{flex:1;min-width:0;padding:24px 28px}
+@media (max-width:767px){.fake-side{width:60px;padding:14px 8px}.fake-side .n span{display:none}.fake-side .b span{display:none}}
+
+/* ============ ⑦ 页脚工具条 ============ */
+.toolbar{position:fixed;left:16px;bottom:16px;z-index:70;display:flex;align-items:center;gap:8px;
+  background:var(--surface);border:1px solid var(--border);border-radius:999px;padding:6px 10px;
+  box-shadow:0 8px 24px rgba(16,24,40,.14);font-size:12px}
+.toolbar .tg{border:1px solid var(--border);background:var(--surface);border-radius:999px;padding:5px 10px;font-size:12px}
+.toolbar .tg[aria-pressed="true"]{background:var(--accent-dim);border-color:transparent;color:var(--accent);font-weight:600}
+.legend{max-width:1152px;margin:0 auto;padding:0 24px 40px}
+.legend .note{font-size:12px;color:var(--text-sec)}
+</style>
+</head>
+<body>
+
+<!-- ============================= 顶栏 ============================= -->
+<header class="topbar">
+  <div class="topbar-in">
+    <a class="brand" href="#" data-action="go" data-page="overview"><span class="dot"></span>opencode2api</a>
+
+    <nav class="primary" id="navPrimary" aria-label="主导航">
+      <a class="item" href="#" data-action="go" data-page="overview">概览</a>
+      <a class="item" href="#" data-action="go" data-page="nodes">节点池</a>
+      <a class="item" href="#" data-action="go" data-page="subs">订阅与配额</a>
+      <div class="split">
+        <a class="item" href="#" data-action="go" data-page="misc">代理与模型</a>
+        <button class="chev" type="button" aria-label="代理与模型子页" data-action="menu" data-menu="misc">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>
+        </button>
+      </div>
+      <a class="item" href="#" data-action="go" data-page="logs">运行日志</a>
+    </nav>
+
+    <div class="right">
+      <button class="cmdbtn" type="button" data-action="palette" aria-label="命令面板">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <kbd>Ctrl K</kbd>
+      </button>
+      <button class="iconbtn" type="button" data-action="theme" aria-label="切换主题" title="切换明暗主题">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/></svg>
+      </button>
+      <button class="iconbtn" type="button" data-action="menu" data-menu="account" aria-label="打开导航菜单" title="更多">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="19" cy="12" r="1.7"/></svg>
+      </button>
+    </div>
+
+    <button class="iconbtn hamburger" type="button" data-action="menu" data-menu="mobile" aria-label="打开导航菜单" title="菜单">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+  </div>
+</header>
+
+<!-- ===================== 移动端下拉菜单（<768px） ===================== -->
+<div class="sheet" id="sheet" data-open="false">
+  <div class="scrim" data-action="closeSheet"></div>
+  <div class="panel" role="menu">
+    <button data-action="go" data-page="overview">概览</button>
+    <button data-action="go" data-page="nodes">节点池</button>
+    <button data-action="go" data-page="subs">订阅与配额</button>
+    <button data-action="go" data-page="misc">代理与模型</button>
+    <button data-action="go" data-page="logs">运行日志</button>
+    <div class="sep"></div>
+    <button data-action="theme">切换主题</button>
+  </div>
+</div>
+
+<!-- ============================= 蓝图视图 ============================= -->
+<div class="after">
+<main class="page" id="pageRoot">
+
+  <!-- ─────────── 概览 ─────────── -->
+  <section data-page="overview">
+    <div class="pagehead">
+      <div>
+        <h1>概览</h1>
+        <p>今天哪些节点能用、谁在拖后腿。</p>
+      </div>
+      <div class="actions">
+        <div class="chips" role="group" aria-label="时间窗">
+          <button class="chip" aria-pressed="false">今日</button>
+          <button class="chip" aria-pressed="true">7 天</button>
+          <button class="chip" aria-pressed="false">30 天</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="region">
+        <span class="rlabel">区域 1 · 告警横幅（我们已有 node_alert）</span>
+        <span class="tag keep">照搬</span>
+        <p class="rhint">状态色横幅：出现故障时置顶，可关闭。freellm 无此件，位置照 freellm 的 <code>GettingStarted</code>/<code>UpdateReminder</code> 槽位放。</p>
+      </div>
+
+      <div class="region">
+        <span class="rlabel">区域 2 · KPI 统计行（table 上方，不放进页面头）</span>
+        <span class="tag keep">照搬</span>
+        <span class="tag adapt">改造</span>
+        <div class="grid g-4">
+          <div class="stat"><div class="k">请求</div><div class="v">3,713</div></div>
+          <div class="stat"><div class="k">成功率</div><div class="v">91.6%</div></div>
+          <div class="stat"><div class="k">P50 耗时</div><div class="v">10.3s</div></div>
+          <div class="stat"><div class="k">可用节点</div><div class="v">128</div></div>
+        </div>
+        <p class="rhint">freellm：<code>grid-cols-2 md:grid-cols-4 gap-3</code>（client/src/pages/AnalyticsPage.tsx:735）。我们已有 <code>.stats-row/.stat</code>，照换列数即可。</p>
+      </div>
+
+      <div class="region">
+        <span class="rlabel">区域 3 · 图表区（2 列网格，关键图跨 2 列）</span>
+        <span class="tag adapt">改造</span>
+        <div class="grid g-2">
+          <div class="card"><h2>Token 用量趋势</h2><p class="sub">跨 2 列 · lg:col-span-2</p>
+            <div class="sk" style="margin-top:12px"></div><div class="sk" style="margin-top:8px;width:80%"></div></div>
+          <div class="card"><h2>模型分布</h2><p class="sub">甜甜圈</p></div>
+          <div class="card"><h2>失败分类</h2><p class="sub">横向条</p></div>
+        </div>
+        <p class="rhint">freellm：<code>grid grid-cols-1 lg:grid-cols-2 gap-6</code>，重点面板加 <code>lg:col-span-2</code>（AnalyticsPage.tsx:735 起）。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────── 节点池 ─────────── -->
+  <section data-page="nodes" hidden>
+    <div class="pagehead">
+      <div>
+        <h1>节点池</h1>
+        <p>227 个出口 · 128 可用 / 93 故障 / 6 已耗尽。</p>
+      </div>
+      <div class="actions">
+        <button class="btn">测速</button>
+        <button class="btn">刷新节点</button>
+        <button class="btn btn-danger" data-action="confirm">解除全部标记</button>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="region">
+        <span class="rlabel">区域 1 · 状态筛选 chips（从分区内提到页面头右侧 / 表上方）</span>
+        <span class="tag adapt">改造</span>
+        <div class="chips">
+          <button class="chip" aria-pressed="true">全部 227</button>
+          <button class="chip" aria-pressed="false">可用 128</button>
+          <button class="chip" aria-pressed="false">故障 93</button>
+          <button class="chip" aria-pressed="false">已耗尽 6</button>
+        </div>
+        <div class="chips" style="margin-top:10px">
+          <input placeholder="搜索节点名 / IP" style="border:1px solid var(--border);background:var(--surface);border-radius:9px;padding:6px 10px;font-size:13px;min-width:220px">
+        </div>
+      </div>
+
+      <div class="region">
+        <span class="rlabel">区域 2 · 节点表（可排序表头 + 骨架屏 + 带动作空态）</span>
+        <span class="tag keep">照搬</span><span class="tag adapt">改造</span>
+        <div class="rows">
+          <div class="row"><span class="nm">CL-64.137.121.210:6465</span><span class="badge bad">故障</span><span class="muted hide-sm">probe 超时</span><span class="muted">557ms</span></div>
+          <div class="row"><span class="nm">CH-191.101.121.29:6303</span><span class="badge ok">可用</span><span class="muted hide-sm">—</span><span class="muted">376ms</span></div>
+          <div class="row"><span class="nm">US-23.26.94.215:6197</span><span class="badge ok">可用</span><span class="muted hide-sm">—</span><span class="muted">1,730ms</span></div>
+          <div class="row"><span class="nm">AT-64.137.103.44:6632</span><span class="badge warn">已耗尽</span><span class="muted hide-sm">quota</span><span class="muted">—</span></div>
+        </div>
+        <p class="rhint">骨架屏 <code>TableSkeleton</code>（ui/skeleton.tsx:18-32）／空态 <code>EmptyState</code>（empty-state.tsx:8-31）。点行展开详情（<code>&lt;tr class="expand"&gt;</code>，不新增路由）。</p>
+      </div>
+
+      <div class="region">
+        <span class="rlabel">区域 3 · 延迟分布（我们已有 latdist）</span>
+        <span class="tag keep">照搬</span>
+        <div class="sk" style="height:74px"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────── 订阅与配额 ─────────── -->
+  <section data-page="subs" hidden>
+    <div class="pagehead">
+      <div>
+        <h1>订阅与配额</h1>
+        <p>订阅源、Webshare 代理池、配额信号。</p>
+      </div>
+      <div class="actions"><button class="btn btn-primary">保存全部</button></div>
+    </div>
+    <div class="stack">
+      <div class="region"><span class="rlabel">区域 1 · 订阅源表</span><span class="tag keep">照搬</span>
+        <div class="rows"><div class="row"><span class="nm">飞鸟云</span><span class="muted">192.168.1.3:2090</span><span class="badge">24h</span></div>
+          <div class="row"><span class="nm">红杏</span><span class="muted">192.168.1.3:2090</span><span class="badge">24h</span></div></div></div>
+      <div class="region"><span class="rlabel">区域 2 · Webshare 代理池</span><span class="tag keep">照搬</span>
+        <div class="rows"><div class="row"><span class="nm">1</span><span class="muted">gxewx…</span><span class="badge ok">54 节点</span></div></div></div>
+      <div class="region"><span class="rlabel">区域 3 · 配额信号（current 配置回显）</span><span class="tag keep">照搬</span>
+        <div class="chips"><span class="chip">FreeUsageLimitError</span><span class="chip">insufficient_quota</span><span class="chip">credits_error</span></div></div>
+    </div>
+  </section>
+
+  <!-- ─────────── 代理与模型 ─────────── -->
+  <section data-page="misc" hidden>
+    <div class="pagehead">
+      <div>
+        <h1>代理与模型</h1>
+        <p>推理力度映射、模型别名、SOCKS5。</p>
+      </div>
+      <div class="actions"><button class="btn btn-primary">保存全部</button></div>
+    </div>
+    <div class="stack">
+      <div class="region"><span class="rlabel">区域 1 · 推理力度映射</span><span class="tag keep">照搬</span>
+        <div class="rows"><div class="row"><span class="nm">high</span><span class="badge">→ high</span></div>
+          <div class="row"><span class="nm">minimal</span><span class="badge">→ low</span></div></div></div>
+      <div class="region"><span class="rlabel">区域 2 · 模型映射</span><span class="tag keep">照搬</span>
+        <div class="rows"><div class="row"><span class="nm">my-fast-model</span><span class="badge">→ deepseek-v4-flash-free</span></div></div></div>
+      <div class="region"><span class="rlabel">区域 3 · SOCKS5 代理</span><span class="tag drop">放弃（freellm 无对应件）</span>
+        <div class="sk" style="height:44px"></div></div>
+    </div>
+  </section>
+
+  <!-- ─────────── 运行日志 ─────────── -->
+  <section data-page="logs" hidden>
+    <div class="pagehead">
+      <div>
+        <h1>运行日志</h1>
+        <p>原始日志 与 调用日志。</p>
+      </div>
+      <div class="actions">
+        <button class="btn">跟随</button>
+        <button class="btn btn-danger" data-action="confirm">清空</button>
+      </div>
+    </div>
+    <div class="stack">
+      <div class="region">
+        <span class="rlabel">区域 1 · 工具条（级别 chips + 日志类型 + 搜索 + 暂停）</span>
+        <span class="tag adapt">改造</span>
+        <div class="chips">
+          <button class="chip" aria-pressed="true">全部</button>
+          <button class="chip" aria-pressed="false">Info</button>
+          <button class="chip" aria-pressed="false">Warn</button>
+          <button class="chip" aria-pressed="false">Error</button>
+          <span style="flex:1"></span>
+          <input placeholder="搜索…" style="border:1px solid var(--border);background:var(--surface);border-radius:9px;padding:6px 10px;font-size:13px">
+        </div>
+        <p class="rhint">freellm：<code>mb-4 flex flex-wrap items-center gap-2</code>（LogsPage.tsx:186 起）。</p>
+      </div>
+      <div class="region">
+        <span class="rlabel">区域 2 · 日志卡片（自身滚动 max-h-[65vh]，底部跟随）</span>
+        <span class="tag keep">照搬</span>
+        <div class="rows" style="max-height:220px;overflow:auto">
+          <div class="row"><span class="badge">INFO</span><span class="nm">node health check done checked=128</span><span class="muted hide-sm">23:34</span></div>
+          <div class="row"><span class="badge warn">WARN</span><span class="nm">node marked dead by health check node=…</span><span class="muted hide-sm">23:31</span></div>
+          <div class="row"><span class="badge bad">ERROR</span><span class="nm">upstream_attempt status=403</span><span class="muted hide-sm">22:56</span></div>
+        </div>
+        <p class="rhint">freellm 的「排序只覆盖已加载行」提示（en.json:analytics.sortHint）值得抄：在表下方写清口径。</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+</div>
+
+<!-- ===================== 对照现状视图（改造前） ===================== -->
+<div class="before">
+  <main class="page">
+    <div class="pagehead">
+      <div><h1>改造前：左侧栏 + 无页面头</h1>
+        <p>现状 <code>static/admin.html</code> 是 <code>&lt;aside class="sidebar"&gt;</code> 204px 固定左栏（admin.html:123 / :431），页面直接从内容开始，没有统一的页面头。</p></div>
+    </div>
+    <div class="fake-layout">
+      <div class="fake-side">
+        <div class="b"><span class="dot" style="width:8px;height:8px;border-radius:50%;background:var(--text);display:inline-block"></span><span>opencode2api</span></div>
+        <div class="n" aria-current="page">▦ <span>概览</span></div>
+        <div class="n">◉ <span>节点池</span></div>
+        <div class="n">▤ <span>订阅与配额</span></div>
+        <div class="n">⚙ <span>代理与模型</span></div>
+        <div class="n">▥ <span>运行日志</span></div>
+      </div>
+      <div class="fake-main">
+        <div class="region"><span class="rlabel">页面直接从 .stats-row 开始（无 h1/描述/动作槽）</span>
+          <div class="grid g-4">
+            <div class="stat"><div class="k">请求</div><div class="v">3,713</div></div>
+            <div class="stat"><div class="k">成功率</div><div class="v">91.6%</div></div>
+            <div class="stat"><div class="k">P50</div><div class="v">10.3s</div></div>
+            <div class="stat"><div class="k">节点</div><div class="v">128</div></div>
+          </div>
+        </div>
+        <div class="region" style="margin-top:16px"><span class="rlabel">操作按钮分散在分区内部（admin.html:596-602）</span>
+          <div class="chips"><span class="chip">重新加载订阅</span><span class="chip">解除全部标记</span><span class="chip">测速</span><span class="chip">刷新节点</span></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- ===================== 蓝图映射说明 ===================== -->
+<div class="legend">
+  <div class="card">
+    <h2>freellm shell → 我们 5 个分区 的映射结论</h2>
+    <p class="sub" style="margin-top:6px">
+      <b>照搬</b>＝形态与语义逐字可用；<b>改造</b>＝思路可用、形态要按我们的数据重写；<b>放弃</b>＝freellm 没有对应件或不适配。
+    </p>
+    <div class="rows" style="margin-top:12px">
+      <div class="row"><span class="nm">顶栏（sticky + blur + 底部细线）与内容容器 max-w-6xl</span><span class="badge ok">照搬</span></div>
+      <div class="row"><span class="nm">页面头 PageHeader（h1 + 描述 + 右侧动作槽 + 底部分隔线）</span><span class="badge ok">照搬</span></div>
+      <div class="row"><span class="nm">两个入口带下拉子菜单（模型 / 分析）</span><span class="badge warn">改造</span><span class="muted">我们只有「代理与模型」值得带子页，其余保持扁平</span></div>
+      <div class="row"><span class="nm">移动端 &lt;768px 汉堡 + 下拉（替代横向滚动导航）</span><span class="badge warn">改造</span><span class="muted">我们现在是 60px 图标窄栏（admin.html:380-385）</span></div>
+      <div class="row"><span class="nm">命令面板 ⌘K / Ctrl K</span><span class="badge bad">放弃</span><span class="muted">5 个分区，收益低于维护成本（U1 §7.10）</span></div>
+      <div class="row"><span class="nm">骨架屏 / 空态 / 页面级 ErrorBoundary / Toast 队列</span><span class="badge ok">照搬</span></div>
+      <div class="row"><span class="nm">60 个 locale 的 i18n、Geist 字体、React/Vite/Tailwind 构建链</span><span class="badge bad">放弃</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================= 工具条 ============================= -->
+<div class="toolbar" role="toolbar" aria-label="蓝图控制">
+  <span class="muted" style="padding-left:4px">蓝图</span>
+  <button class="tg" data-action="annot" aria-pressed="false">区域标注</button>
+  <button class="tg" data-action="view" aria-pressed="false">对照现状</button>
+  <button class="tg" data-action="theme" aria-pressed="false">明/暗</button>
+  <span class="muted" id="vpLabel" style="padding-right:4px"></span>
+</div>
+
+<script>
+/* 事件委托：全部交互走 data-action，不写行内 onclick。
+   这正是本项目建议在改造中局部采用的模式（见报告 §5 路线 A 的代价项）。 */
+(function(){
+  var root = document.documentElement;
+  var PAGES = ['overview','nodes','subs','misc','logs'];
+
+  function go(page){
+    if (PAGES.indexOf(page) < 0) page = 'overview';
+    document.querySelectorAll('#pageRoot > section').forEach(function(s){
+      s.hidden = (s.dataset.page !== page);
+    });
+    document.querySelectorAll('#navPrimary .item').forEach(function(a){
+      if (a.dataset.page === page) a.setAttribute('aria-current','page');
+      else a.removeAttribute('aria-current');
+    });
+    document.querySelectorAll('#sheet .panel button[data-page]').forEach(function(b){
+      if (b.dataset.page === page) b.setAttribute('aria-current','page');
+      else b.removeAttribute('aria-current');
+    });
+    closeSheet();
+    window.scrollTo({ top: 0, behavior: 'auto' });
+    try { history.replaceState(null,'','#'+page); } catch(e){}
+  }
+  function openSheet(){ document.getElementById('sheet').dataset.open = 'true'; }
+  function closeSheet(){ document.getElementById('sheet').dataset.open = 'false'; }
+
+  // 简易二次确认（对应 freellm 的 ConfirmButton 契约：3 秒内再点才执行）
+  function armConfirm(btn){
+    if (btn.dataset.armed === '1'){
+      btn.dataset.armed = '0'; btn.textContent = btn.dataset.label || btn.textContent;
+      return true;
+    }
+    btn.dataset.label = btn.textContent;
+    btn.dataset.armed = '1';
+    btn.textContent = '确认？';
+    setTimeout(function(){
+      if (btn.dataset.armed === '1'){ btn.dataset.armed='0'; btn.textContent = btn.dataset.label; }
+    }, 3000);
+    return false;
+  }
+
+  document.addEventListener('click', function(ev){
+    var el = ev.target.closest('[data-action]');
+    if (!el) return;
+    var act = el.dataset.action;
+    if (act === 'go'){ ev.preventDefault(); go(el.dataset.page); }
+    else if (act === 'menu'){ ev.preventDefault(); openSheet(); }
+    else if (act === 'closeSheet'){ closeSheet(); }
+    else if (act === 'theme'){
+      ev.preventDefault();
+      root.dataset.theme = (root.dataset.theme === 'dark') ? 'light' : 'dark';
+      var b = document.querySelector('.toolbar [data-action="theme"]');
+      if (b) b.setAttribute('aria-pressed', root.dataset.theme === 'dark' ? 'true' : 'false');
+    }
+    else if (act === 'annot'){
+      var on = root.dataset.annot === 'on';
+      root.dataset.annot = on ? 'off' : 'on';
+      el.setAttribute('aria-pressed', on ? 'false' : 'true');
+    }
+    else if (act === 'view'){
+      var before = root.dataset.view === 'before';
+      root.dataset.view = before ? 'blueprint' : 'before';
+      el.setAttribute('aria-pressed', before ? 'false' : 'true');
+    }
+    else if (act === 'palette'){
+      ev.preventDefault();
+      el.animate([{opacity:1},{opacity:.35},{opacity:1}], {duration:420});
+      var k = el.querySelector('kbd');
+      if (k){ var t = k.textContent; k.textContent = '（未实现）'; setTimeout(function(){ k.textContent = t; }, 900); }
+    }
+    else if (act === 'confirm'){ ev.preventDefault(); armConfirm(el); }
+  });
+
+  // chips：同一组内单选
+  document.addEventListener('click', function(ev){
+    var c = ev.target.closest('.chip');
+    if (!c) return;
+    var group = c.parentElement;
+    group.querySelectorAll('.chip').forEach(function(x){ x.setAttribute('aria-pressed','false'); });
+    c.setAttribute('aria-pressed','true');
+  });
+
+  // 键盘：与 freellm 对齐的 Esc 关闭 + 方向键不实现（本蓝图无命令面板）
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape') closeSheet();
+    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k'){
+      e.preventDefault();
+      var b = document.querySelector('.toolbar [data-action="palette"]') || document.querySelector('.cmdbtn');
+      if (b) b.click();
+    }
+  });
+
+  // 视口标签
+  function label(){
+    var w = window.innerWidth;
+    var el = document.getElementById('vpLabel');
+    if (el) el.textContent = (w < 768 ? '移动 <768px（导航已折叠）' : '桌面 ≥768px') + ' · ' + w + 'px';
+  }
+  window.addEventListener('resize', label); label();
+
+  // 深链：#page
+  var h = (location.hash || '').replace('#','');
+  if (PAGES.indexOf(h) >= 0) go(h); else go('overview');
+})();
+</script>
+</body>
+</html>

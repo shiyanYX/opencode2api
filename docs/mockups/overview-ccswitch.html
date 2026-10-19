@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>仿真模型 v7 · 修正后方案 + 真实 30 天数据</title><style>
+:root{--bg:#0a0f1c;--card:#101828;--card2:#0d1524;--surface-2:#1a2336;
+--border:rgba(148,163,184,.14);--border40:rgba(148,163,184,.09);--border50:rgba(148,163,184,.11);
+--line:rgba(148,163,184,.10);            /* ← 补齐：SVG 网格线需要 */
+--muted:#97a3bb;--muted2:#7b87a5;
+--text-ter:#7b87a5;--text-sec:#97a3bb;   /* SVG 轴刻度/图例引用这两个 */
+--text:#e9eef8;--fg70:rgba(233,238,248,.72);
+--accent:#6f96ff;--accent-dim:rgba(111,150,255,.15);--ok:#2fd489;--emerald:#10b981;
+--orange:#f0b04a;--purple:#b197f7;
+--blue:#3b82f6;--purple5:#a855f7;--emerald5:#10b981;--amber:#f59e0b;
+--series-1:#5b9bff;--series-2:#2fd489;--series-3:#b18cff;--series-4:#f0b04a;--r:14px;--r-sm:12px}
+[data-theme=light]{--bg:#f7f8fa;--card:#fff;--card2:#fff;--surface-2:#f7f8fa;
+--border:rgba(15,23,42,.08);--border40:rgba(15,23,42,.05);--border50:rgba(15,23,42,.07);
+--line:rgba(15,23,42,.08);
+--muted:#64748b;--muted2:#94a3b8;
+--text-ter:#94a3b8;--text-sec:#64748b;--text:#0f172a;--fg70:rgba(15,23,42,.72);
+--accent:#2f5fd6;--accent-dim:rgba(47,95,214,.10);--ok:#0d8f5c;--emerald:#059669;
+--orange:#b57500;--purple:#7048c4;
+--blue:#2563eb;--purple5:#7c3aed;--emerald5:#059669;--amber:#b45309;
+--series-1:#2f5fd6;--series-2:#0d8f5c;--series-3:#7048c4;--series-4:#b57500}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);padding:24px 18px 56px;
+font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1200px;margin:0 auto}
+.note{background:var(--surface-2);border:1px solid var(--border);border-left:3px solid var(--accent);
+border-radius:var(--r-sm);padding:11px 15px;margin-bottom:18px;font-size:12.5px;color:var(--muted);line-height:1.75}
+.note b{color:var(--text)} .note code{background:var(--card2);padding:1px 5px;border-radius:4px}
+.toolbar{display:flex;gap:9px;justify-content:flex-end;margin-bottom:14px;flex-wrap:wrap}
+select,.btn{background:var(--card);color:var(--text);border:1px solid var(--border);
+border-radius:9px;padding:7px 12px;font-size:12.5px;font-family:inherit}
+.btn{cursor:pointer}.btn:hover{border-color:var(--muted2)}
+.Card{background:var(--card);border:1px solid var(--border50);border-radius:var(--r);
+box-shadow:0 1px 2px rgba(0,0,0,.05);padding:18px 20px}
+.Card+.Card{margin-top:18px}
+.hero{display:flex;flex-direction:column;gap:16px}
+.hero-top{display:flex;flex-direction:column;gap:16px;justify-content:space-between}
+.hero-l{display:flex;align-items:center;gap:12px}
+.hero-ico{padding:10px;border-radius:var(--r-sm);
+background:linear-gradient(135deg,var(--accent-dim),transparent);box-shadow:0 1px 2px rgba(0,0,0,.06)}
+.hero-ico span{font-size:20px;color:var(--accent);display:block;line-height:1}
+.hero-k{font-size:12px;font-weight:500;color:var(--muted);margin-bottom:2px}
+.hero-n{display:flex;align-items:baseline;gap:8px}
+.hero-v{font-size:30px;font-weight:700;letter-spacing:-.025em;line-height:1;font-variant-numeric:tabular-nums}
+.badge{font-size:12px;color:var(--muted);font-weight:500;background:var(--surface-2);
+padding:2px 6px;border-radius:6px;font-variant-numeric:tabular-nums}
+.hbox{display:flex;align-items:center;gap:20px;background:var(--card2);padding:10px 16px;
+border-radius:var(--r-sm);border:1px solid var(--border40);align-self:flex-start}
+.hbox .lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:500}
+.hbox .val{font-weight:600;font-size:14px;font-variant-numeric:tabular-nums;display:flex;align-items:center;gap:6px}
+.hbox .val em{font-style:normal;color:var(--series-1);font-size:13px}
+.hbox .sub{font-size:10px;color:var(--muted2);margin-left:6px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.mini{display:flex;flex-direction:column;gap:4px;background:var(--card2);
+border:1px solid var(--border40);border-radius:var(--r-sm);padding:12px}
+.mk{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:500}
+.mk .lb{color:var(--fg70);letter-spacing:.02em}
+.mv{font-size:14px;font-weight:600;font-variant-numeric:tabular-nums}
+.hit{grid-column:span 2;display:flex;flex-direction:column;justify-content:center;
+background:var(--card2);border:1px solid var(--border40);border-radius:var(--r-sm);padding:12px}
+.hit .top{display:flex;align-items:center;justify-content:space-between;font-size:11px;margin-bottom:8px}
+.hit .top .l{color:var(--muted);font-weight:500}
+.hit .top .r{font-weight:700;color:var(--emerald5);font-variant-numeric:tabular-nums}
+.hit .track{position:relative;height:6px;border-radius:99px;background:var(--surface-2);overflow:hidden}
+.hit .fill{position:absolute;inset:0 auto 0 0;background:var(--emerald5);border-radius:99px}
+.abbr{display:none}
+@media(max-width:1000px){.v-mini .full{display:none}.v-mini .abbr{display:inline}}
+@media(min-width:1001px){.v-mini .abbr{display:none}}
+.Card.trend{padding:24px}
+.trend-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;gap:12px}
+.trend-h h3{margin:0;font-size:18px;font-weight:600;letter-spacing:-.01em}
+.trend-h p{margin:0;font-size:14px;color:var(--muted)}
+.tabs{display:flex;gap:4px;margin-left:auto}
+.tab{font-size:12px;padding:5px 11px;border-radius:7px;border:1px solid var(--border40);
+background:var(--card2);color:var(--muted);cursor:pointer}
+.tab.on{background:var(--accent-dim);border-color:transparent;color:var(--accent);font-weight:600}
+@media(min-width:900px){.hero-top{flex-direction:row;align-items:center}.grid{grid-template-columns:repeat(5,1fr)}.hit{grid-column:span 1}}
+@media(max-width:640px){.grid{grid-template-columns:1fr 1fr}.Card{padding:15px 14px}}
+</style></head>
+<body><div class="wrap">
+<div class="note">
+<b>v7 — 按审查后修正的方案，数据是<b>真实 30 天窗口</b>（非全量）。</b><br>
+已修正：五格顺序 <b>tps 第 4、命中率第 5</b>（cc-switch 命中率在最后一格）· Output 用<b>紫</b>、命中用 <b>emerald</b>（源码如此）·
+标签 <code>text-foreground/70</code> · 补齐 <code>--line/--text-ter/--text-sec</code>（v6 漏抄导致网格线不渲染）· 请求数取<b>尝试数</b>。<br>
+<b>与全量对比</b>：真实消耗 9,990,449 → <b>8,660,036（−13.3%）</b>，命中率 50.6% → <b>51%</b>，请求 5,108 → <b>4,624</b>。
+<b>这正是要达到的效果</b>——数字随窗口变化。
+</div>
+<div class="toolbar">
+<select><option>全部模型</option><option>claude-sonnet-4</option></select>
+<select><option>最近 30 天</option><option>当天</option><option>最近 7 天</option><option>最近 180 天</option></select>
+<select><option>&#8635; 关闭</option><option>&#8635; 10s</option><option>&#8635; 30s</option><option>&#8635; 1m</option></select>
+<button class="btn" onclick="document.documentElement.setAttribute('data-theme',document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark')">切换主题</button>
+</div>
+<div class="Card"><div class="hero"><div class="hero-top">
+  <div class="hero-l"><div class="hero-ico"><span>&#9889;</span></div>
+    <div><div class="hero-k">真实消耗 Tokens</div>
+      <div class="hero-n"><span class="hero-v">8,660,036</span><span class="badge">&#8776; 866.00 万</span></div></div></div>
+  <div class="hbox"><div><div class="lbl">总请求数</div>
+    <div class="val"><em>&#9889;</em>4,624<span class="sub">成功 4,337</span></div></div></div>
+</div>
+<div class="grid">
+  <div class="mini"><div class="mk"><span style="color:var(--blue)">&#8595;</span>
+    <span class="lb">新增输入</span></div><div class="mv"><span class="v-mini"><span class="full">3,603,193</span><span class="abbr">360.3 万</span></span></div></div>
+  <div class="mini"><div class="mk"><span style="color:var(--purple5)">&#8593;</span>
+    <span class="lb">Output</span></div><div class="mv"><span class="v-mini"><span class="full">1,342,316</span><span class="abbr">134.2 万</span></span></div></div>
+  <div class="mini"><div class="mk"><span style="color:var(--emerald5)">&#10022;</span>
+    <span class="lb">命中</span></div><div class="mv"><span class="v-mini"><span class="full">3,714,527</span><span class="abbr">371.5 万</span></span></div></div>
+  <div class="mini"><div class="mk"><span style="color:var(--amber)">&#9889;</span><span class="lb">平均 tps</span></div>
+    <div class="mv"><span class="v-mini"><span class="full">38 t/s</span><span class="abbr">38 t/s</span></span></div></div>
+  <div class="hit"><div class="top"><span class="l">缓存命中率</span><span class="r">51%</span></div>
+    <div class="track"><div class="fill" style="width:50.76%"></div></div></div>
+</div></div></div>
+<div class="Card trend">
+  <div class="trend-h"><h3>&#128200; 使用趋势</h3>
+    <div class="tabs"><span class="tab on">Token 用量</span><span class="tab">请求次数</span></div>
+    <p>最近 30 天</p></div>
+  <svg viewBox="0 0 1120 250" width="100%" height="250" style="display:block"><line x1="54" y1="224.0" x2="1104" y2="224.0" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="228.0" text-anchor="end" font-size="10.5" fill="var(--text-ter)">0k</text>
+<line x1="54" y1="202.7" x2="1104" y2="202.7" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="206.7" text-anchor="end" font-size="10.5" fill="var(--text-ter)">20k</text>
+<line x1="54" y1="181.4" x2="1104" y2="181.4" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="185.4" text-anchor="end" font-size="10.5" fill="var(--text-ter)">40k</text>
+<line x1="54" y1="160.1" x2="1104" y2="160.1" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="164.1" text-anchor="end" font-size="10.5" fill="var(--text-ter)">60k</text>
+<line x1="54" y1="138.9" x2="1104" y2="138.9" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="142.9" text-anchor="end" font-size="10.5" fill="var(--text-ter)">80k</text>
+<line x1="54" y1="117.6" x2="1104" y2="117.6" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="121.6" text-anchor="end" font-size="10.5" fill="var(--text-ter)">100k</text>
+<line x1="54" y1="96.3" x2="1104" y2="96.3" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="100.3" text-anchor="end" font-size="10.5" fill="var(--text-ter)">120k</text>
+<line x1="54" y1="75.0" x2="1104" y2="75.0" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="79.0" text-anchor="end" font-size="10.5" fill="var(--text-ter)">140k</text>
+<line x1="54" y1="53.7" x2="1104" y2="53.7" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="57.7" text-anchor="end" font-size="10.5" fill="var(--text-ter)">160k</text>
+<line x1="54" y1="32.4" x2="1104" y2="32.4" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="36.4" text-anchor="end" font-size="10.5" fill="var(--text-ter)">180k</text>
+<line x1="54" y1="11.2" x2="1104" y2="11.2" stroke="var(--line)" stroke-width="1"/>
+<text x="46" y="15.2" text-anchor="end" font-size="10.5" fill="var(--text-ter)">200k</text>
+<polygon fill-opacity=".10" fill="var(--series-1)" points="54,224 54.0,104.3 90.2,84.5 126.4,55.6 162.6,163.5 198.8,163.1 235.0,55.3 271.2,71.5 307.4,86.9 343.7,28.3 379.9,77.3 416.1,165.8 452.3,161.2 488.5,101.7 524.7,42.9 560.9,67.1 597.1,48.8 633.3,81.2 669.5,159.4 705.7,160.4 741.9,80.9 778.1,85.0 814.3,72.7 850.6,76.4 886.8,65.5 923.0,131.4 959.2,126.9 995.4,44.4 1031.6,34.7 1067.8,65.0 1104.0,224.0 1104,224"/>
+<polyline points="54.0,104.3 90.2,84.5 126.4,55.6 162.6,163.5 198.8,163.1 235.0,55.3 271.2,71.5 307.4,86.9 343.7,28.3 379.9,77.3 416.1,165.8 452.3,161.2 488.5,101.7 524.7,42.9 560.9,67.1 597.1,48.8 633.3,81.2 669.5,159.4 705.7,160.4 741.9,80.9 778.1,85.0 814.3,72.7 850.6,76.4 886.8,65.5 923.0,131.4 959.2,126.9 995.4,44.4 1031.6,34.7 1067.8,65.0 1104.0,224.0" fill="none" stroke="var(--series-1)" stroke-width="2" stroke-linejoin="round"/>
+<polygon fill-opacity=".10" fill="var(--series-3)" points="54,224 54.0,101.9 90.2,68.3 126.4,40.1 162.6,163.8 198.8,171.2 235.0,52.5 271.2,55.9 307.4,86.6 343.7,27.7 379.9,67.5 416.1,164.0 452.3,158.3 488.5,92.8 524.7,39.8 560.9,50.8 597.1,55.0 633.3,78.4 669.5,163.6 705.7,156.3 741.9,70.5 778.1,85.7 814.3,76.2 850.6,71.7 886.8,48.5 923.0,135.1 959.2,130.4 995.4,40.3 1031.6,30.3 1067.8,59.7 1104.0,224.0 1104,224"/>
+<polyline points="54.0,101.9 90.2,68.3 126.4,40.1 162.6,163.8 198.8,171.2 235.0,52.5 271.2,55.9 307.4,86.6 343.7,27.7 379.9,67.5 416.1,164.0 452.3,158.3 488.5,92.8 524.7,39.8 560.9,50.8 597.1,55.0 633.3,78.4 669.5,163.6 705.7,156.3 741.9,70.5 778.1,85.7 814.3,76.2 850.6,71.7 886.8,48.5 923.0,135.1 959.2,130.4 995.4,40.3 1031.6,30.3 1067.8,59.7 1104.0,224.0" fill="none" stroke="var(--series-3)" stroke-width="2" stroke-linejoin="round"/>
+<polygon fill-opacity=".10" fill="var(--series-2)" points="54,224 54.0,174.9 90.2,173.5 126.4,160.2 162.6,200.5 198.8,199.8 235.0,168.3 271.2,170.9 307.4,175.9 343.7,154.1 379.9,169.8 416.1,205.8 452.3,198.4 488.5,182.8 524.7,158.2 560.9,172.7 597.1,160.8 633.3,164.0 669.5,203.1 705.7,198.0 741.9,173.3 778.1,168.6 814.3,169.8 850.6,171.3 886.8,155.2 923.0,192.9 959.2,188.7 995.4,152.7 1031.6,150.4 1067.8,153.0 1104.0,224.0 1104,224"/>
+<polyline points="54.0,174.9 90.2,173.5 126.4,160.2 162.6,200.5 198.8,199.8 235.0,168.3 271.2,170.9 307.4,175.9 343.7,154.1 379.9,169.8 416.1,205.8 452.3,198.4 488.5,182.8 524.7,158.2 560.9,172.7 597.1,160.8 633.3,164.0 669.5,203.1 705.7,198.0 741.9,173.3 778.1,168.6 814.3,169.8 850.6,171.3 886.8,155.2 923.0,192.9 959.2,188.7 995.4,152.7 1031.6,150.4 1067.8,153.0 1104.0,224.0" fill="none" stroke="var(--series-2)" stroke-width="2" stroke-linejoin="round"/>
+<text x="54.0" y="243" text-anchor="middle" font-size="10.5" fill="var(--text-ter)">09-02</text>
+<text x="198.8" y="243" text-anchor="middle" font-size="10.5" fill="var(--text-ter)">09-06</text>
+<text x="343.7" y="243" text-anchor="middle" font-size="10.5" fill="var(--text-ter)">09-10</text>
+<text x="488.5" y="243" text-anchor="middle" font-size="10.5" fill="var(--text-ter)">09-14</text>
+<text x="633.3" y="243" text-anchor="middle" font-size="10.5" fill="var(--text-ter)">09-18</text>
+<text x="778.1" y="243" text-anchor="middle" font-size="10.5" fill="var(--text-ter)">09-22</text>
+<text x="923.0" y="243" text-anchor="middle" font-size="10.5" fill="var(--text-ter)">09-26</text>
+<text x="1067.8" y="243" text-anchor="middle" font-size="10.5" fill="var(--text-ter)">09-30</text>
+<circle cx="59" cy="10" r="4" fill="var(--series-1)"/>
+<text x="68" y="14" font-size="11" fill="var(--text-sec)">输入</text>
+<circle cx="107" cy="10" r="4" fill="var(--series-3)"/>
+<text x="116" y="14" font-size="11" fill="var(--text-sec)">命中缓存</text>
+<circle cx="181" cy="10" r="4" fill="var(--series-2)"/>
+<text x="190" y="14" font-size="11" fill="var(--text-sec)">输出</text></svg>
+</div></div></body></html>
