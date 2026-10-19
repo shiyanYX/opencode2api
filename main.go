@@ -2707,6 +2707,9 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			// 不用总时长上限：长生成/长流式只要有数据在走就不该被误杀。
 			resp.Body = newIdleReadCloser(resp.Body, idleReadTimeout)
 		}
+		// C-5：喂节点层告警样本。口径是【传输层】——拿到任何上游响应（含 403/429）
+		// 都说明这条出口是通的；账号级限流不该记到节点头上。direct 出口不计。
+		nodeAlerts.recordNodeAttempt(nodeFp != "", err == nil)
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
@@ -3105,6 +3108,9 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			// 不用总时长上限：长生成/长流式只要有数据在走就不该被误杀。
 			resp.Body = newIdleReadCloser(resp.Body, idleReadTimeout)
 		}
+		// C-5：喂节点层告警样本。口径是【传输层】——拿到任何上游响应（含 403/429）
+		// 都说明这条出口是通的；账号级限流不该记到节点头上。direct 出口不计。
+		nodeAlerts.recordNodeAttempt(nodeFp != "", err == nil)
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
@@ -7104,6 +7110,7 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 			"dead_count":      health["dead"],
 			"nodes":           out,
 			"subscriptions":   subManager.snapshot(),
+			"node_alert":      nodeAlerts.snapshot(),
 		})
 	case http.MethodPost:
 		var payload struct {
