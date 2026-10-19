@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **上线：修 `NO_PROXY` 救回节点池 + 部署本批稳健性修复（生产 commit `37ed108`）**。2026-10-19 生产体检发现节点池 107 个节点里 **可用 0**（102 dead / 5 exhausted）、真实流量全靠 direct 单出口撑了 8 小时以上，而面板一直显示「115 个可用」。
+  - **根因（环境，非代码）**：容器里 `NO_PROXY=localhost,127.0.0.1`，来源是 `~/.docker/config.json` 的 `proxies.default.noProxy`（docker CLI 建容器时注入，压过 compose；系统 daemon 的 NO_PROXY 反而是好的）。局域网订阅源 `http://192.168.1.3:2090` 因此被送到 `192.168.1.3:7890` 的 clash 代理（502），启动回退旧缓存 ⇒ 227 个陈旧 socks5 节点全部 connect EOF。实测该地址直连 200/3ms、经代理 502。
+  - 修复：`~/.docker/config.json` 的 `noProxy` 补上网段；同时在 `docker-compose.yml` / 模板里显式钉住 `NO_PROXY`，不再依赖本机 docker CLI 配置。**验收：池内节点 0 可用 → 216 个全部加载成功（errors=0）、探测后 126~216 available，真实请求走节点返回 200（1.19s / 1.26s / 2.23s）**。
+  - 同时部署本批代码：C-1 TLS 握手 15s 上界、C-2 空闲读超时 + 请求墙钟预算 120s、C-3 订阅拉取失败自动降级直连、C-5 节点层告警。部署后 `/api/nodes` 的 `node_alert` 显示 `window_attempts=7 / window_successes=7 / success_rate=1.0 / active=false`，健康时零告警刷屏。
+  - 已知边界：健康循环的探测轮与告警评估是串行的，216 个节点一轮约 2.5 分钟，所以「池子空了」这类判定最坏滞后约 3 分钟（事故尺度下无影响，已记录备查）。
+
 - **修复：免费模型再次全量 403 `FreeTierError`（上游第 6 轮收紧，三处同时变更）**。用户报的是 429，但实测当前失败面是 403；排查中另外确认了那条 `429 {"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}` 是旧路径的瞬时不可用，不是额度限流。
   - **① 推理路径必须换成 `/inference/v1/`**（决定性）：抓官方 CLI（1.18.33）发现它已打到 `/inference/v1/chat/completions`。**同一份请求（同头同体）在 `/zen/v1/chat/completions` 上 403、在 `/inference/v1/chat/completions` 上 200**——旧路径现在只放行「完全真客户端」。`buildOCRequestWithEndpoint` 的 zen 侧上游 URL 改为 `/inference/v1/chat/completions`（go/付费面与三个 `/models` 目录端点未动，实测仍 200）。
   - **② UA 版本有上限，且上游闸门滞后于 npm**：实测 `/inference/v1/` 上 `1.18.0–1.18.33` 通过、`1.18.34–1.19.1` 全部 403、`1.17.9` 仍 426。当时 npm `latest` 已是 **1.19.0**，而本网关此前直接用 npm latest 当 UA 版本 → npm 一发布新版就全量 403。`oc_version.go` 改为默认使用**已验证**的 `pinnedOCVersion = "1.18.33"`，仅在收到 426（下限抬高）时向 npm latest 升级；并新增与 426 对称的自愈：收到 403 且 body 为 `FreeTierError` 而当前版本比 pinned 新时，回退到 pinned 重试一次（`revertToPinnedOCVersion` / `isFreeTierErrorBody`）。
