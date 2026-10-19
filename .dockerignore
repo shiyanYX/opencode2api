@@ -10,3 +10,7 @@ stats.json
 .idea
 .vscode
 *.swp
+# 本地 Go 缓存（体积上 GB，绝不能进构建上下文）
+.gocache
+.modcache
+.gotmp

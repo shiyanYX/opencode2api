@@ -43,6 +43,10 @@ type SubscriptionMeta struct {
 	Total      int64  `json:"total,omitempty"`
 	Expire     int64  `json:"expire,omitempty"`
 	RemoteName string `json:"remote_name,omitempty"`
+	// FromCache 本次节点列表来自本地缓存（拉取失败）。
+	FromCache bool `json:"from_cache,omitempty"`
+	// CacheAgeHours 缓存文件距今多少小时（FromCache 时有意义）。
+	CacheAgeHours float64 `json:"cache_age_hours,omitempty"`
 }
 
 // subscriptionManager 负责拉取订阅/webshare 代理源、解析、与自定义/遗留节点合并且写入节点池。
@@ -66,6 +70,43 @@ var subManager = &subscriptionManager{
 	lastMeta:    map[string]SubscriptionMeta{},
 }
 
+// subFetchClient 订阅拉取的默认客户端：继承 HTTP_PROXY/HTTPS_PROXY 环境变量。
+// 旧代码直接用 http.DefaultClient —— 它没有超时，拉取可能永久挂住。
+var subFetchClient = &http.Client{
+	Timeout: 30 * time.Second,
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ResponseHeaderTimeout: 30 * time.Second,
+		MaxIdleConns:          10,
+		MaxIdleConnsPerHost:   5,
+		IdleConnTimeout:       30 * time.Second,
+	},
+}
+
+// subDirectClient 直连客户端：绕过一切代理，用于「代理路径失败」后的兜底重试。
+var subDirectClient = newNoProxyClient()
+
+// newNoProxyClient 构造显式直连的客户端（不读环境代理变量）。
+func newNoProxyClient() *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			Proxy:                 nil, // 显式直连
+			TLSHandshakeTimeout:   tlsHandshakeTimeout,
+			ResponseHeaderTimeout: 30 * time.Second,
+			MaxIdleConns:          10,
+			MaxIdleConnsPerHost:   5,
+			IdleConnTimeout:       30 * time.Second,
+		},
+	}
+}
+
+// staleSubscriptionCacheAge 订阅缓存多久没更新算「过期」；过期就用 ERROR 喊出来。
+// 取 3 小时：正常会在启动与更新周期内刷新；超过 3 小时仍在吃缓存，说明拉取一直失败
+// （2026-10-19 那次是连续 8 小时吃缓存，而当时只有一行 WARN）。
+var staleSubscriptionCacheAge = 3 * time.Hour
+
 // SubInfo 订阅源运行时快照（面板展示用）。
 type SubInfo struct {
 	Name          string `json:"name"`
@@ -78,6 +119,9 @@ type SubInfo struct {
 	UsageTotal    int64  `json:"usage_total,omitempty"`
 	UsageUsed     int64  `json:"usage_used,omitempty"`
 	UsageExpire   int64  `json:"usage_expire,omitempty"`
+	// C-3：让面板能显示「这份节点列表来自旧缓存 / 多久没更新」。
+	FromCache     bool    `json:"from_cache,omitempty"`
+	CacheAgeHours float64 `json:"cache_age_hours,omitempty"`
 }
 
 // snapshot 返回订阅/webshare 源当前状态（URL/间隔/节点数/上次拉取/错误/流量）。
@@ -101,6 +145,8 @@ func (m *subscriptionManager) snapshot() []SubInfo {
 			info.UsageTotal = meta.Total
 			info.UsageUsed = meta.Upload + meta.Download
 			info.UsageExpire = meta.Expire
+			info.FromCache = meta.FromCache
+			info.CacheAgeHours = meta.CacheAgeHours
 		}
 		out = append(out, info)
 	}
@@ -262,15 +308,42 @@ func (s SubscriptionConfig) Key() string { return s.URL }
 // fetchOnce 拉取单个订阅；网络失败回退磁盘缓存。
 func (m *subscriptionManager) fetchOnce(ctx context.Context, rawURL, cacheDir string) ([]*ProxyNode, SubscriptionMeta, error) {
 	text, meta, err := m.fetch(ctx, rawURL)
-	if err != nil {
-		if cached, cerr := readCachedSubscription(cacheDir, rawURL); cerr == nil {
-			slog.Warn("订阅拉取失败，使用缓存", "url", rawURL, "error", err)
-			return parseSubscriptionText(cached), SubscriptionMeta{}, nil
-		}
+	if err == nil {
+		_ = writeCachedSubscription(cacheDir, rawURL, text)
+		return parseSubscriptionText(text), meta, nil
+	}
+	cached, cerr := readCachedSubscription(cacheDir, rawURL)
+	if cerr != nil {
 		return nil, SubscriptionMeta{}, err
 	}
-	_ = writeCachedSubscription(cacheDir, rawURL, text)
-	return parseSubscriptionText(text), meta, nil
+	// C-3：回退缓存必须留下「这是旧数据、多久了」的痕迹；过期就打 ERROR。
+	// 2026-10-19 这里原本只有一行 WARN ⇒ 节点池全灭 8 小时无人发现。
+	age := subscriptionCacheAge(cacheDir, rawURL)
+	meta = SubscriptionMeta{FromCache: true, CacheAgeHours: age.Hours()}
+	if staleSubscriptionCacheAge > 0 && age >= staleSubscriptionCacheAge {
+		slog.Error("订阅缓存已过期，节点池可能不可用",
+			"url", rawURL,
+			"age_hours", age.Hours(),
+			"threshold_hours", staleSubscriptionCacheAge.Hours(),
+			"fetch_error", err.Error(),
+			"hint", "节点列表可能已失效：检查订阅源可达性/代理与 NO_PROXY 配置，或在面板重新拉取")
+	} else {
+		slog.Warn("订阅拉取失败，使用缓存",
+			"url", rawURL, "age_hours", age.Hours(), "error", err)
+	}
+	return parseSubscriptionText(cached), meta, nil
+}
+
+// subscriptionCacheAge 缓存文件距今多久；读不到就返回 0（宁可漏报，不要误报过期）。
+func subscriptionCacheAge(cacheDir, rawURL string) time.Duration {
+	if cacheDir == "" {
+		return 0
+	}
+	fi, err := os.Stat(subscriptionCachePath(cacheDir, rawURL))
+	if err != nil {
+		return 0
+	}
+	return time.Since(fi.ModTime())
 }
 
 // fetch 获取订阅原始文本（http/https/data URI），并解析响应头元信息。
@@ -297,19 +370,41 @@ func (m *subscriptionManager) fetch(ctx context.Context, rawURL string) (string,
 		return "", SubscriptionMeta{}, err
 	}
 	req.Header.Set("User-Agent", "opencode2api/"+versionString()+" (node subscription)")
-	resp, err := http.DefaultClient.Do(req)
+
+	body, header, err := doSubscriptionFetch(subFetchClient, req)
+	if err == nil {
+		return body, parseSubscriptionMeta(header), nil
+	}
+
+	// C-3：代理路径失败 ⇒ 自动降级直连重试。
+	// 局域网订阅服务（例如 http://192.168.1.3:2090）绝不该经外部代理；
+	// 代理一挂就会被误判成「订阅挂了」，然后静默回退旧缓存 ——
+	// 2026-10-19 正是这样让 227 个节点凭据过期、节点池全灭 8 小时。
+	directReq := req.Clone(ctx)
+	body2, header2, err2 := doSubscriptionFetch(subDirectClient, directReq)
+	if err2 == nil {
+		slog.Info("订阅拉取：代理路径失败，改用直连成功",
+			"url", rawURL, "proxy_error", err.Error())
+		return body2, parseSubscriptionMeta(header2), nil
+	}
+	return "", SubscriptionMeta{}, fmt.Errorf("%w（直连重试也失败：%v）", err, err2)
+}
+
+// doSubscriptionFetch 用指定客户端发一次订阅请求（带 5MB 上限）。
+func doSubscriptionFetch(client *http.Client, req *http.Request) (string, http.Header, error) {
+	resp, err := client.Do(req)
 	if err != nil {
-		return "", SubscriptionMeta{}, err
+		return "", nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", SubscriptionMeta{}, fmt.Errorf("订阅 HTTP %d", resp.StatusCode)
+		return "", nil, fmt.Errorf("订阅 HTTP %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
 	if err != nil {
-		return "", SubscriptionMeta{}, err
+		return "", nil, err
 	}
-	return string(body), parseSubscriptionMeta(resp.Header), nil
+	return string(body), resp.Header, nil
 }
 
 // parseSubscriptionMeta 解析订阅响应头：

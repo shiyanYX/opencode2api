@@ -1,0 +1,826 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>opencode2api · freellm 风格重画样例（U2b）</title>
+<!--
+================================================================================
+  U2b · style-specimen —— 把我们的「概览」+「节点池」按 freellm 的视觉语言重画
+================================================================================
+
+  这是什么
+  --------
+  一个**离线单文件**样式样例：不改 static/admin.html，不改任何 Go 文件，
+  只用来回答一个问题 ——「照 freellm 的规则重画我们的页面，会长什么样？」
+
+  怎么用
+  ------
+  双击打开即可（file:// 可用）。左上角切「概览 / 节点池」，右上角切明暗。
+  页面最底部有「设计配方自检」区：**点任意一条规则，页面对应区域会高亮**。
+
+  硬约束（本文件已满足）
+  --------------------
+  · 零外部请求：没有 CDN、没有外链字体、没有外部图片；图表是内联 SVG。
+    （对照：static/admin.html 从 cdn.jsdelivr.net 拉 ECharts）
+  · 1440×900 与 390×844 两档都不横向爆版。
+
+  数据来源（真实字段名，不编造）
+  ----------------------------
+  · /api/nodes    : name protocol state latency_ms cooldown_until last_error
+                    fingerprint active manual / healthy exhausted_count dead_count
+                    / node_alert{active,reason,since,window_minutes,window_attempts,
+                    window_successes,window_success_rate,pool_available,pool_total}
+  · /api/stats    : total_requests throughput_tps stream_tps_n models{request_count
+                    prompt_tokens completion_tokens total_tokens cache_read_tokens
+                    avg_ttft_ms avg_output_speed stream_req_count throughput_tps}
+  本页的数值取 static/admin.html 的 DEMO 兜底数据（节点/统计）与
+  docs/research/C5-node-alert-replay.md 的**真实事故回放结果**（告警横幅），
+  所以字段形状与数值量级都是真的，只有节点名是演示集合里的。
+
+  视觉依据（U1 = docs/research/U1-freellm-ui-study.md，本文件是它的可视化落地）
+  ------------------------------------------------------------------------
+  · 中性色：freellm `client/src/index.css:55-88`（亮）/ `:90-122`（暗）的纯灰阶
+    oklch(x 0 0)。本文件用其 sRGB 等值 hex：
+      oklch(0.995 0 0)=#fdfdfd  oklch(0.18 0 0)=#121212  oklch(1 0 0)=#ffffff
+      oklch(0.97 0 0)=#f5f5f5  oklch(0.52 0 0)=#696969  oklch(0.92 0 0)=#e4e4e4
+      oklch(0.135 0 0)=#080808 oklch(0.175 0 0)=#101010 oklch(0.22 0 0)=#1b1b1b
+      oklch(0.98 0 0)=#f8f8f8  oklch(0.68 0 0)=#989898  oklch(1 0 0/10%)=rgba(255,255,255,.10)
+  · 卡片：freellm `components/ui/card.tsx:12-19` =
+    圆角 24px + `ring-1 ring-foreground/10` + **无 box-shadow**
+  · 表格：`components/ui/table.tsx:67-84` = th `h-10 px-2 text-sm font-medium`，
+    td `p-2 text-sm`，行 `border-b hover:bg-muted/50`
+  · 轴条：`components/model-table.tsx:28-40` = 12px×1.5px 圆条 + 11px 等宽数字
+  · 按钮：`components/ui/button.tsx:16-38` = `rounded-lg h-8 px-2.5 text-sm font-medium`
+  · 分档色：`components/penalty-inspector.tsx:70-76` = Tailwind red/orange/amber/
+    emerald 600（暗色 400）
+  · 轴条三色：`components/model-table.tsx:102-108` = #22c55e / #3b82f6 / #a855f7
+
+  与现存面板的**刻意不同**（说实话，不藏）
+  --------------------------------------
+  1. 圆角 24px（现存 12px）。freellm 的卡片统一 rounded-3xl。
+  2. 去掉阴影（现存 .card/.stat 各带一层 box-shadow）。freellm 靠 1px ring 分层。
+  3. 顶部横条导航（现存是 204px 左侧栏）。freellm 是 `sticky top-0` 横条。
+  4. 表格单元格内边距 8px（现存 10px 12px）—— 这是 freellm 的密度，见报告 §3。
+  5. 新增「评分」列 + 轴条 + 「无数据」虚线占位（U1 §8 四件套），现存面板没有。
+  6. 字号普遍收小一档（值 20px 而非 30px），依据见报告 §2。
+================================================================================
+-->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23121212'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='17' font-weight='bold' fill='%23fff' text-anchor='middle'%3Eo%3C/text%3E%3C/svg%3E">
+<script>
+/* 首绘前定主题，避免「深→浅闪一帧」。照 freellm client/index.html:7-24 的手法，
+   但走我们既有的 data-theme 属性策略（现存面板用 [data-theme] 选择器）。
+   file:// 下 localStorage 可能被禁 → 全部 try/catch，失败回落 light。 */
+(function(){try{var t=localStorage.getItem('u2b.theme');if(t!=='dark'&&t!=='light')t='light';document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
+</script>
+<style>
+/* ==========================================================================
+   0. 复位 + 设计令牌（亮暗两套同构：同名令牌、不同值）
+   ========================================================================== */
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+:root{
+  /* 面与线 —— freellm index.css:55-88 的 sRGB 等值 */
+  --bg:#fdfdfd; --card:#ffffff; --muted:#f5f5f5; --muted-2:#f2f2f2;
+  --fg:#121212; --muted-fg:#696969; --ring:#717171;
+  --border:#e4e4e4;                 /* oklch(0.92 0 0) */
+  --hair:rgba(18,18,18,.10);        /* ring-foreground/10 = 卡片描边 */
+  --hover:rgba(18,18,18,.04);
+  /* 状态语义 —— penalty-inspector.tsx:70-76 的 Tailwind 600 档 */
+  --ok:#059669;   --ok-bg:rgba(5,150,105,.10);
+  --warn:#d97706; --warn-bg:rgba(217,119,6,.12);
+  --orange:#ea580c;
+  --bad:#dc2626;  --bad-bg:rgba(220,38,38,.10);
+  --info:#2563eb; --info-bg:rgba(37,99,235,.10);
+  /* 轴条三色 —— model-table.tsx:102-108 */
+  --axis-rel:#22c55e; --axis-spd:#3b82f6; --axis-int:#a855f7;
+  /* 图表灰阶 5 级 —— index.css:74-78（亮色） */
+  --c1:#292929; --c2:#555555; --c3:#808080; --c4:#aeaeae; --c5:#d4d4d4;
+  /* 圆角 —— index.css:44-52 的 scale，卡片固定 3xl=24px */
+  --r-card:24px; --r-lg:8px; --r-md:6px; --r-pill:999px;
+  --shadow-pop:0 4px 12px rgba(0,0,0,.10);
+}
+[data-theme="dark"]{
+  --bg:#080808; --card:#101010; --muted:#1b1b1b; --muted-2:#1f1f1f;
+  --fg:#f8f8f8; --muted-fg:#989898; --ring:rgba(255,255,255,.20);
+  --border:rgba(255,255,255,.10); --hair:rgba(255,255,255,.10);
+  --hover:rgba(255,255,255,.05);
+  --ok:#34d399;   --ok-bg:rgba(52,211,153,.12);
+  --warn:#fbbf24; --warn-bg:rgba(251,191,36,.12);
+  --orange:#fb923c;
+  --bad:#f87171;  --bad-bg:rgba(248,113,113,.12);
+  --info:#60a5fa; --info-bg:rgba(96,165,250,.14);
+  --c1:#e4e4e4; --c2:#b7b7b7; --c3:#808080; --c4:#555555; --c5:#333333;
+  --shadow-pop:0 4px 14px rgba(0,0,0,.5);
+}
+html{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif;
+     font-size:16px;line-height:1.5;-webkit-text-size-adjust:100%;-webkit-font-smoothing:antialiased}
+body{background:var(--bg);color:var(--fg);font-size:.875rem}
+/* 等宽数字：freellm 是 body 级默认（index.css:137），我们收敛为 .tnum 工具类 —— 见报告 §2 */
+.tnum{font-variant-numeric:tabular-nums}
+.mono{font-family:ui-monospace,'SF Mono','JetBrains Mono','Cascadia Code',Consolas,monospace}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit}
+
+/* ==========================================================================
+   1. 顶部导航条 —— freellm App.tsx:237-248
+   sticky top-0 / border-b / backdrop-blur / 内容 max-w-6xl(72rem) / px-24
+   ========================================================================== */
+.nav{position:sticky;top:0;z-index:40;border-bottom:1px solid var(--border);
+     background:color-mix(in srgb,var(--bg) 80%,transparent);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.nav-in{max-width:72rem;margin:0 auto;display:flex;align-items:center;padding:0 1.5rem;gap:.25rem}
+.brand{display:flex;align-items:center;gap:.5rem;font-size:.875rem;font-weight:600;letter-spacing:-.025em;margin-right:2.5rem}
+.brand i{display:block;width:.5rem;height:.5rem;border-radius:var(--r-pill);background:var(--fg)}
+.nav a.item{position:relative;font-size:.875rem;padding:1rem .25rem;color:var(--muted-fg);transition:color .15s}
+.nav a.item:hover{color:var(--fg)}
+.nav a.item.on{color:var(--fg)}
+.nav a.item.on::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:var(--fg)}
+.nav .right{margin-left:auto;display:flex;align-items:center;gap:.375rem}
+/* 按钮：freellm ui/button.tsx:16-38 —— rounded-lg h-8 px-2.5 text-sm font-medium */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:.375rem;height:2rem;padding:0 .625rem;
+     border-radius:var(--r-lg);border:1px solid var(--border);background:var(--card);color:var(--fg);
+     font-size:.875rem;font-weight:500;white-space:nowrap;cursor:pointer;transition:background .15s,color .15s,border-color .15s}
+.btn:hover{background:var(--muted)}
+.btn.ghost{border-color:transparent;background:transparent;color:var(--muted-fg)}
+.btn.ghost:hover{background:var(--muted);color:var(--fg)}
+.btn.primary{background:var(--fg);color:var(--bg);border-color:transparent}
+.btn.primary:hover{opacity:.88}
+.btn.sm{height:1.75rem;font-size:.8rem;padding:0 .625rem}
+.btn.xs{height:1.5rem;font-size:.75rem;padding:0 .5rem}
+.btn svg{width:.875rem;height:.875rem;flex:none}
+.btn:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+
+/* ==========================================================================
+   2. 页面容器 + 页头 —— freellm App.tsx:416（max-w-6xl px-6 py-8）
+   ========================================================================== */
+.wrap{max-width:72rem;margin:0 auto;padding:2rem 1.5rem 4rem}
+.phead{display:flex;align-items:flex-start;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:1.5rem}
+.phead h1{margin:0;font-size:1.5rem;font-weight:600;letter-spacing:-.025em;line-height:1.3}
+/* 页头描述：analytics.description 的位置与样式 —— 14px muted */
+.phead p{margin:.25rem 0 0;font-size:.875rem;color:var(--muted-fg);max-width:46rem}
+.crumb{font-size:.75rem;color:var(--muted-fg);letter-spacing:.06em;text-transform:uppercase;margin-bottom:.25rem}
+
+/* 分段控件 —— freellm ui/segmented-control.tsx:17-46
+   inline-flex gap-1 rounded-xl border p-1；激活段 = 实心前景色 */
+.seg{display:inline-flex;gap:.25rem;border:1px solid var(--border);border-radius:.75rem;padding:.25rem;background:var(--card)}
+.seg button{border:0;background:transparent;color:var(--muted-fg);font-size:.75rem;padding:.375rem .75rem;border-radius:var(--r-lg);cursor:pointer;transition:background .15s,color .15s}
+.seg button:hover{background:var(--muted);color:var(--fg)}
+.seg button.on{background:var(--fg);color:var(--bg);font-weight:500}
+
+/* ==========================================================================
+   3. 卡片 —— freellm ui/card.tsx:12-19：rounded-3xl + ring-1 + 无阴影
+   ========================================================================== */
+.card{background:var(--card);border-radius:var(--r-card);
+      box-shadow:0 0 0 1px var(--hair);   /* ring-1 ring-foreground/10 的等价写法 */
+      margin-bottom:1rem;overflow:hidden}
+.card-hd{display:flex;align-items:center;justify-content:space-between;gap:.5rem;
+         padding:.75rem 1rem;border-bottom:1px solid var(--border);flex-wrap:wrap}
+.card-hd h2{margin:0;font-size:.875rem;font-weight:500;display:flex;align-items:center;gap:.5rem}
+.card-hd h2 svg{width:1rem;height:1rem;color:var(--muted-fg);flex:none}
+.card-hd .acts{display:flex;align-items:center;gap:.5rem;font-size:.75rem;color:var(--muted-fg)}
+.card-bd{padding:1rem}
+/* 卡片头右侧的行内数字摘要 —— freellm token-usage-bar.tsx:47-62 的写法 */
+.hdsum{font-size:.75rem;color:var(--muted-fg)}
+.hdsum b{color:var(--fg);font-weight:500}
+
+/* ==========================================================================
+   4. 统计卡 —— freellm AnalyticsPage.tsx:325-343
+   label 11px uppercase tracking-wider / 图标 28px rounded-lg bg-muted /
+   value 20px semibold tabular-nums / sub 11px muted
+   ========================================================================== */
+.stats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.75rem;margin-bottom:1rem}
+@media(min-width:48rem){.stats{grid-template-columns:repeat(4,minmax(0,1fr))}}
+.stat{background:var(--card);border-radius:var(--r-card);box-shadow:0 0 0 1px var(--hair);padding:.75rem 1rem}
+.stat .top{display:flex;align-items:center;justify-content:space-between;gap:.75rem}
+.stat .lb{margin:0;font-size:11px;line-height:1.4;color:var(--muted-fg);text-transform:uppercase;letter-spacing:.05em}
+.stat .ic{width:1.75rem;height:1.75rem;flex:none;display:flex;align-items:center;justify-content:center;
+          border-radius:var(--r-lg);background:var(--muted);color:var(--muted-fg)}
+.stat .ic svg{width:.875rem;height:.875rem}
+.stat .v{margin:.25rem 0 0;font-size:1.25rem;font-weight:600;line-height:1.25}
+.stat .s{margin:0;font-size:11px;line-height:1.4;color:var(--muted-fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat .v.ok{color:var(--ok)} .stat .v.warn{color:var(--warn)} .stat .v.bad{color:var(--bad)}
+.stat .v.info{color:var(--info)}
+
+/* ==========================================================================
+   5. 徽章 —— freellm ui/badge.tsx:8-28（h-5 rounded-4xl px-2 text-xs）
+   + model-table 里的 outline 元信息 chip（截图 repo-assets/models.png 可见）
+   ========================================================================== */
+.badge{display:inline-flex;align-items:center;gap:.25rem;height:1.25rem;padding:0 .5rem;
+       border-radius:var(--r-pill);border:1px solid transparent;font-size:.75rem;font-weight:500;white-space:nowrap}
+.badge .dot{width:6px;height:6px;border-radius:var(--r-pill);background:currentColor;flex:none}
+.badge.outline{border-color:var(--border);color:var(--muted-fg)}
+.badge.ok{background:var(--ok-bg);color:var(--ok)}
+.badge.warn{background:var(--warn-bg);color:var(--warn)}
+.badge.bad{background:var(--bad-bg);color:var(--bad)}
+.badge.info{background:var(--info-bg);color:var(--info)}
+.badge.mute{background:var(--muted);color:var(--muted-fg)}
+
+/* 筛选 chips —— 我们用 chip，freellm 用 SegmentedControl；这里按 freellm 的
+   分段控件语法画（圆角 lg、激活=实心），但保留「带计数」这个我们的信息。 */
+.chips{display:flex;gap:.375rem;flex-wrap:wrap;margin-bottom:.75rem}
+.chip{display:inline-flex;align-items:center;gap:.375rem;height:1.75rem;padding:0 .625rem;border-radius:var(--r-lg);
+      border:1px solid var(--border);background:var(--card);color:var(--muted-fg);font-size:.8rem;cursor:pointer;
+      transition:background .15s,color .15s}
+.chip:hover{background:var(--muted);color:var(--fg)}
+.chip.on{background:var(--fg);color:var(--bg);border-color:transparent;font-weight:500}
+.chip .n{font-size:.7rem;opacity:.65}
+
+/* ==========================================================================
+   6. 表格 —— freellm ui/table.tsx:67-84
+   th: h-10 px-2 text-sm font-medium / td: p-2 text-sm / tr: border-b hover:bg-muted/50
+   注意：这是 freellm 的**密度基线**（表头 40px、正文行 20+8*2+1 = 37px）
+   ========================================================================== */
+.tblwrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+table.tbl{width:100%;border-collapse:collapse;font-size:.875rem}
+.tbl thead tr{border-bottom:1px solid var(--border)}
+.tbl th{height:2.5rem;padding:0 .5rem;text-align:left;vertical-align:middle;font-weight:500;color:var(--fg);white-space:nowrap}
+.tbl th.num,.tbl td.num{text-align:right}
+.tbl tbody tr{border-bottom:1px solid var(--border);transition:background .15s}
+.tbl tbody tr:last-child{border-bottom:0}
+.tbl tbody tr:hover{background:var(--hover)}
+.tbl td{padding:.5rem;vertical-align:middle;white-space:nowrap}
+.tbl td.wrapcell{white-space:normal}
+.tbl .sub{font-size:.75rem;color:var(--muted-fg)}
+/* 可排序表头：freellm components/sortable-header.tsx 的排序入口 */
+.th-sort{cursor:pointer;user-select:none}
+.th-sort:hover{color:var(--muted-fg)}
+.th-sort .arrow{opacity:.35;font-size:.7rem}
+.th-sort.asc .arrow,.th-sort.desc .arrow{opacity:1}
+
+/* ==========================================================================
+   7. 轴条（评分/成功率）—— freellm model-table.tsx:28-89
+   12px 宽 × 1.5px 高圆条 + 右侧 11px 等宽数字；无数据 = 虚线空条
+   ========================================================================== */
+.axis{display:inline-flex;align-items:center;gap:.375rem}
+.axis .bar{width:3rem;height:6px;border-radius:var(--r-pill);background:var(--muted);overflow:hidden;flex:none}
+.axis .bar i{display:block;height:100%;border-radius:var(--r-pill)}
+.axis .val{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--muted-fg);
+           width:1.75rem;text-align:right;font-variant-numeric:tabular-nums}
+/* AxisNoData：model-table.tsx:47-57 —— 虚线空条 + 「无数据」，绝不渲染成 0 */
+.axis.nodata .bar{border:1px dashed var(--border);background:transparent;height:.375rem}
+.axis.nodata .val{width:auto;color:var(--muted-fg);opacity:.75;font-family:inherit}
+.axis.nodata{color:var(--muted-fg)}
+
+/* ==========================================================================
+   8. 进度条 / 堆叠条 —— token-usage-bar.tsx 与 uh-hit-bar 的形态
+   ========================================================================== */
+.stack{display:flex;height:.75rem;border-radius:var(--r-pill);overflow:hidden;background:var(--muted)}
+.stack i{display:block;height:100%}
+.legend{display:flex;flex-wrap:wrap;gap:.375rem .875rem;margin-top:.75rem;font-size:.75rem;color:var(--muted-fg)}
+.legend span{display:inline-flex;align-items:center;gap:.375rem}
+.legend b{width:.5rem;height:.5rem;border-radius:2px;flex:none}
+.meter{height:6px;border-radius:var(--r-pill);background:var(--muted);overflow:hidden;min-width:5rem}
+.meter i{display:block;height:100%;border-radius:var(--r-pill);background:var(--fg)}
+
+/* ==========================================================================
+   9. C-5 告警横幅 —— freellm 没有这个组件（U1 §3.3 记为缺口），
+   所以按它的卡片语法现造：rounded-3xl + ring + destructive 语义色。
+   ========================================================================== */
+.alert{display:flex;align-items:flex-start;gap:.75rem;padding:.75rem 1rem;margin-bottom:1rem;
+       border-radius:var(--r-card);background:var(--bad-bg);box-shadow:0 0 0 1px var(--bad)}
+.alert .ico{width:1.75rem;height:1.75rem;flex:none;border-radius:var(--r-lg);background:var(--bad);
+            color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:.875rem}
+.alert .bd{flex:1;min-width:0}
+.alert .t{font-size:.875rem;font-weight:500;color:var(--bad)}
+.alert .m{margin-top:.125rem;font-size:.875rem;line-height:1.5}
+.alert .meta{margin-top:.25rem;font-size:.75rem;color:var(--muted-fg);font-variant-numeric:tabular-nums;line-height:1.5}
+.alert .x{margin-left:auto;flex:none}
+
+/* ==========================================================================
+   10. 移动端（390px）—— freellm 的做法：导航收进下拉 +
+   内容网格降列 + 表格横向滚动（细节见报告 §3「窄屏」）
+   ========================================================================== */
+@media(max-width:47.9rem){
+  .wrap{padding:1.25rem 1rem 3rem}
+  .phead h1{font-size:1.25rem}
+  .nav-in{padding:0 1rem;gap:0;flex-wrap:wrap}
+  .nav a.item{padding:.875rem .5rem;font-size:.8rem}
+  .brand{margin-right:.75rem}
+  .nav .desk{display:none}          /* 桌面专属项在窄屏隐藏 */
+  .nav .mob{display:inline-flex}    /* 窄屏汉堡入口 */
+  .nav.open a.item.desk{display:inline-flex}  /* 展开后折成第二行 */
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(min-width:48rem){.nav .mob{display:none}.nav .desk{display:inline-flex}}
+.hint{font-size:.75rem;color:var(--muted-fg);line-height:1.6}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+/* ==========================================================================
+   11. 设计配方自检区 —— 点规则 → 高亮对应落点
+   ========================================================================== */
+.recipe{max-width:72rem;margin:0 auto;padding:0 1.5rem 4rem}
+.recipe .card{background:var(--muted-2)}
+.rlist{display:flex;flex-wrap:wrap;gap:.5rem}
+.rchip{display:inline-flex;align-items:center;gap:.375rem;padding:.5rem .75rem;border-radius:var(--r-lg);
+       border:1px solid var(--border);background:var(--card);font-size:.8rem;cursor:pointer;text-align:left;
+       max-width:100%;transition:background .15s,border-color .15s}
+.rchip:hover{background:var(--muted);border-color:var(--ring)}
+.rchip.on{background:var(--fg);color:var(--bg);border-color:transparent}
+.rchip .id{font-family:ui-monospace,Consolas,monospace;font-size:.7rem;opacity:.7}
+/* 高亮：只在浮层用阴影（freellm 也是这规矩） */
+.hl{outline:2px solid var(--info);outline-offset:3px;border-radius:var(--r-md);
+    transition:outline-color .2s}
+@keyframes pulsehl{0%{box-shadow:0 0 0 0 var(--info-bg)}100%{box-shadow:0 0 0 12px transparent}}
+.hl{animation:pulsehl 1.2s ease-out 1}
+@media(prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important}
+}
+</style>
+</head>
+<body>
+
+<!-- ===================== 顶部导航（freellm App.tsx:237-248） ===================== -->
+<header class="nav">
+  <div class="nav-in">
+    <span class="brand"><i></i>opencode2api</span>
+    <a class="item on" href="#" data-go="overview">概览</a>
+    <a class="item" href="#" data-go="nodes">节点池</a>
+    <a class="item desk" href="#" data-dead>订阅与配额</a>
+    <a class="item desk" href="#" data-dead>代理与模型</a>
+    <a class="item desk" href="#" data-dead>运行日志</a>
+    <span class="right">
+      <button class="btn ghost mob" id="mobMenu" title="菜单" aria-label="菜单">☰</button>
+      <button class="btn ghost desk" id="themeBtn" title="切换明暗" aria-label="切换明暗">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path id="themeIco" d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg>
+        <span id="themeTxt">暗色</span>
+      </button>
+      <button class="btn mob" id="themeBtnM" aria-label="切换明暗">◐</button>
+    </span>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <!-- ===================== 页头 ===================== -->
+  <div class="phead">
+    <div>
+      <div class="crumb" id="crumb">OPENCODE TO API</div>
+      <h1 id="title">概览</h1>
+      <p id="desc">节点池健康、真实消耗与请求趋势。数据来自 /api/nodes 与 /api/stats。</p>
+    </div>
+    <div class="seg" id="rangeSeg" role="tablist" aria-label="时间窗">
+      <button class="on" data-r="today">今天</button>
+      <button data-r="7d">7 天</button>
+      <button data-r="30d">30 天</button>
+      <button data-r="all">全部</button>
+    </div>
+  </div>
+
+  <!-- ===================== C-5 告警横幅（两个视图都可见） =====================
+       数值来自 docs/research/C5-node-alert-replay.md 的真实回放结果：
+       2026-10-19 00:10:16 触发；窗口 10 分钟 226 次节点出口尝试 0 成功。 -->
+  <div class="alert" id="c5" role="alert">
+    <div class="ico" aria-hidden="true">!</div>
+    <div class="bd">
+      <div class="t">节点层告警：节点出口整体不可用</div>
+      <div class="m">节点出口持续全部失败，流量正在靠直连出口支撑</div>
+      <div class="meta tnum">最近 10 分钟：226 次节点出口尝试，成功率 0.0%；池内可用 115 / 128；另有连续失败 226 次、跨 13.0 分钟，始于 2026/10/19 00:10:16</div>
+    </div>
+    <button class="btn xs x" title="暂时收起（下一轮轮询会再出现）" aria-label="收起">收起</button>
+  </div>
+
+  <!-- =====================================================================
+       视图 A：概览
+       ===================================================================== -->
+  <section id="view-overview">
+
+    <!-- ① 统计卡 · 第一行：节点池状态（freellm AnalyticsPage.tsx:733-737 的 Stat 网格） -->
+    <div class="stats" id="statNodes">
+      <div class="stat">
+        <div class="top"><p class="lb">节点总数</p>
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="15" cy="15" r="1.2" fill="currentColor"/></svg></span></div>
+        <p class="v tnum info" id="ovTotal">128</p>
+        <p class="s tnum">健康 115 · 冷却 9 · 故障 4</p>
+      </div>
+      <div class="stat">
+        <div class="top"><p class="lb">可用</p>
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 12H4"/><path d="M4 12l5-5M4 12l5 5"/></svg></span></div>
+        <p class="v tnum ok" id="ovHealthy">115</p>
+        <p class="s">当前节点：香港 01</p>
+      </div>
+      <div class="stat">
+        <div class="top"><p class="lb">配额冷却</p>
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg></span></div>
+        <p class="v tnum warn" id="ovExhausted">9</p>
+        <p class="s">1h 自动恢复</p>
+      </div>
+      <div class="stat">
+        <div class="top"><p class="lb">故障</p>
+          <span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg></span></div>
+        <p class="v tnum bad" id="ovDead">4</p>
+        <p class="s">60s 后自动重试</p>
+      </div>
+    </div>
+
+    <!-- ② 用量卡：freellm 的 token-usage-bar.tsx 形态 ——
+         卡片头放标题 + 右侧行内数字摘要；卡体内是堆叠条 + 图例 -->
+    <div class="card" id="usageCard">
+      <div class="card-hd">
+        <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>真实消耗 Tokens</h2>
+        <div class="hdsum tnum">窗口 <b>今天</b> · 总请求 <b>4,532</b> · 吞吐 <b>36.4 tps</b></div>
+      </div>
+      <div class="card-bd">
+        <div style="display:flex;align-items:baseline;gap:.5rem;flex-wrap:wrap;margin-bottom:.5rem">
+          <span class="tnum" style="font-size:1.25rem;font-weight:600" id="tcTotalToken">14,691,356</span>
+          <span class="badge mute tnum">≈ 14.0M</span>
+        </div>
+        <div class="stack" id="tokenStack" aria-hidden="true">
+          <i style="width:34%;background:var(--c1)"></i>
+          <i style="width:22%;background:var(--c2)"></i>
+          <i style="width:18%;background:var(--c3)"></i>
+          <i style="width:13%;background:var(--c4)"></i>
+          <i style="width:13%;background:var(--c5)"></i>
+        </div>
+        <div class="legend tnum">
+          <span><b style="background:var(--c1)"></b>新增输入 12.3M</span>
+          <span><b style="background:var(--c2)"></b>Output 2.3M</span>
+          <span><b style="background:var(--c3)"></b>缓存命中 6.7M</span>
+          <span><b style="background:var(--c4)"></b>TTFT 412ms</span>
+          <span><b style="background:var(--c5)"></b>吞吐 41.2 tps</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ③ 统计卡 · 第二行：请求侧（freellm AnalyticsPage.tsx:740-752） -->
+    <div class="stats">
+      <div class="stat">
+        <div class="top"><p class="lb">总请求数</p><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></span></div>
+        <p class="v tnum">4,532</p><p class="s">今天 · n=4,532</p>
+      </div>
+      <div class="stat">
+        <div class="top"><p class="lb">成功率</p><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 6L9 17l-5-5"/></svg></span></div>
+        <p class="v tnum ok">92.3%</p><p class="s tnum">n=4,532 · 失败 349</p>
+      </div>
+      <div class="stat">
+        <div class="top"><p class="lb">平均延迟</p><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span></div>
+        <p class="v tnum">486 ms</p><p class="s tnum">P95 1,240 ms</p>
+      </div>
+      <div class="stat">
+        <div class="top"><p class="lb">缓存命中率</p><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></span></div>
+        <p class="v tnum">54.5%</p><p class="s tnum">省下 6.7M tokens</p>
+      </div>
+    </div>
+
+    <!-- ④ 趋势卡：freellm Panel（AnalyticsPage.tsx:345-358）—— 内联 SVG，零外部请求 -->
+    <div class="card" id="trendCard">
+      <div class="card-hd">
+        <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg>请求趋势</h2>
+        <div class="acts"><span class="tnum">近 24 小时 · 每格 1h</span></div>
+      </div>
+      <div class="card-bd">
+        <svg viewBox="0 0 720 200" width="100%" height="180" role="img" aria-label="请求趋势折线图">
+          <g stroke="var(--border)" stroke-dasharray="2 4">
+            <line x1="40" y1="30" x2="710" y2="30"/><line x1="40" y1="72" x2="710" y2="72"/>
+            <line x1="40" y1="114" x2="710" y2="114"/><line x1="40" y1="156" x2="710" y2="156"/>
+          </g>
+          <g fill="var(--muted-fg)" font-size="10" font-family="ui-monospace,monospace">
+            <text x="4" y="34">600</text><text x="4" y="76">400</text><text x="4" y="118">200</text><text x="4" y="160">0</text>
+          </g>
+          <polyline fill="none" stroke="var(--c1)" stroke-width="2" stroke-linejoin="round"
+            points="40,120 96,104 152,92 208,110 264,78 320,64 376,70 432,52 488,58 544,44 600,50 656,38 710,46"/>
+          <polyline fill="none" stroke="var(--bad)" stroke-width="1.5" stroke-linejoin="round" stroke-dasharray="4 3"
+            points="40,158 96,154 152,150 208,156 264,148 320,152 376,146 432,150 488,152 544,148 600,150 656,146 710,150"/>
+          <g fill="var(--muted-fg)" font-size="10" font-family="ui-monospace,monospace">
+            <text x="34" y="176">00</text><text x="146" y="176">04</text><text x="258" y="176">08</text>
+            <text x="370" y="176">12</text><text x="482" y="176">16</text><text x="594" y="176">20</text><text x="694" y="176">24</text>
+          </g>
+        </svg>
+        <div class="legend">
+          <span><b style="background:var(--c1)"></b>成功</span>
+          <span><b style="background:var(--bad)"></b>失败</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ⑤ 模型请求分布：freellm 的图一律灰阶；卡头写清窗口与 n -->
+    <div class="card" id="distCard">
+      <div class="card-hd">
+        <h2><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v9l7 4"/></svg>模型请求分布</h2>
+        <div class="acts tnum">窗口 今天 · n=4,532</div>
+      </div>
+      <div class="card-bd" style="display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap">
+        <svg viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="模型请求分布环形图">
+          <circle cx="60" cy="60" r="44" fill="none" stroke="var(--muted)" stroke-width="16"/>
+          <circle cx="60" cy="60" r="44" fill="none" stroke="var(--c1)" stroke-width="16"
+                  stroke-dasharray="78.1 198.4" transform="rotate(-90 60 60)"/>
+          <circle cx="60" cy="60" r="44" fill="none" stroke="var(--c2)" stroke-width="16"
+                  stroke-dasharray="53.4 223.1" transform="rotate(15.6 60 60)"/>
+          <circle cx="60" cy="60" r="44" fill="none" stroke="var(--c3)" stroke-width="16"
+                  stroke-dasharray="32.9 243.6" transform="rotate(56.4 60 60)"/>
+          <circle cx="60" cy="60" r="44" fill="none" stroke="var(--c4)" stroke-width="16"
+                  stroke-dasharray="27.6 248.9" transform="rotate(88.8 60 60)"/>
+          <text x="60" y="58" text-anchor="middle" font-size="15" font-weight="600" fill="var(--fg)" font-family="ui-monospace,monospace">4,532</text>
+          <text x="60" y="74" text-anchor="middle" font-size="9" fill="var(--muted-fg)">请求</text>
+        </svg>
+        <div style="flex:1;min-width:16rem">
+          <table class="tbl">
+            <thead><tr><th>模型</th><th class="num">请求数</th><th class="num">占比</th></tr></thead>
+            <tbody class="tnum">
+              <tr><td>gpt-4o-mini</td><td class="num">1,280</td><td class="num">28.2%</td></tr>
+              <tr><td>glm-5.2</td><td class="num">876</td><td class="num">19.3%</td></tr>
+              <tr><td>gpt-5.5</td><td class="num">342</td><td class="num">7.5%</td></tr>
+              <tr><td>其他 6 个模型</td><td class="num">2,034</td><td class="num">44.9%</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- =====================================================================
+       视图 B：节点池（含评分列 = U1 §8 四件套）
+       ===================================================================== -->
+  <section id="view-nodes" hidden>
+
+    <!-- 筛选 chips（带计数，这是我们的信息；形态取 freellm 的分段控件语法） -->
+    <div class="chips" id="stateChips">
+      <button class="chip on" data-f="all">全部 <span class="n tnum">128</span></button>
+      <button class="chip" data-f="available">可用 <span class="n tnum">115</span></button>
+      <button class="chip" data-f="exhausted">已耗尽 <span class="n tnum">9</span></button>
+      <button class="chip" data-f="dead">故障 <span class="n tnum">4</span></button>
+    </div>
+
+    <!-- 操作行：freellm 把操作放卡片头右侧（.card-hd .acts），不再单起一行 -->
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.75rem">
+      <button class="btn primary sm">重新加载订阅</button>
+      <button class="btn sm">测速</button>
+      <button class="btn sm">解除全部标记</button>
+      <span class="hint" style="margin-left:auto">上次刷新 15:31:04 · 每 30s 自动刷新横幅</span>
+    </div>
+
+    <!-- 延迟分布：freellm 没有等价物，用它的 meter + legend 语法画 -->
+    <div class="card" id="latdist">
+      <div class="card-hd"><h2>延迟分布</h2><div class="acts tnum">n=124 · 4 个节点未探测</div></div>
+      <div class="card-bd">
+        <div class="stack" aria-hidden="true">
+          <i style="width:52%;background:var(--ok)"></i>
+          <i style="width:28%;background:var(--axis-spd)"></i>
+          <i style="width:14%;background:var(--warn)"></i>
+          <i style="width:6%;background:var(--bad)"></i>
+        </div>
+        <div class="legend tnum">
+          <span><b style="background:var(--ok)"></b>&lt;150ms · 64</span>
+          <span><b style="background:var(--axis-spd)"></b>150–399ms · 35</span>
+          <span><b style="background:var(--warn)"></b>400–799ms · 17</span>
+          <span><b style="background:var(--bad)"></b>≥800ms/超时 · 8</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 节点表：真实字段 + U1 §8 的评分四件套（列 / 分档 / 排序 / 无数据占位） -->
+    <div class="card" id="nodeCard">
+      <div class="card-hd">
+        <h2>节点池</h2>
+        <div class="acts tnum">显示 7 / 128 · 按健康分降序，未测量置末</div>
+      </div>
+      <div class="tblwrap">
+        <table class="tbl" id="nodeTable">
+          <thead>
+            <tr>
+              <th style="width:20%">名称</th>
+              <th style="width:9%">协议</th>
+              <th style="width:11%">状态</th>
+              <th style="width:15%" class="th-sort desc" data-col="score">健康分 <span class="arrow">▼</span></th>
+              <th style="width:15%" class="th-sort" data-col="rate">真实成功率 <span class="arrow">↕</span></th>
+              <th class="num" style="width:9%">延迟</th>
+              <th style="width:14%">冷却至</th>
+              <th style="width:7%"></th>
+            </tr>
+          </thead>
+          <tbody class="tnum">
+            <!-- available / active -->
+            <tr>
+              <td><b>香港 01</b> <span class="badge outline">当前</span></td>
+              <td class="mono sub">vless</td>
+              <td><span class="badge ok"><i class="dot"></i>可用</span></td>
+              <td><span class="axis"><span class="bar"><i style="width:92%;background:var(--ok)"></i></span><span class="val">92</span></span></td>
+              <td><span class="axis"><span class="bar"><i style="width:96%;background:var(--ok)"></i></span><span class="val">96%</span></span> <span class="sub">n=3.2K</span></td>
+              <td class="num">48 ms</td>
+              <td class="sub">—</td>
+              <td><button class="btn xs">切换</button></td>
+            </tr>
+            <!-- available -->
+            <tr>
+              <td><b>日本 02</b></td>
+              <td class="mono sub">vless</td>
+              <td><span class="badge ok"><i class="dot"></i>可用</span></td>
+              <td><span class="axis"><span class="bar"><i style="width:78%;background:var(--ok)"></i></span><span class="val">78</span></span></td>
+              <td><span class="axis"><span class="bar"><i style="width:88%;background:var(--ok)"></i></span><span class="val">88%</span></span> <span class="sub">n=1.9K</span></td>
+              <td class="num">86 ms</td>
+              <td class="sub">—</td>
+              <td><button class="btn xs">切换</button></td>
+            </tr>
+            <!-- available, 低分：轴条转橙，分档同色 -->
+            <tr>
+              <td><b>韩国 06</b></td>
+              <td class="mono sub">anytls</td>
+              <td><span class="badge ok"><i class="dot"></i>可用</span></td>
+              <td><span class="axis"><span class="bar"><i style="width:61%;background:var(--warn)"></i></span><span class="val">61</span></span></td>
+              <td><span class="axis"><span class="bar"><i style="width:72%;background:var(--warn)"></i></span><span class="val">72%</span></span> <span class="sub">n=640</span></td>
+              <td class="num">132 ms</td>
+              <td class="sub">—</td>
+              <td><button class="btn xs">切换</button></td>
+            </tr>
+            <!-- available, 低分：红档 -->
+            <tr>
+              <td><b>新加坡 03</b></td>
+              <td class="mono sub">trojan</td>
+              <td><span class="badge ok"><i class="dot"></i>可用</span></td>
+              <td><span class="axis"><span class="bar"><i style="width:41%;background:var(--bad)"></i></span><span class="val">41</span></span></td>
+              <td><span class="axis"><span class="bar"><i style="width:52%;background:var(--bad)"></i></span><span class="val">52%</span></span> <span class="sub">n=240</span></td>
+              <td class="num">112 ms</td>
+              <td class="sub">—</td>
+              <td><button class="btn xs">切换</button></td>
+            </tr>
+            <!-- exhausted -->
+            <tr>
+              <td><b>美国 04</b></td>
+              <td class="mono sub">hysteria2</td>
+              <td><span class="badge warn"><i class="dot"></i>已耗尽</span></td>
+              <td><span class="axis"><span class="bar"><i style="width:55%;background:var(--warn)"></i></span><span class="val">55</span></span></td>
+              <td><span class="axis"><span class="bar"><i style="width:81%;background:var(--ok)"></i></span><span class="val">81%</span></span> <span class="sub">n=980</span></td>
+              <td class="num">184 ms</td>
+              <td class="sub">2026-08-12 14:00</td>
+              <td><button class="btn xs">解除</button></td>
+            </tr>
+            <!-- dead -->
+            <tr>
+              <td><b>德国 05</b></td>
+              <td class="mono sub">ss</td>
+              <td><span class="badge bad"><i class="dot"></i>故障</span></td>
+              <td><span class="axis"><span class="bar"><i style="width:22%;background:var(--bad)"></i></span><span class="val">22</span></span></td>
+              <td><span class="axis"><span class="bar"><i style="width:31%;background:var(--bad)"></i></span><span class="val">31%</span></span> <span class="sub">n=112</span></td>
+              <td class="num"><span style="color:var(--bad)">超时</span></td>
+              <td class="sub">2026-08-11 11:00</td>
+              <td><button class="btn xs">解除</button></td>
+            </tr>
+            <!-- ★ 未测量：绝对值不能渲染成 0（U1 §8.2 ⑤） -->
+            <tr>
+              <td><b>自建东京</b> <span class="badge outline">手动</span></td>
+              <td class="mono sub">vless</td>
+              <td><span class="badge info"><i class="dot"></i>未探测</span></td>
+              <td><span class="axis nodata"><span class="bar"></span><span class="val">无数据</span></span></td>
+              <td><span class="axis nodata"><span class="bar"></span><span class="val">无数据</span></span></td>
+              <td class="num sub">—</td>
+              <td class="sub">—</td>
+              <td><button class="btn xs">切换</button></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card-bd" style="border-top:1px solid var(--border);padding:.625rem 1rem">
+        <span class="hint">排序只作用于已加载的 7 行演示数据；真实面板是全量内存排序。成功率后的 <b>n=</b> 是样本量 —— 52% 的 n 只有 240，96% 的 n 有 3.2K，不标就分不出谁更可信。</span>
+      </div>
+    </div>
+
+    <!-- 直连失败细分：沿用真实面板 clRenderNode 的三分类口径 -->
+    <div class="card" id="directCard">
+      <div class="card-hd">
+        <h2>直连出口细分</h2>
+        <div class="acts tnum">窗口 今天 · n=1,214（占全量 26.8%）</div>
+      </div>
+      <div class="tblwrap">
+        <table class="tbl">
+          <thead><tr><th>出口</th><th class="num">请求数</th><th class="num">成功率</th><th class="num">平均耗时</th><th class="num">异常/切换</th></tr></thead>
+          <tbody class="tnum">
+            <tr><td><b>全部</b>（分母含直连）</td><td class="num">4,532</td><td class="num">92.30%</td><td class="num">486 ms</td><td class="num">349</td></tr>
+            <tr><td>直连·闸门拒绝</td><td class="num">612</td><td class="num" style="color:var(--bad)">57.90%</td><td class="num">—</td><td class="num">258</td></tr>
+            <tr><td>直连·连不上</td><td class="num">402</td><td class="num" style="color:var(--bad)">12.40%</td><td class="num">—</td><td class="num">352</td></tr>
+            <tr><td>直连·其他</td><td class="num">200</td><td class="num">30.20%</td><td class="num">—</td><td class="num">140</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </section>
+</main>
+
+<!-- ===================== 设计配方自检区 ===================== -->
+<div class="recipe" id="recipe">
+  <div class="card">
+    <div class="card-hd">
+      <h2>设计配方自检 · 点一条规则，页面对应区域会高亮</h2>
+      <div class="acts">来源：freellm 源码 + 截图，见 docs/research/U2b-freellm-style-recipe.md</div>
+    </div>
+    <div class="card-bd">
+      <div class="rlist" id="rlist">
+        <button class="rchip" data-hl="#statNodes"><span class="id">R4</span>统计卡网格：2 列→4 列，label 11px 大写字距</button>
+        <button class="rchip" data-hl="#usageCard"><span class="id">R6</span>卡片头放标题 + 右侧行内摘要</button>
+        <button class="rchip" data-hl="#trendCard"><span class="id">R8</span>图表一律灰阶，卡头写明窗口与 n</button>
+        <button class="rchip" data-hl="#c5"><span class="id">R11</span>告警横幅：destructive 语义 + 圆角卡语法</button>
+        <button class="rchip" data-hl="#stateChips"><span class="id">R12</span>筛选 chips：激活=实心，保留计数</button>
+        <button class="rchip" data-hl="#nodeCard"><span class="id">R13</span>表格密度：th 40px / td 8px 内边距 / 行 border-b</button>
+        <button class="rchip" data-hl="#nodeTable"><span class="id">R14</span>评分四件套：轴条 + 分档色 + 排序表头 + 无数据虚线</button>
+        <button class="rchip" data-hl="#directCard"><span class="id">R16</span>每个数字都带窗口与样本量 n</button>
+        <button class="rchip" data-hl=".nav"><span class="id">R1</span>顶部横条导航：sticky + 1px 下边框 + 当前项底边线</button>
+        <button class="rchip" data-hl=".seg"><span class="id">R3</span>分段控件：外框圆角 12px，激活段实心前景色</button>
+        <button class="rchip" data-hl=".badge.outline"><span class="id">R9</span>徽章：实心=状态，描边=元信息</button>
+      </div>
+      <p class="hint" style="margin:.75rem 0 0">
+        R2（无阴影分层）、R5（卡片 24px 圆角 + 1px ring）、R7（等宽数字）、R10（按钮 h-8/圆角 8px）、
+        R15（窄屏列裁剪）是铺满全页的规则，没有单一落点 —— 见报告逐条说明。
+      </p>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ------------------------------------------------------------------
+   纯展示脚本：切视图 / 切主题 / 高亮规则 / 高亮告警的收起。
+   没有任何 fetch，没有任何外部资源 —— 保证 file:// 下零网络请求。
+   ------------------------------------------------------------------ */
+(function(){
+  'use strict';
+  var q=function(s,r){return (r||document).querySelector(s)};
+  var qa=function(s,r){return Array.prototype.slice.call((r||document).querySelectorAll(s))};
+
+  /* ---- 视图切换（对应真实面板的 showPage） ---- */
+  var TITLES={
+    overview:{t:'概览',c:'OPENCODE TO API',d:'节点池健康、真实消耗与请求趋势。数据来自 /api/nodes 与 /api/stats。'},
+    nodes:{t:'节点池',c:'节点健康与切换',d:'每个出口节点的真实成功率、健康分与失败形态；成功率必须带样本量 n。'}
+  };
+  function go(id){
+    qa('.nav a.item').forEach(function(a){a.classList.toggle('on',a.dataset.go===id)});
+    q('#view-overview').hidden = (id!=='overview');
+    q('#view-nodes').hidden = (id!=='nodes');
+    q('#title').textContent=TITLES[id].t;
+    q('#crumb').textContent=TITLES[id].c;
+    q('#desc').textContent=TITLES[id].d;
+    window.scrollTo({top:0,behavior:'auto'});
+  }
+  qa('.nav a.item').forEach(function(a){
+    a.addEventListener('click',function(e){
+      e.preventDefault();
+      if(a.hasAttribute('data-dead'))return;   /* 未在本样例里重画的分区 */
+      go(a.dataset.go);
+    });
+  });
+  q('#mobMenu').addEventListener('click',function(){
+    /* 窄屏导航收进汉堡：展开后 .desk 项折成第二行（freellm App.tsx:321-374
+       的 md:hidden 下拉菜单同理 —— 只是它用 popover，这里用折行，零依赖） */
+    var nav=q('.nav');
+    nav.classList.toggle('open');
+    this.setAttribute('aria-expanded', nav.classList.contains('open') ? 'true' : 'false');
+  });
+
+  /* ---- 主题切换：与首绘脚本同一 key ---- */
+  function applyTheme(t){
+    document.documentElement.setAttribute('data-theme',t);
+    q('#themeTxt').textContent = t==='dark' ? '亮色' : '暗色';
+    q('#themeIco').setAttribute('d', t==='dark'
+      ? 'M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4M16 12a4 4 0 11-8 0 4 4 0 018 0z'
+      : 'M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z');
+    try{localStorage.setItem('u2b.theme',t)}catch(e){}
+  }
+  try{applyTheme(localStorage.getItem('u2b.theme')||'light')}catch(e){applyTheme('light')}
+  function toggle(){applyTheme(document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark')}
+  q('#themeBtn').addEventListener('click',toggle);
+  q('#themeBtnM').addEventListener('click',toggle);
+
+  /* ---- 分段控件（只切高亮，不真的改数据） ---- */
+  qa('#rangeSeg button').forEach(function(b){
+    b.addEventListener('click',function(){qa('#rangeSeg button').forEach(function(x){x.classList.remove('on')});b.classList.add('on')});
+  });
+
+  /* ---- 筛选 chips ---- */
+  qa('#stateChips .chip').forEach(function(b){
+    b.addEventListener('click',function(){qa('#stateChips .chip').forEach(function(x){x.classList.remove('on')});b.classList.add('on')});
+  });
+
+  /* ---- 排序表头（演示三态：默认 → 升 → 降） ---- */
+  qa('.th-sort').forEach(function(th){
+    th.addEventListener('click',function(){
+      var asc=th.classList.contains('asc'), desc=th.classList.contains('desc');
+      qa('.th-sort').forEach(function(x){x.classList.remove('asc','desc');x.querySelector('.arrow').textContent='↕'});
+      if(!asc&&!desc){th.classList.add('asc');th.querySelector('.arrow').textContent='▲'}
+      else if(asc){th.classList.add('desc');th.querySelector('.arrow').textContent='▼'}
+    });
+  });
+
+  /* ---- 告警横幅收起 ---- */
+  q('#c5').querySelector('.x').addEventListener('click',function(){q('#c5').style.display='none'});
+
+  /* ---- 配方自检：点规则 → 高亮落点 ---- */
+  var hlTimer=null;
+  qa('#rlist .rchip').forEach(function(c){
+    c.addEventListener('click',function(){
+      qa('#rlist .rchip').forEach(function(x){x.classList.remove('on')});
+      c.classList.add('on');
+      qa('.hl').forEach(function(x){x.classList.remove('hl')});
+      var sel=c.dataset.hl;
+      var t=q(sel);
+      if(!t)return;
+      t.classList.add('hl');
+      t.scrollIntoView({block:'center',behavior:'smooth'});
+      clearTimeout(hlTimer);
+      hlTimer=setTimeout(function(){t.classList.remove('hl')},2600);
+    });
+  });
+
+  /* ---- 给用户一个「这是一次性样例」的可见提示（不弹窗） ---- */
+  console.log('[U2b] style-specimen 就绪：零外部请求，纯静态演示。');
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,2347 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OPENCODE TO API · 管理面板</title>
+<!-- 内联 SVG favicon：否则浏览器会自发请求 /favicon.ico 产生 404，而 Playwright 不把
+     浏览器自发请求计入 page 的 response 事件，导致响应枚举查不到、无法定位来源。
+     Ruling 23 记的「把 resource_errors() 升级为断言」要闭合，这是前提。 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236f96ff'/%3E%3Ctext x='16' y='22' font-family='monospace' font-size='17' font-weight='bold' fill='%23fff' text-anchor='middle'%3Eo%3C/text%3E%3C/svg%3E">
+<!-- defer（而非 async）：文档解析完成、DOMContentLoaded 触发之前必定执行完，
+     所以 DOMContentLoaded 处理器里 initAllCharts() 拿到的 echarts 一定已就绪，
+     不会误报「加载失败」。同时它不阻塞解析——CDN 挂起时页面照样渲染得出来。
+     async 不保证顺序，可能在 DOMContentLoaded 之后才到，会造成假阳性提示。 -->
+<script defer src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+<style>
+/* ---------- 免费模型自动映射行 ---------- */
+.row-auto td{color:var(--text-sec);background:color-mix(in srgb,var(--accent-dim) 30%,transparent)}
+.tbl tbody tr.row-auto:hover{background:color-mix(in srgb,var(--accent-dim) 48%,transparent)!important}
+.auto-name{font-family:var(--mono);font-size:13px;color:var(--text)}
+.auto-up{font-family:var(--mono);font-size:12px}
+.auto-badge{display:inline-flex;align-items:center;padding:1px 8px;border-radius:999px;font-size:10.5px;font-weight:600;letter-spacing:.04em;background:var(--accent-dim);color:var(--accent);margin-left:7px;vertical-align:1px}
+.auto-hide{font-size:11px;color:var(--text-ter);cursor:pointer;opacity:.6;transition:opacity .15s}.auto-hide:hover{opacity:1}
+
+/* ============================================================
+   OPENCODE TO API · 管理面板 (重构版)
+   设计方向：tech-utility · 深色优先 · 无外网字体依赖
+   - CJK 系统字体栈（PingFang / 微软雅黑 / Noto Sans SC）
+   - 语义色：accent=健康/主操作 · blue=信息 · orange=耗尽 · red=故障
+   - 全部交互契约与原版一致，可直接替换 main.go 中的 adminHTML
+   ============================================================ */
+:root{
+  --bg:#0a0f1c; --surface:#101828; --surface-2:#1a2336;
+  --border:rgba(148,163,184,.14); --border-strong:rgba(148,163,184,.28);
+  --line:rgba(148,163,184,.08);
+  --text:#e9eef8; --text-sec:#97a3bb; --text-ter:#7b87a5;
+  --accent:#6f96ff; --accent-hover:#5d88ff; --accent-dim:rgba(111,150,255,.15);
+  --blue:#7ea2ff; --blue-dim:rgba(126,162,255,.12);
+  --ok:#2fd489; --ok-dim:rgba(47,212,137,.13);
+  --orange:#f0b04a; --orange-dim:rgba(240,176,74,.12);
+  --purple:#b197f7; --purple-dim:rgba(177,151,247,.13);
+  /* 数据系列色板：图表与模型筛选共用，亮色主题下另有一套 */
+  --series-1:#5b9bff;  /* 输入 / 首个模型 */
+  --series-2:#2fd489;  /* 输出 */
+  --series-3:#b18cff;  /* 缓存读 */
+  --series-4:#f0b04a;  /* 第 4 个数据系列 */
+  --series-5:#fb7185;  /* 辅助 */
+  --red:#ff6b6b; --red-dim:rgba(255,107,107,.12);
+  --radius:12px; --radius-sm:8px;
+  --font:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei','Noto Sans SC',sans-serif;
+  --mono:ui-monospace,'SF Mono','JetBrains Mono','Cascadia Code',Consolas,monospace;
+  --shadow:0 10px 34px rgba(3,8,20,.55);
+  --btn-text:#0a0f1e;
+}
+[data-theme="light"]{
+  --bg:#f4f6fb; --surface:#ffffff; --surface-2:#eef1f8;
+  --border:#e1e5ee; --border-strong:#c9d1e0; --line:rgba(20,30,60,.06);
+  --text:#161a26; --text-sec:#59637a; --text-ter:#616d88;
+  --accent:#3b63c9; --accent-hover:#3457b6; --accent-dim:rgba(59,99,201,.12);
+  --blue:#3b63c9; --blue-dim:rgba(59,99,201,.1);
+  --ok:#0a6f42; --ok-dim:rgba(10,111,66,.10);
+  --orange:#a1530a; --orange-dim:rgba(161,83,10,.10);
+  --purple:#6d4fc4; --purple-dim:rgba(109,79,196,.10);
+  --red:#b42318; --red-dim:rgba(180,35,24,.09);
+  --series-1:#2f5fd6; --series-2:#0d8f5c; --series-3:#7048c4; --series-4:#b57500; --series-5:#d93a5c;
+  --shadow:0 10px 30px rgba(30,40,70,.1);
+  --btn-text:#ffffff;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;line-height:1.6;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+button{font-family:inherit}
+input,select,textarea{font-family:inherit;color:inherit}
+::selection{background:var(--accent-dim)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.muted{color:var(--text-ter)}
+.mono{font-family:var(--mono)}
+.num{font-variant-numeric:tabular-nums}
+.lat-warn{color:var(--orange)}
+.lat-high{color:var(--red)}
+.empty-hint{text-align:center;color:var(--text-ter);padding:26px 0;font-size:13px}
+/* 主题图标：随 data-theme 切换显示月亮/太阳 */
+.ic-sun{display:none}
+[data-theme="dark"] .ic-moon{display:inline-block}
+[data-theme="dark"] .ic-sun{display:none}
+[data-theme="light"] .ic-moon{display:none}
+[data-theme="light"] .ic-sun{display:inline-block}
+.theme-btn-ic{display:inline-flex;align-items:center;gap:6px}
+
+/* ---------- 通用按钮 ---------- */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border:1px solid transparent;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;transition:background .14s,border-color .14s,color .14s,transform .05s;white-space:nowrap;line-height:1.2}
+.btn:active{transform:translateY(1px) scale(.98)}
+.btn:focus-visible,.chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn-primary{background:var(--accent);color:var(--btn-text)}.btn-primary:hover{background:var(--accent-hover)}
+.btn-secondary{background:var(--blue);color:var(--btn-text)}.btn-secondary:hover{background:color-mix(in srgb,var(--blue) 85%,var(--bg));color:var(--btn-text)}
+.btn-ghost{background:var(--surface);color:var(--text-sec);border-color:var(--border)}.btn-ghost:hover{background:var(--surface-2);color:var(--text);border-color:var(--border-strong)}
+.btn-danger{background:transparent;color:var(--red);border-color:color-mix(in srgb,var(--red) 45%,transparent)}.btn-danger:hover{background:color-mix(in srgb,var(--red-dim) 70%,var(--red));border-color:var(--red);color:var(--red)}
+.btn-sm{padding:4px 9px;font-size:12px;border-radius:7px}
+.btn-block{width:100%;justify-content:center;padding:11px}
+.btn:disabled,.btn[disabled]{opacity:.45;cursor:not-allowed;pointer-events:none}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px}
+
+/* ---------- 登录 ---------- */
+.login-view{position:relative;z-index:1;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}
+.login-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:34px 38px;width:100%;max-width:384px;box-shadow:var(--shadow)}
+.login-bar{display:flex;justify-content:flex-end;margin-bottom:12px}
+.theme-toggle{background:transparent;border:1px solid var(--border);border-radius:9px;padding:6px 12px;cursor:pointer;font-size:13px;color:var(--text-sec);font-family:inherit;transition:all .15s}
+.theme-toggle:hover{border-color:var(--border-strong);color:var(--accent)}
+.brand{display:flex;align-items:center;gap:12px;margin-bottom:26px}
+.logo-mark{width:36px;height:36px;border-radius:10px;background:var(--accent);display:grid;place-items:center;color:var(--btn-text);flex-shrink:0}
+.logo-text{font-size:15px;font-weight:600;font-family:var(--mono);letter-spacing:-.02em;line-height:1.15}
+.logo-accent{color:var(--accent);font-weight:700}
+.logo-sub{font-size:9.5px;color:var(--text-ter);letter-spacing:.2em;text-transform:uppercase;margin-top:3px}
+.msg{display:none;background:var(--red-dim);color:var(--red);padding:11px 14px;border-radius:9px;margin-bottom:16px;font-size:13px;text-align:center;border:1px solid color-mix(in srgb,var(--red) 30%,transparent)}
+.field label{display:block;font-size:11.5px;font-weight:600;color:var(--text-sec);margin-bottom:6px;letter-spacing:.03em}
+.field input,.field select{width:100%;padding:8px 11px;border:1px solid var(--border);border-radius:9px;font-size:13px;font-family:var(--mono);background:var(--bg);color:var(--text);transition:border-color .14s,box-shadow .14s}
+.field input:focus,.field select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+.field .hint{font-size:11px;color:var(--text-ter);margin-top:4px;line-height:1.4}
+.login-card .foot{margin-top:20px;text-align:center;font-size:11.5px;color:var(--text-ter);font-family:var(--mono)}
+
+/* ---------- 主面板骨架 ---------- */
+.app{position:relative;z-index:1;display:flex;flex-direction:column;min-height:100vh}
+.appbar{position:sticky;top:0;z-index:40;background:var(--surface);border-bottom:1px solid var(--border)}
+.appbar-in{max-width:1280px;margin:0 auto;display:flex;align-items:center;gap:26px;padding:0 24px;height:53px}
+.appbar .brand{margin:0;gap:9px}
+.appbar .logo-mark{width:26px;height:26px;border-radius:8px}
+.appbar .logo-sub{display:none}
+.topnav{display:flex;align-items:center;gap:22px;height:100%}
+.topnav button{position:relative;display:flex;align-items:center;gap:7px;height:100%;padding:0;border:none;background:transparent;color:var(--text-sec);font-size:13.5px;font-weight:500;cursor:pointer;transition:color .15s}
+.topnav button:hover{color:var(--text)}
+.topnav button.active{color:var(--accent);font-weight:600}
+.topnav button.active::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--accent)}
+.appbar-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+.burger{display:none;align-items:center;justify-content:center;width:34px;height:34px;border:1px solid var(--border);border-radius:9px;background:transparent;color:var(--text-sec);cursor:pointer}
+.navsheet{display:none;border-top:1px solid var(--border);padding:8px 12px 12px}
+.navsheet button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:10px 11px;border:none;border-radius:9px;background:transparent;color:var(--text-sec);font-size:13.5px;font-weight:500;cursor:pointer}
+.navsheet button.active{background:var(--accent-dim);color:var(--accent);font-weight:600}
+.navsheet.open{display:block}
+.conn{display:flex;align-items:center;gap:7px;padding:3px 8px;font-size:11.5px;color:var(--text-ter);min-width:0}
+.conn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.conn .cshort{display:none}
+.conn .pulse{width:7px;height:7px;border-radius:50%;background:var(--ok);position:relative;flex-shrink:0}
+.conn .pulse::after{content:"";position:absolute;inset:-3px;border-radius:50%;background:var(--ok);opacity:.35;animation:pulse 2s ease-out infinite}
+@keyframes pulse{0%{transform:scale(.6);opacity:.5}70%{transform:scale(1.7);opacity:0}100%{opacity:0}}
+.conn.offline .pulse{background:var(--text-ter)}
+.conn.offline .pulse::after{animation:none;background:var(--text-ter)}
+.mini{font-size:11px;letter-spacing:.02em;color:var(--text-sec);font-family:var(--mono);padding:0 8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.main{flex:1;min-width:0;width:100%;margin:0 auto;padding:32px 36px 72px;max-width:1280px}
+.topbar{display:flex;align-items:center;gap:12px;margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--border);flex-wrap:wrap}/* flex-wrap：新增的「自动刷新」下拉让顶栏在窄屏横向溢出（实测 scrollWidth 441→469）。h1 自带 flex:1，所以换行时标题独占一行、控件聚在第二行。*/
+.topbar h1{font-size:20px;font-weight:700;letter-spacing:0;line-height:1.35;flex:1;display:flex;align-items:baseline;gap:10px}
+.topbar .crumb{font-size:12px;color:var(--text-ter);font-weight:500;letter-spacing:-.01em}
+
+/* ---------- 统计卡 ---------- */
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:22px}
+/* ---------- 顶部 Token Hero（cc-switch UsageHero 版式） ---------- */
+/* 宽屏 5 格一行、窄屏 2 格（对齐 cc-switch 的 grid-cols-2 lg:grid-cols-5）。
+   断点 1000px：main 固定 204px 侧栏 + 72px 内边距，低于该宽度时 5 格会被压到 ~95px。 */
+.hero-usage-card{display:flex;flex-direction:column;gap:14px}
+.uh-head{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.uh-lead{display:flex;align-items:center;gap:12px;min-width:0}
+.uh-glyph{display:grid;place-items:center;width:40px;height:40px;border-radius:12px;flex-shrink:0;background:linear-gradient(135deg,var(--accent-dim),transparent);color:var(--accent)}
+.uh-label{font-size:12px;font-weight:500;color:var(--text-ter);margin-bottom:2px}
+.uh-value-line{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.uh-value{font-size:26px;font-weight:700;line-height:1.1;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.uh-badge{font-size:11.5px;font-weight:600;color:var(--text-sec);background:var(--surface-2);border-radius:6px;padding:2px 6px;font-variant-numeric:tabular-nums}
+.uh-req{display:flex;flex-direction:column;gap:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;padding:9px 14px}
+.uh-req-k{font-size:10px;color:var(--text-ter);letter-spacing:.06em;text-transform:uppercase}
+.uh-req-v{display:flex;align-items:center;gap:6px;font-size:14px;font-weight:600;color:var(--blue);font-variant-numeric:tabular-nums}
+.uh-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+@media (min-width:1000px){.uh-grid{grid-template-columns:repeat(5,1fr)}}
+.uh-cell{display:flex;flex-direction:column;gap:4px;background:var(--bg);border:1px solid var(--border);border-radius:12px;padding:12px}
+/* label 用前景色 70% 透明（cc-switch text-foreground/70），不是 muted 灰；图标另取强调色 */
+.uh-cell-l{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:500;color:var(--text-ter)}
+.uh-cell-l>span{color:var(--text);opacity:.7;letter-spacing:.03em}
+.uh-blue{color:var(--blue)}.uh-purple{color:var(--purple)}.uh-green{color:var(--ok)}.uh-amber{color:var(--orange)}
+.uh-cell-v{font-size:14px;font-weight:600;line-height:1.35;font-variant-numeric:tabular-nums}
+/* 命中率是特殊格：值在标签行右侧（不是下方），下面是进度条 */
+.uh-hit{grid-column:span 2;justify-content:center;gap:8px}
+@media (min-width:1000px){.uh-hit{grid-column:span 1}}
+.uh-hit-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.uh-hit-v{font-size:12.5px;font-weight:700;color:var(--ok);font-variant-numeric:tabular-nums}
+.uh-hit-bar{position:relative;height:6px;border-radius:99px;background:var(--surface-2);overflow:hidden}
+.uh-hit-bar>i{display:block;height:100%;width:0;border-radius:99px;background:var(--ok);transition:width .4s}
+/* 数字宽→完整 / 窄→缩写。用普通媒体查询 + 双 span：admin.html 既有断点先例是 760px，
+   且引入 @container 需要额外的 container-type 落点，不在这份单文件里冒险。 */
+.v-mini .abbr{display:none}
+@media (max-width:760px){.v-mini .full{display:none}.v-mini .abbr{display:inline}}
+
+.stat{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden;transition:border-color .15s,box-shadow .15s}
+.stat:hover{border-color:var(--border-strong);box-shadow:0 2px 8px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.04)}
+.stat .k{font-size:11px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-ter);margin-bottom:9px;display:flex;align-items:center;gap:7px}
+.stat .v{font-size:30px;font-weight:700;font-family:var(--mono);letter-spacing:-.01em;line-height:1;font-variant-numeric:tabular-nums}
+.stat .sub{font-size:11.5px;color:var(--text-ter);margin-top:7px;font-family:var(--mono)}
+.stat .v.green{color:var(--ok)}.stat .v.orange{color:var(--orange)}.stat .v.red{color:var(--red)}.stat .v.blue{color:var(--blue)}
+
+/* ---------- 卡片 ---------- */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px 24px;margin-bottom:16px;transition:border-color .15s,box-shadow .2s;box-shadow:0 1px 2px rgba(0,0,0,.06)}.card:hover{border-color:var(--border-strong);box-shadow:0 2px 8px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.04)}
+.card h2{font-size:15.5px;font-weight:600;letter-spacing:0;line-height:1.4;margin-bottom:12px;padding-bottom:9px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+.card .hint{font-size:12.5px;color:var(--text-sec);margin:-8px 0 14px}
+.card .card-actions{display:flex;gap:8px;align-items:center;margin:0 0 12px}
+
+/* ---------- 表格 ---------- */
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-size:11px;font-weight:600;color:var(--text-ter);letter-spacing:.01em;padding:9px 12px;border-bottom:1px solid var(--border)}
+.tbl td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:middle}
+.tbl tbody tr{transition:background .12s}
+.tbl tbody tr:hover{background:color-mix(in srgb,var(--surface-2) 50%,transparent)}
+.tbl tbody tr:last-child td{border-bottom:none}
+.tbl tbody tr.hl{background:var(--accent-dim)}
+.tbl th.num,.tbl td.num{text-align:right}
+.tbl input[type=text],.tbl input[type=password],.tbl input:not([type]),.tbl select{padding:5px 8px;font-size:12.5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);width:100%;min-width:60px;transition:border-color .14s,box-shadow .14s}
+.tbl input:focus,.tbl select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+
+/* ---------- 状态徽章 / 标签 / 节点名 ---------- */
+.badge{display:inline-flex;align-items:center;gap:5px;padding:2.5px 9px;border-radius:999px;font-size:11.5px;font-weight:600;letter-spacing:.03em}
+.badge .bdot{width:6px;height:6px;border-radius:50%}
+.badge.available{background:var(--ok-dim);color:var(--ok)}.badge.available .bdot{background:var(--ok)}
+.badge.exhausted{background:var(--orange-dim);color:var(--orange)}.badge.exhausted .bdot{background:var(--orange)}
+.badge.dead{background:var(--red-dim);color:var(--red)}.badge.dead .bdot{background:var(--red)}
+.badge.idle{background:var(--blue-dim);color:var(--blue)}.badge.idle .bdot{background:var(--blue)}
+.tag{display:inline-flex;align-items:center;padding:1px 7px;border-radius:6px;font-size:10.5px;font-weight:600;letter-spacing:.03em;vertical-align:1px}
+.tag.cur{background:var(--accent-dim);color:var(--accent);margin-left:6px}
+.tag.man{background:var(--blue-dim);color:var(--blue);margin-left:6px}
+.node-name{font-weight:600}
+.proto{font-family:var(--mono);font-size:12px;color:var(--text-sec)}
+.err{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;color:var(--text-ter)}
+.acts{white-space:nowrap}
+.acts .btn{margin-right:4px}
+
+/* ---------- 筛选 chips ---------- */
+/* C-5 节点层告警横幅。必须有别于「某个节点故障」：2026-10-19 那次事故是
+   面板显示 115 个 available、而整层出口连续 8 小时零成功 —— 单节点状态全绿也不算数。 */
+.node-alert{display:none;align-items:flex-start;gap:10px;padding:11px 13px;margin:0 0 14px;border:1px solid var(--red);border-left-width:3px;border-radius:var(--radius-sm);background:var(--red-dim);font-size:12.5px;line-height:1.55}
+.node-alert.on{display:flex}
+.node-alert .na-ico{flex-shrink:0;width:18px;height:18px;border-radius:50%;background:var(--red);color:var(--bg);font-weight:800;font-size:12px;display:flex;align-items:center;justify-content:center;margin-top:1px}
+.node-alert .na-body{flex:1;min-width:0}
+/* overflow-wrap:anywhere —— 防「超长无空格 token 把整页撑宽」。
+   独立盲验实测（task-20）：#naReason 若塞入 30 字符无空格 token，320px 下页面即溢出 54px；
+   200 字符时溢出 1471px。真实 reason 目前全部由服务端 fmt.Sprintf 生成（最长 token 15 字符，
+   见 node_alert.go:302-360），所以当前不可触发 —— 但告警横幅是「面板别装健康」的唯一出口，
+   它自己把页面撑爆的后果远比多一行 CSS 严重，故按纵深防御先补上。 */
+.node-alert .na-body>div{overflow-wrap:anywhere}
+.node-alert .na-title{font-weight:700;color:var(--red)}
+.node-alert .na-meta{color:var(--text-sec);font-size:11.5px;font-variant-numeric:tabular-nums;margin-top:2px}
+.filter-chips{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:5px 13px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:var(--text-sec);font-size:12.5px;font-weight:500;cursor:pointer;transition:all .15s}
+.chip:hover{border-color:var(--border-strong);color:var(--text)}
+.chip.active{background:var(--accent-dim);border-color:transparent;color:var(--accent);font-weight:600}
+.chip .cnt{font-family:var(--mono);font-size:11px;opacity:.7}
+
+/* ---------- 节点编辑器 / 流量条 / 网关 ---------- */
+.nedit{display:grid;grid-template-columns:110px 1fr 1fr 90px 64px;gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
+.nedit input,.nedit select{padding:5.5px 9px;font-size:12.5px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);width:100%}
+.nedit details{margin-top:8px;grid-column:1/-1;font-size:12px}
+.nedit details summary{cursor:pointer;color:var(--text-sec);font-weight:500;letter-spacing:.02em}
+.nedit .extra{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;padding:10px 12px;background:var(--surface-2);border-radius:9px;margin-top:6px}
+.check{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--text-sec);cursor:pointer;user-select:none;padding:6px 0}
+.check input{accent-color:var(--accent);width:15px;height:15px}
+.usage{display:flex;align-items:center;gap:8px;min-width:150px}
+.usage-bar{flex:1;height:5px;border-radius:99px;background:var(--surface-2);overflow:hidden}
+.usage-bar i{display:block;height:100%;border-radius:99px;background:var(--accent)}
+.usage span{font-size:11.5px;color:var(--text-sec);font-family:var(--mono);white-space:nowrap}
+/* task-24：原来 minmax(240px,1fr) 的 240px 是硬下限，视口窄于「240+侧栏+内边距」时
+   网格轨道拒绝收缩 ⇒ 320px 下 .gw-box 右边缘 337 > 320，整页横向溢出（实测 443/337）。
+   min(240px,100%) 让它「有 240 就用 240，没有就占满可用宽度」：≥240 的宽度下与原来
+   逐像素相同（桌面不受影响），窄屏则不再溢出。 */
+.gw-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:10px}
+.gw-box{border:1px solid var(--border);border-radius:9px;padding:10px 12px;background:var(--bg)}
+.gw-label{font-size:11.5px;color:var(--text-ter);margin-bottom:5px;letter-spacing:.03em}
+.gw-copy{display:flex;align-items:center;gap:6px;background:none;border:none;padding:0;cursor:pointer;color:var(--text);font-family:var(--mono);font-size:12.5px;transition:color .14s}
+.gw-copy:hover{color:var(--accent)}
+.gw-copy code{font-family:var(--mono);word-break:break-all}
+.gw-copy .glyph{display:inline-flex;align-items:center;gap:4px;font-size:11px;opacity:.7}
+
+/* ---------- 请求分布（Token 卡片） ---------- */
+.model-bars{display:grid;gap:6px;margin:2px 0 16px}
+.model-bars .mb-head{font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-ter);margin-bottom:8px}
+.mbar{display:grid;grid-template-columns:minmax(120px,180px) 1fr 88px;gap:12px;align-items:center;font-size:11.5px}
+.mbar .lbl{font-family:var(--mono);color:var(--text-sec);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mbar .track{height:6px;border-radius:99px;background:var(--surface-2);overflow:hidden}
+.mbar .track i{display:block;height:100%;border-radius:99px;background:var(--accent)}
+.mbar .val{font-family:var(--mono);color:var(--text-ter);text-align:right;font-variant-numeric:tabular-nums}
+
+/* ---------- 延迟分布（节点页） ---------- */
+.latdist{margin:-4px 0 16px;padding:12px 16px;border:1px solid var(--border);border-radius:9px;background:var(--surface)}
+.latdist .row{display:flex;align-items:center;gap:12px}
+.latdist .ld-title{font-size:10.5px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;color:var(--text-ter);flex:none}
+.latdist .ld-track{flex:1;display:flex;height:8px;border-radius:99px;overflow:hidden;background:var(--surface-2);min-width:0}
+.latdist .ld-seg{height:100%}
+.latdist .ld-seg.g{background:var(--ok)}
+.latdist .ld-seg.b{background:var(--accent)}
+.latdist .ld-seg.o{background:var(--orange)}
+.latdist .ld-seg.r{background:var(--red)}
+.latdist .ld-legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:11px;font-family:var(--mono);color:var(--text-sec)}
+.latdist .ld-key{display:inline-flex;align-items:center;gap:5px}
+.latdist .ld-key i{width:8px;height:8px;border-radius:2px;flex:none}
+.latdist .ld-key i.g{background:var(--ok)}
+.latdist .ld-key i.b{background:var(--accent)}
+.latdist .ld-key i.o{background:var(--orange)}
+.latdist .ld-key i.r{background:var(--red)}
+
+/* ---------- 用量趋势（概览，数据来自调用日志） ---------- */
+/* ---------- 旧 SVG 趋势图样式（保留兼容） ---------- */
+@media(max-width:560px){.ut-head{flex-direction:column;align-items:flex-start}}
+@media(max-width:560px){.mbar{grid-template-columns:1fr 1fr}}
+
+/* ---------- 页面切换 ---------- */
+.page{display:none}
+.page.active{display:block;animation:fadeIn .18s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* ---------- Toast ---------- */
+#toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(16px);background:var(--text);color:var(--bg);padding:10px 22px;border-radius:10px;font-size:13.5px;font-weight:600;opacity:0;pointer-events:none;transition:all .22s cubic-bezier(.2,.7,.3,1);z-index:999;box-shadow:var(--shadow)}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#toast.error{background:var(--red);color:#fff}
+
+/* ---------- 运行日志 ---------- */
+.log-wrap{max-height:520px;overflow-y:auto;font-family:var(--mono);font-size:12.5px;line-height:1.55;border:1px solid var(--border);border-radius:9px;padding:6px 0;background:var(--bg)}
+.log-line{display:flex;gap:10px;align-items:baseline;padding:1px 12px;border-left:2px solid transparent}
+.log-line:hover{background:color-mix(in srgb,var(--surface-2) 45%,transparent)}
+.log-line.lv-error{border-left-color:var(--red);background:var(--red-dim)}
+.log-line.lv-warn{border-left-color:var(--orange);background:var(--orange-dim)}
+.log-time{color:var(--text-ter);white-space:nowrap;flex:none}
+.log-lv{flex:none;width:48px;font-weight:700;letter-spacing:.06em;font-size:11px}
+.lv-info{color:var(--ok)}.lv-warn{color:var(--orange)}.lv-error{color:var(--red)}.lv-debug{color:var(--text-ter)}
+.log-msg{white-space:pre-wrap;word-break:break-all}
+.log-attrs{padding:0 12px 2px 72px;color:var(--text-ter);font-size:12px}
+.log-attrs b{color:var(--accent);font-weight:600}
+.log-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:12px 0 10px}
+/* ---------- 调用日志 ---------- */
+.log-tabs{display:flex;gap:4px;background:var(--surface-2);border-radius:10px;padding:4px;margin:0 0 12px;width:fit-content}
+.log-tabs button{background:none;border:none;color:var(--text-sec);font-size:13px;font-weight:600;padding:6px 16px;border-radius:8px;cursor:pointer}
+.log-tabs button.active{background:var(--surface);color:var(--text);box-shadow:0 1px 6px rgba(0,0,0,.25)}
+.cl-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:12px 14px}
+.cl-summary{display:flex;flex-wrap:wrap;gap:16px;font-size:13px;align-items:center}
+.cl-summary b{font-weight:700}
+.cl-summary .c-ok{color:var(--ok)}.cl-summary .c-fail{color:var(--red)}.cl-summary .c-issue{color:var(--orange)}
+.cl-filter{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+.cl-filter input[type=text],.cl-filter select{padding:5px 9px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text);font-size:13px}
+.cl-list{display:flex;flex-direction:column;gap:8px;margin-top:12px;max-height:520px;overflow-y:auto;padding-right:2px}
+/* 细滚动条：.log-wrap / .cl-list / .tbody-scroll 共用一组规则 */
+.log-wrap::-webkit-scrollbar,
+.cl-list::-webkit-scrollbar,
+.tbody-scroll::-webkit-scrollbar{width:5px}
+.log-wrap::-webkit-scrollbar-track,
+.cl-list::-webkit-scrollbar-track,
+.tbody-scroll::-webkit-scrollbar-track{background:transparent}
+.log-wrap::-webkit-scrollbar-thumb,
+.cl-list::-webkit-scrollbar-thumb,
+.tbody-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:99px}
+.log-wrap::-webkit-scrollbar-thumb:hover,
+.cl-list::-webkit-scrollbar-thumb:hover,
+.tbody-scroll::-webkit-scrollbar-thumb:hover{background:var(--text-ter)}
+.cl-item{border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:hidden}
+.cl-item.issue{border-color:var(--orange)}
+.cl-head{display:flex;align-items:center;gap:10px;padding:8px 12px;width:100%;background:none;border:none;color:inherit;font-size:13px;text-align:left;cursor:default}
+.cl-item.issue .cl-head{cursor:pointer}
+.cl-head:hover{background:color-mix(in srgb,var(--surface-2) 55%,transparent)}
+.cl-badge{flex:none;font-size:11px;font-weight:700;border-radius:6px;padding:1px 8px;letter-spacing:.04em}
+.cl-badge.ok{background:var(--ok-dim);color:var(--ok)}
+.cl-badge.fail{background:var(--red-dim);color:var(--red)}
+.cl-issue-tag{flex:none;font-size:11px;font-weight:600;border-radius:6px;padding:1px 8px;background:var(--orange-dim);color:var(--orange)}
+.cl-time{flex:none;color:var(--text-ter);font-size:12px}
+.cl-model{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cl-nodes{flex:1;color:var(--text-ter);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+.cl-dur{flex:none;color:var(--text-ter);font-size:12px;font-variant-numeric:tabular-nums}
+.cl-body{border-top:1px solid var(--line);padding:10px 12px;background:color-mix(in srgb,var(--surface-2) 45%,transparent);font-size:12px}
+.cl-meta{color:var(--text-sec);font-family:var(--mono);word-break:break-all;margin-bottom:6px;line-height:1.6}
+.cl-meta .err{color:var(--red)}
+.cl-events{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.cl-ev{display:flex;gap:8px;align-items:flex-start}
+.cl-ev-time{flex:none;width:130px;color:var(--text-ter);font-variant-numeric:tabular-nums;white-space:nowrap}
+.cl-ev-tag{flex:none;width:110px;text-align:center;font-size:11px;font-weight:600;border-radius:6px;padding:1px 6px;background:var(--surface-2);color:var(--text-sec)}
+.cl-ev-tag.switch{background:var(--orange-dim);color:var(--orange)}
+.cl-ev-tag.connect_ok,.cl-ev-tag.complete{background:var(--ok-dim);color:var(--ok)}
+.cl-ev-tag.all_failed,.cl-ev-tag.connect_error,.cl-ev-tag.stream_error,.cl-ev-tag.upstream_error,.cl-ev-tag.stream_interrupt,.cl-ev-tag.ttft_timeout,.cl-ev-tag.silence_timeout{background:var(--red-dim);color:var(--red)}
+.cl-ev-node{font-weight:700;color:var(--text)}
+.cl-ev-detail{color:var(--text-sec);word-break:break-all}
+.cl-chart{display:flex;align-items:flex-end;gap:3px;height:120px;margin:14px 0 6px}
+.cl-chart .bar{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;position:relative}
+.cl-chart .bar .fill{width:100%;border-radius:3px 3px 0 0;background:var(--ok)}
+.cl-chart .bar .fill.issue{background:var(--orange)}
+.cl-chart .bar .tip{position:absolute;bottom:calc(100% + 4px);display:none;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:3px 7px;font-size:11px;white-space:nowrap;z-index:5}
+.cl-chart .bar:hover .tip{display:block}
+.cl-tbl{width:100%;border-collapse:collapse;font-size:13px}
+.cl-tbl th{text-align:left;font-size:12px;color:var(--text-ter);font-weight:600;padding:6px 10px;border-bottom:1px solid var(--border)}
+.cl-tbl td{padding:6px 10px;border-bottom:1px solid var(--line);color:var(--text-sec)}
+.cl-tbl td.num,.cl-tbl th.num{text-align:right;font-variant-numeric:tabular-nums}
+.cl-tbl .ratebar{display:inline-block;height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden;vertical-align:middle;margin-left:8px;width:70px}
+.cl-tbl .ratebar i{display:block;height:100%;background:var(--ok)}
+.cl-tbl .ratebar i.warn{background:var(--orange)}
+.cl-tbl .ratebar i.bad{background:var(--red)}
+.cl-empty{text-align:center;color:var(--text-ter);padding:34px 0;font-size:13px}
+
+/* ---------- 响应式 ---------- */
+@media(max-width:960px){
+  .topnav{display:none}
+  .appbar-actions .conn,.appbar-actions .theme-btn-ic,.appbar-actions form{display:none}
+  .burger{display:inline-flex}
+  .appbar-in{gap:12px}
+  .main{padding:20px 16px 60px}
+  .stats-row{grid-template-columns:repeat(2,1fr)}
+  .nedit{grid-template-columns:1fr 1fr 90px 64px}
+  .nedit select{grid-column:1/-1}
+  .filter-bar{gap:12px}
+  /* task-24：趋势卡头部那一行是 inline-flex + nowrap（见下面 .card[data-od-id="trends"]），
+     窄屏时「tab 组的最小内容宽度 + .filter-bar 的宽度」> 可用宽度 ⇒ .filter-bar 被挤到
+     x=334..443，整页横向溢出（390px 实测 scrollWidth 443 > 390）。让它换行即可 ——
+     select 不隐藏、不缩小，只是不再强行挤在同一行。≥960px 完全不受影响。 */
+  .card[data-od-id="trends"]>div:first-child{flex-wrap:wrap}
+  .card[data-od-id="trends"]>div:first-child>div:first-child{flex-wrap:wrap}
+  .card{padding:16px}
+  .card h2{margin:0 0 10px;padding-bottom:9px}
+}
+@media(max-width:560px){
+  .stats-row{grid-template-columns:1fr}
+}
+/* 尊重系统减弱动态偏好：去掉非必要脉冲与转场动画 */
+@media (prefers-reduced-motion:reduce){
+  .conn .pulse::after{animation:none}
+  .page.active{animation:none}
+}
+
+/* ---------- ECharts Token 统计 ---------- */
+.chart-box{width:100%;height:210px}
+.chart-box-lg{width:100%;height:280px}
+.time-chips{display:flex;gap:6px}
+.time-chips .chip{padding:3px 10px;border-radius:99px;font-size:11px;border:1px solid var(--border);background:transparent;color:var(--text-sec);cursor:pointer;transition:all .15s}
+.time-chips .chip.active{background:var(--accent-dim);color:var(--accent);border-color:var(--accent)}
+.time-chips .chip:hover{border-color:var(--accent)}
+.chart-settings-btn{background:transparent;border:1px solid var(--border);border-radius:8px;padding:4px 8px;cursor:pointer;color:var(--text-ter);font-size:13px;transition:all .15s}
+.chart-settings-btn:hover{border-color:var(--accent);color:var(--accent)}
+.chart-settings-panel{background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px;display:none}
+.chart-settings-panel.open{display:block}
+.chart-settings-panel label{display:flex;align-items:center;gap:6px;margin-bottom:4px;cursor:pointer;font-size:12px;color:var(--text-sec)}
+.chart-settings-panel label input{accent-color:var(--accent)}
+.req-table .usage{display:flex;align-items:center;gap:8px}
+.req-table .usage-bar{flex:1;height:6px;background:rgba(148,163,184,.12);border-radius:99px;overflow:hidden;max-width:80px}
+.req-table .usage-bar i{display:block;height:100%;background:var(--accent);border-radius:99px}
+/* gap/margin/padding/分隔线 取自 test 版；flex-wrap 保留在基础规则，
+   因为 main 没有 test 那条把它移进去的 @media(max-width:960px) */
+.filter-bar{display:flex;gap:20px;flex-wrap:wrap;align-items:center;margin-bottom:20px;padding-bottom:18px;border-bottom:1px solid var(--border)}
+/* task-24：触控目标下限。这两个 select（.filter-bar 只用在趋势卡头部）原本高 28px，
+   手机上低于 ~32px 的可点高度；抬到 32px，不隐藏、不缩字。桌面同样只是高度 +4px，
+   仍在同一行（1440 实测两个 select 的 y 差 = 0）。 */
+.filter-bar select{min-height:32px}
+.input-sm{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);font-size:12px;padding:5px 9px;outline:none;cursor:pointer}
+.input-sm:hover{border-color:var(--border-strong)}
+.input-sm:focus{border-color:var(--accent)}
+</style>
+</head>
+<body>
+
+<!-- ============ 登录视图 ============ -->
+<div id="view-app" class="app">
+<header class="appbar">
+  <div class="appbar-in">
+    <div class="brand">
+      <div class="logo-mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 20l6-8h4l-6 8z"/><path d="M4 20h4"/><path d="M12 10V4a2 2 0 00-2-2H4a2 2 0 00-2 2v9"/></svg></div>
+      <div class="txt"><div class="logo-text">opencode<span class="logo-accent">2api</span></div><div class="logo-sub">ADMIN · LOCAL PROXY</div></div>
+    </div>
+  <nav class="topnav" id="nav">
+      <button data-page="overview" class="active" onclick="showPage('overview')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg><span>概览</span></button>
+      <button data-page="nodes" onclick="showPage('nodes')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="15" cy="15" r="1.2" fill="currentColor"/><path d="M9 15l6-6"/></svg><span>节点池</span></button>
+      <button data-page="subs" onclick="showPage('subs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10l3-3h3v14H4z"/><path d="M4 8v11a1 1 0 001 1h15"/></svg><span>订阅与配额</span></button>
+      <button data-page="misc" onclick="showPage('misc')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="15" cy="6" r="2.4" fill="var(--surface)"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="18" r="2.4" fill="var(--surface)"/></svg><span>代理与模型</span></button>
+      <button data-page="logs" onclick="showPage('logs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg><span>运行日志</span></button>
+  </nav>
+  <div class="appbar-actions">
+      <div class="sidebar-foot">
+        <div class="mini mono" id="sideAddr">-</div>
+        <div class="conn" id="connState"><span class="pulse"></span><span class="ctxt">连接中…</span><span class="cshort">演示</span></div>
+        <button class="btn btn-ghost btn-block theme-btn-ic" type="button" onclick="toggleTheme()" style="justify-content:center" aria-label="切换主题"><span class="txt">主题切换</span><svg class="ic-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z"/></svg><svg class="ic-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg></button>
+    <button class="burger" type="button" onclick="toggleNavSheet()" aria-label="打开菜单" aria-expanded="false">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+    </button>
+  </div>
+  </div>
+  <div class="navsheet" id="navsheet">
+      <button data-page="overview" class="active" onclick="showPage('overview')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg><span>概览</span></button>
+      <button data-page="nodes" onclick="showPage('nodes')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="15" cy="15" r="1.2" fill="currentColor"/><path d="M9 15l6-6"/></svg><span>节点池</span></button>
+      <button data-page="subs" onclick="showPage('subs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h10l3-3h3v14H4z"/><path d="M4 8v11a1 1 0 001 1h15"/></svg><span>订阅与配额</span></button>
+      <button data-page="misc" onclick="showPage('misc')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><circle cx="15" cy="6" r="2.4" fill="var(--surface)"/><line x1="4" y1="18" x2="20" y2="18"/><circle cx="9" cy="18" r="2.4" fill="var(--surface)"/></svg><span>代理与模型</span></button>
+      <button data-page="logs" onclick="showPage('logs')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4z"/><line x1="8" y1="9" x2="16" y2="9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg><span>运行日志</span></button>
+  </div>
+</header>
+
+<main class="main">
+  <div class="topbar">
+    <h1 id="pageTitle">概览<span class="crumb" id="pageCrumb">OPENCODE TO API</span></h1>
+    <button class="btn btn-ghost btn-sm" onclick="reloadConfig()"><span class="lbl">刷新会话 &amp; 模型</span></button>
+    <button class="btn btn-primary btn-sm" onclick="loadAll()"><span class="lbl">刷新数据</span></button>
+    <select id="autoRefreshSel" class="input-sm" style="width:auto" onchange="setAutoRefresh(parseInt(this.value,10)||0)" title="自动刷新概览统计的间隔；离开概览页自动暂停">
+      <option value="0">⟳ 关闭</option>
+      <option value="10000">⟳ 10s</option>
+      <option value="30000">⟳ 30s</option>
+      <option value="60000">⟳ 1m</option>
+    </select>
+  </div>
+
+  <!-- C-5 节点层告警横幅（task-19：全局可见）。默认隐藏，/api/nodes 的
+       node_alert.active=true 时加 .on 显示。放在 .main 内、所有 <section class="page">
+       【之外】（顶栏之下、页面内容之上）：横幅讲的是「整个节点出口层」的可用性，
+       与用户当前停在哪一页无关。原先嵌在 #page-nodes 里，停在默认首页「概览」的运维
+       完全看不到它 —— 那正是 2026-10-19 八小时事故"后端已告警、面板看着正常"的形态。
+       位置与 renderNodeAlert() 无关：它按全局 id 取元素（q('#nodeAlert')）。
+       .node-alert 保持 display:none / .on 时 display:flex ⇒ 无告警时不占布局高度。 -->
+  <div class="node-alert" id="nodeAlert" role="alert">
+    <span class="na-ico">!</span>
+    <div class="na-body">
+      <div class="na-title" id="naTitle">节点层告警</div>
+      <div id="naReason"></div>
+      <div class="na-meta" id="naMeta"></div>
+    </div>
+  </div>
+
+  <!-- ============ 概览 ============ -->
+  <section id="page-overview" class="page active" data-od-id="overview">
+    <div class="stats-row">
+      <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="6" y="6" width="12" height="12" rx="2"/><circle cx="9" cy="9" r="1.2" fill="currentColor"/><circle cx="15" cy="15" r="1.2" fill="currentColor"/></svg>节点总数</div><div class="v blue" id="ovTotal">-</div><div class="sub" id="ovActive">当前: -</div></div>
+      <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12H4"/><path d="M4 12l5-5M4 12l5 5"/></svg>可用</div><div class="v green" id="ovHealthy">-</div><div class="sub" id="ovManual">当前节点指纹</div></div>
+      <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 3"/></svg>配额冷却</div><div class="v orange" id="ovExhausted">-</div><div class="sub">1h 自动恢复</div></div>
+      <div class="stat"><div class="k"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/></svg>故障</div><div class="v red" id="ovDead">-</div><div class="sub">60s 后自动重试</div></div>
+    </div>
+    <!-- 顶部 Token 用量：cc-switch UsageHero 版式（真实消耗大数字 + 五格明细）。
+         取数统一来自 GET /api/stats?range=<当前时间窗>，与下方两张表、甜甜圈、
+         趋势图共用同一份响应——五格因此同时跟随「时间窗」和「模型筛选」。 -->
+    <div class="card hero-usage-card" style="padding:16px;margin-bottom:14px">
+      <div class="uh-head">
+        <div class="uh-lead">
+          <span class="uh-glyph" aria-hidden="true"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></span>
+          <div>
+            <div class="uh-label">真实消耗 Tokens</div>
+            <div class="uh-value-line"><span class="uh-value" id="tcTotalToken" title="">—</span><span class="uh-badge" id="tcTotalTokenShort">≈ —</span></div>
+          </div>
+        </div>
+        <div class="uh-req">
+          <span class="uh-req-k">总请求数</span>
+          <span class="uh-req-v"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg><span id="tcTotalReq">—</span></span>
+        </div>
+      </div>
+      <!-- 五格顺序（cc-switch：命中率在最后一格）：新增输入 → Output → 命中 → 吞吐 tps → 缓存命中率 -->
+      <div class="uh-grid">
+        <div class="uh-cell"><div class="uh-cell-l uh-blue"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg><span>新增输入</span></div><div class="uh-cell-v"><span class="v-mini"><span class="full" id="gIn">—</span><span class="abbr">—</span></span></div></div>
+        <div class="uh-cell"><div class="uh-cell-l uh-purple"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg><span>Output</span></div><div class="uh-cell-v"><span class="v-mini"><span class="full" id="gOut">—</span><span class="abbr">—</span></span></div></div>
+        <div class="uh-cell"><div class="uh-cell-l uh-green"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M20 12c0 1.66-3.58 3-8 3s-8-1.34-8-3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/></svg><span>命中</span></div><div class="uh-cell-v"><span class="v-mini"><span class="full" id="gCR">—</span><span class="abbr">—</span></span></div></div>
+        <div class="uh-cell" id="tcTpsSamples" title=""><div class="uh-cell-l uh-amber"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 6.2H21l-5.3 4 2 6.3-5.7-4.1-5.7 4.1 2-6.3-5.3-4h6.6z"/></svg><span>吞吐 tps</span></div><div class="uh-cell-v" id="tcAvgTps">—</div></div>
+        <div class="uh-cell uh-hit"><div class="uh-hit-top"><span class="uh-cell-l uh-green">缓存命中率</span><span class="uh-hit-v" id="tcCacheRate">—</span></div><div class="uh-hit-bar"><i id="tcCacheBar" style="width:0"></i></div></div>
+      </div>
+    </div>
+
+    <!-- 趋势图（Token 用量 / 请求次数 tab 切换） -->
+    <div class="card" data-od-id="trends" style="padding:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="display:flex;gap:4px;background:var(--surface-2);border-radius:8px;padding:2px"><button class="btn btn-sm" style="background:var(--accent-dim);color:var(--accent);border:none;border-radius:6px" onclick="switchTrendTab('token',this)" id="trendTabToken">📈 Token 用量</button><button class="btn btn-sm btn-ghost" onclick="switchTrendTab('req',this)" id="trendTabReq">📊 请求次数</button></div>
+          <button class="chart-settings-btn" onclick="toggleChartSettings()" title="图表设置">⚙️</button>
+        </div>
+        <div class="filter-bar">
+          <select id="trendRangeSel" class="input-sm" onchange="setTrendRange(this.value)">
+            <option value="today">最近 24 小时</option>
+            <option value="7d">最近 7 天</option>
+            <option value="30d" selected>最近 30 天</option>
+            <option value="180d">最近半年</option>
+          </select>
+          <select id="trendModelSel" class="input-sm" onchange="setTrendModel(this.value)">
+            <option value="all">全部模型</option>
+          </select>
+        </div>
+      </div>
+      <div class="chart-settings-panel" id="chartSettingsPanel">
+        <label><input type="checkbox" checked onchange="toggleChart('heatmap',this.checked)"> 📅 请求热力图</label>
+        <label><input type="checkbox" checked onchange="toggleChart('donut',this.checked)"> 🍩 模型分布</label>
+        <label><input type="checkbox" checked onchange="toggleChart('reqTable',this.checked)"> 📋 请求量表</label>
+        <label><input type="checkbox" checked onchange="toggleChart('statsTable',this.checked)"> 📊 模型明细表</label>
+      </div>
+      <div id="trendChart" class="chart-box-lg"></div>
+      <div id="reqTrendChart" class="chart-box-lg" style="display:none"></div>
+    </div>
+
+    <!-- 热力图 + 甜甜圈 -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px">
+      <div id="chartHeatmap" class="card" style="margin:0;padding:16px"><div style="font-size:13px;font-weight:600;margin-bottom:10px">📅 请求热力图 (近半年)</div><div id="heatmapChart" class="chart-box"></div></div>
+      <div id="chartDonut" class="card" style="margin:0;padding:16px"><div style="font-size:13px;font-weight:600;margin-bottom:10px">🍩 模型请求分布</div><div id="donutChart" class="chart-box"></div></div>
+    </div>
+
+    <!-- 请求量表 + 模型明细表 -->
+    <div id="chartReqTable" class="card" style="overflow-x:auto;margin-bottom:14px;padding:16px">
+      <div style="font-size:13px;font-weight:600;margin-bottom:10px">📋 请求量</div>
+      <table class="tbl req-table" id="reqTable"><colgroup><col style="width:40%"><col style="width:25%"><col style="width:35%"></colgroup><thead><tr><th>模型</th><th class="num">请求数</th><th class="num">占比</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div id="chartStatsTable" class="card" style="overflow-x:auto;margin-bottom:14px;padding:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:13px;font-weight:600">📊 模型明细</div>
+        <div><button class="btn btn-ghost btn-sm" onclick="loadStats()">刷新</button><button class="btn btn-danger btn-sm" onclick="resetStats()">清空</button><span id="resetStatus" class="muted" style="font-size:11px"></span></div>
+      </div>
+      <table class="tbl" id="statsTable"><colgroup><col style="width:22%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:14%"><col style="width:11%"><col style="width:11%"></colgroup><thead><tr><th>模型</th><th class="num">输入</th><th class="num">输出</th><th class="num">缓存读</th><th class="num">总计</th><th class="num">TTFT</th><th class="num">吞吐</th></tr></thead><tbody><tr><td colspan="7" class="empty-hint">点击"刷新"加载数据</td></tr></tbody></table>
+    </div>
+
+    <!-- 快速接入 -->
+    <div class="card" data-od-id="gateway">
+      <h2>快速接入</h2>
+      <p class="hint">客户端 base_url 与 API key 统一从这里复制，自动取当前访问域名 / 端口。</p>
+      <div class="gw-grid">
+        <div class="gw-box">
+          <div class="gw-label">统一 API 地址</div>
+          <button class="gw-copy" onclick="copyText(gwBase(),'统一 API 地址')" title="点击复制"><code id="gwAddress"></code><span class="glyph"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>复制</span></button>
+          <div style="font-size:11px;color:var(--text-ter);margin-top:4px">客户端 base_url 填此地址</div>
+        </div>
+        <div class="gw-box">
+          <div class="gw-label">统一密钥</div>
+          <button class="gw-copy" onclick="copyText(document.getElementById('apiKeyShow').dataset.v||'','统一密钥')" title="点击复制"><code id="apiKeyShow"></code><span class="glyph"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>复制</span></button>
+          <div style="font-size:11px;color:var(--text-ter);margin-top:4px">留空 = 不启用（无 key 访问仍可用）</div>
+        </div>
+      </div>
+    </div>
+    <div class="card" data-od-id="model-caps">
+      <h2>模型能力</h2>
+      <div style="overflow-x:auto"><table class="tbl" id="capTable"><thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody><tr><td colspan="4" class="empty-hint">加载中…</td></tr></tbody></table></div>
+    </div>
+  </section>
+
+  <!-- ============ 节点池 ============ -->
+  <section id="page-nodes" class="page" data-od-id="nodes">
+    <div class="filter-chips" id="stateChips">
+      <button class="chip active" data-f="all" onclick="setFilter('all')">全部 <span class="cnt" id="cntAll"></span></button>
+      <button class="chip" data-f="available" onclick="setFilter('available')">可用 <span class="cnt" id="cntAvail"></span></button>
+      <button class="chip" data-f="exhausted" onclick="setFilter('exhausted')">已耗尽 <span class="cnt" id="cntExh"></span></button>
+      <button class="chip" data-f="dead" onclick="setFilter('dead')">故障 <span class="cnt" id="cntDead"></span></button>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="reloadSubs()">重新加载订阅</button>
+      <button class="btn btn-ghost" onclick="resetAllMarks()">解除全部标记</button>
+      <button class="btn btn-ghost" onclick="probeAll()">测速</button>
+      <button class="btn btn-ghost" onclick="loadNodes()">刷新节点</button>
+      <span id="nodeStatus" class="muted" style="font-size:11px"></span>
+    </div>
+    <div class="latdist" id="latdist"></div>
+    <div class="card" style="padding:14px 0 6px">
+      <div style="overflow-x:auto"><table class="tbl" id="nodeTable">
+        <thead><tr><th style="width:20%">名称</th><th style="width:9%">协议</th><th style="width:9%">状态</th><th class="num" style="width:9%">延迟</th><th style="width:16%">冷却至</th><th style="width:27%">最近错误</th><th style="width:10%"></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <!-- ============ 订阅与配额 ============ -->
+  <section id="page-subs" class="page" data-od-id="subs">
+    <div class="card">
+      <h2>订阅源</h2>
+      <p class="hint">Clash YAML / 行式 URI / base64 包裹。修改后点底部「保存订阅与节点」立即生效。</p>
+      <div style="overflow-x:auto"><table class="tbl" id="subTable">
+        <thead><tr><th style="width:13%">名称</th><th style="width:26%">URL</th><th style="width:8%">间隔(小时)</th><th class="num" style="width:7%">节点数</th><th style="width:18%">流量</th><th style="width:14%">上次拉取</th><th style="width:9%"></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addSub()">添加订阅源</button></div>
+    </div>
+    <div class="card">
+      <h2>Webshare 代理池</h2>
+      <p class="hint">填 webshare.io API key，自动从代理列表 API 拉取 SOCKS5 代理并入节点池（失效代理自动排除，健康检查由节点池统一负责）。本机访问 webshare 网络不佳时可在「代理」列填中转（http/https/socks5，如 http://127.0.0.1:7890），留空则用环境变量 HTTP(S)_PROXY。</p>
+      <div style="overflow-x:auto"><table class="tbl" id="webshareTable">
+        <thead><tr><th style="width:11%">名称</th><th style="width:22%">API Key</th><th style="width:18%">代理 (拉取 API 用)</th><th style="width:9%">间隔(小时)</th><th class="num" style="width:6%">节点数</th><th style="width:12%">上次拉取</th><th style="width:15%">最近错误</th><th style="width:7%"></th></tr></thead>
+        <tbody></tbody>
+      </table></div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addWebshare()">添加 Webshare 源</button></div>
+    </div>
+    <div class="card">
+      <h2>手动配置节点</h2>
+      <p class="hint">与订阅合并进节点池（订阅节点优先按指纹去重）。</p>
+      <div id="manualEditors"></div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addNodeEditor()">添加节点</button></div>
+    </div>
+    <div class="card">
+      <h2>免费额度切换</h2>
+      <p class="hint">免费层请求遇到配额耗尽信号时自动标记当前节点并切换下一个节点重试。</p>
+      <div class="form-grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+        <div class="field"><label>error.type 命中（逗号分隔）</label><input id="q_error_types" placeholder="FreeUsageLimitError, insufficient_quota"></div>
+        <div class="field"><label>error.message 关键词（逗号分隔）</label><input id="q_message_kw" placeholder="free usage limit, quota, limit exceeded"></div>
+        <div class="field"><label>单请求最大切换次数</label><input id="q_max_switches" type="number" min="0" max="20" value="5"></div>
+        <div class="field"><label>耗尽冷却（小时）</label><input id="q_cooldown_h" type="number" min="0" max="168" value="1"></div>
+        <div class="field"><label>故障复探间隔（分钟）</label><input id="q_cooldown_m" type="number" min="0" max="1440" value="1"></div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px">
+        <div class="field"><label>健康检查间隔（分钟，0=默认15）</label><input id="q_health_interval" type="number" min="1" max="1440" value="15"></div>
+        <div class="field"><label>健康检查探针 URL</label><input id="q_health_url" placeholder="https://opencode.ai/zen/v1/models"></div>
+      </div>
+      <div class="muted" style="font-size:11.5px;margin-top:8px">403 且无上述签名视为耗尽；429 无签名不视为耗尽。耗尽冷却到期自动恢复（标记清除）；故障节点每分钟复探，探测成功即恢复。</div>
+    </div>
+    <div class="actions" style="margin-top:4px">
+      <button class="btn btn-primary" onclick="saveSubsConfig()">保存订阅与节点</button>
+      <button class="btn btn-secondary" onclick="saveQuotaConfig()">保存配额设置</button>
+      <span id="subSaveStatus" class="muted" style="font-size:11px"></span>
+    </div>
+  </section>
+
+  <!-- ============ 代理与模型 ============ -->
+  <section id="page-misc" class="page" data-od-id="misc">
+    <div class="card">
+      <h2>推理力度映射</h2>
+      <div style="overflow-x:auto;margin-bottom:4px"><table class="tbl" id="effortTable"><thead><tr><th style="width:38%">请求值</th><th style="width:44%">映射值</th><th style="width:18%"></th></tr></thead><tbody></tbody></table></div>
+      <div class="check"><input type="checkbox" id="force_disable_thinking"><label for="force_disable_thinking">强制禁用思考模式</label><span class="muted" style="font-size:11px">移除所有推理内容</span></div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addEffortRow()">添加映射</button><button class="btn btn-primary" onclick="saveConfig()">保存全部</button></div>
+    </div>
+    <div class="card">
+      <h2>模型映射</h2>
+      <div style="overflow-x:auto"><table class="tbl" id="aliasTable"><thead><tr><th style="width:38%">别名（请求名）</th><th style="width:44%">实际模型（上游名）</th><th style="width:18%"></th></tr></thead><tbody></tbody></table></div>
+      <div style="font-size:12px;color:var(--text-sec);margin:8px 2px 0;line-height:1.6">以 <code style="font-family:var(--mono)">-free</code> 结尾的免费模型自动映射（请求名 → 上游名），跟随上游模型列表变动；点击「设置」可自定义显示名称，「禁用」可跳过已下线模型，「添加别名」可自定义映射并覆盖自动项。</div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addAliasRow()">添加别名</button><button class="btn btn-primary" onclick="saveConfig()">保存全部</button></div>
+    </div>
+    <div class="card">
+      <h2>SOCKS5 代理</h2>
+      <div style="overflow-x:auto;margin-bottom:12px"><table class="tbl" id="socks5Table"><thead><tr><th style="width:22%">名称</th><th style="width:26%">地址</th><th style="width:16%">用户名</th><th style="width:16%">密码</th><th style="width:12%"></th></tr></thead><tbody></tbody></table></div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+        <div class="field"><label>启用代理</label><select id="activeSocks5"><option value="">直连（不使用代理）</option></select></div>
+        <div class="field"><label>带 key / 付费请求直连</label><select id="socks5_paid_direct"><option value="0">走代理（默认）</option><option value="1">直连</option></select></div>
+      </div>
+      <div class="actions"><button class="btn btn-secondary" onclick="addSocks5Row()">添加代理</button><button class="btn btn-primary" onclick="saveConfig()">保存全部</button></div>
+    </div>
+    <div class="card">
+      <h2>统一网关</h2>
+      <div class="gw-grid">
+        <div class="gw-box">
+          <div class="gw-label">统一 API 地址</div>
+          <button class="gw-copy" onclick="copyText(gwBase(),'统一 API 地址')" title="点击复制"><code id="gwAddress2"></code><span class="glyph"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>复制</span></button>
+          <div class="muted" style="font-size:11px;margin-top:4px">客户端 base_url 填此地址（自动取当前访问域名/端口）</div>
+        </div>
+        <div class="gw-box">
+          <div class="gw-label">统一密钥</div>
+          <button class="gw-copy" onclick="copyText(document.getElementById('apiKeyShow2').dataset.v||'','统一密钥')" title="点击复制"><code id="apiKeyShow2"></code><span class="glyph"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>复制</span></button>
+          <div class="muted" style="font-size:11px;margin-top:4px">API key 填此值；留空 = 不启用（无 key 访问仍可用）</div>
+        </div>
+      </div>
+      <div class="field" style="margin-top:12px;max-width:520px"><label>修改 api_key（统一密钥）</label><div style="display:flex;gap:8px"><input id="apiKeyInput" type="password" placeholder="留空 = 不启用" autocomplete="off"><button class="btn btn-ghost" onclick="genApiKey()" title="随机生成一把 sk- 开头的密钥">生成</button></div><span class="hint">客户端/工具统一填这把 key 即可通过密钥校验；上游仍走 public 免费档</span></div>
+      <div class="actions"><button class="btn btn-primary" onclick="saveConfig()">保存全部</button></div>
+    </div>
+  </section>
+
+  <!-- ============ 运行日志 ============ -->
+  <section id="page-logs" class="page" data-od-id="logs">
+    <div class="card">
+      <h2>运行日志</h2>
+      <div class="log-tabs">
+        <button id="logTabRaw" class="active" onclick="showLogTab('raw')">原始日志</button>
+        <button id="logTabCall" onclick="showLogTab('call')">调用日志</button>
+      </div>
+      <div id="rawLogView">
+      <div class="filter-chips" id="logLevelChips" style="margin:0">
+        <button class="chip active" data-l="all" onclick="setLogLevelFilter('all')">全部</button>
+        <button class="chip" data-l="DEBUG" onclick="setLogLevelFilter('DEBUG')">Debug</button>
+        <button class="chip" data-l="INFO" onclick="setLogLevelFilter('INFO')">Info</button>
+        <button class="chip" data-l="WARN" onclick="setLogLevelFilter('WARN')">Warn</button>
+        <button class="chip" data-l="ERROR" onclick="setLogLevelFilter('ERROR')">Error</button>
+      </div>
+      <div class="log-toolbar" style="margin-top:0">
+        <input id="logKeyword" type="text" placeholder="关键词过滤（消息 / 字段值）" style="flex:1;min-width:180px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--text)" oninput="setLogKeyword(this.value)">
+        <button class="btn btn-ghost" onclick="exportLogs()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg><span class="lbl">导出日志</span></button>
+        <span id="logCount" class="muted" style="font-size:12.5px;margin-left:auto">缓冲 0 条 / 显示 0 条</span>
+      </div>
+      <div class="log-toolbar" style="margin-top:0">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px"><input type="checkbox" id="logAutoRefresh" checked onchange="toggleLogStream(this.checked)">自动刷新</label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px">运行级别
+          <select id="logRunLevel" onchange="setLogRunLevel(this.value)" style="padding:5px 8px;border-radius:7px;border:1px solid var(--border);background:var(--bg);color:var(--text)">
+            <option value="debug">debug</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option>
+          </select>
+        </label>
+      </div>
+      <div class="log-wrap" id="logList"></div>
+      <div style="display:flex;align-items:center;margin-top:8px">
+        <span id="logStatus" class="muted" style="font-size:12px">等待日志流…</span>
+        <button id="logScrollBtn" class="btn btn-ghost btn-sm" style="display:none;margin-left:auto" onclick="logScrollToBottom()">回到底部 ↓</button>
+      </div>
+      </div>
+      <div id="callLogView" style="display:none">
+        <div class="cl-card">
+          <div class="cl-summary">
+            <span>共 <b id="clTotal">0</b> 条</span>
+            <span class="c-ok">【成功】<b id="clOk">0</b></span>
+            <span class="c-fail">【失败】<b id="clFail">0</b></span>
+            <span class="c-ok">真实成功率 <b id="clRealRate">—</b></span>
+            <span class="c-issue">异常/切换 <b id="clIssue">0</b></span>
+            <span style="margin-left:auto;display:flex;gap:8px">
+              <button class="btn btn-ghost btn-sm" onclick="clearCallLog()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg> 清空</button>
+              <button class="btn btn-sm" onclick="loadCallLog(true)">刷新</button>
+            </span>
+          </div>
+          <div class="cl-filter">
+            <input id="clKeyword" type="text" placeholder="关键词（模型 / 路径 / 错误 / 请求ID）" oninput="clRefreshView()">
+            <select id="clDate" onchange="clRefreshView()"><option value="">全部日期</option></select>
+            <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer"><input type="checkbox" id="clOnlyIssues" onchange="clRefreshView()">只看失败/切换</label>
+            <span style="margin-left:auto;display:flex;gap:4px;background:var(--surface-2);border-radius:8px;padding:3px">
+              <button class="btn btn-sm" id="clViewList" onclick="clSetView('list')">列表</button>
+              <button class="btn btn-ghost btn-sm" id="clViewHour" onclick="clSetView('hour')">时段分析</button>
+              <button class="btn btn-ghost btn-sm" id="clViewNode" onclick="clSetView('node')">节点分析</button>
+            </span>
+          </div>
+          <div id="clList"></div>
+          <div id="clHour" style="display:none"></div>
+          <div id="clNode" style="display:none"></div>
+          <div style="display:flex;gap:6px;color:var(--text-ter);font-size:12px;margin-top:10px">
+            <span>每 5 秒自动刷新</span><span id="clStatus" style="margin-left:auto"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+/* ============================================================
+   核心状态与工具
+   ============================================================ */
+const q=s=>document.querySelector(s);
+const qa=s=>document.querySelectorAll(s);
+let cfg={},nodeData=[],subData=[],wsData=[],wsInfo={},nodeEditors=[],modelList=[],freeModelIDs=[],filter='all';
+let DEMO_MODE=false,demoLogTimer=null;
+let trendsData=[],trendRange='30d',trendTimer=null,heatmapData=[];
+/* 按模型分组的趋势原始数据。trends_by_model 现在随 /api/stats?range= 一起回来，
+   所以 TREND_BY_MODEL 由 loadStats 写入、loadTrends 消费，不再单独发请求。 */
+let TREND_BY_MODEL=[],trendModel='all';
+// statsSeq：/api/stats?range= 的竞态序号，发请求前自增，try 与 catch 两处都判。
+// statsRateSeq：盖在当前已渲染 stats 上的快照序号，供 updateCacheRate 做独立守卫
+// （它可能被非 loadStats 路径调用，必须能识别并丢弃「不是当前窗口」的数据）。
+let statsSeq=0,statsRateSeq=-1;
+// 主题切换要重绘四张图，但重绘需要数据，而这些数据分散在各自函数的局部变量里：
+// renderStats() 的 ms 是函数内 const（模块作用域取不到），只能在这里缓存一份引用。
+// statModels=null 表示 /api/stats 还没成功拿到 models；chartsReady=false 表示
+// 首屏图表尚未创建（applyTheme() 在启动时也会被调一次，那次必须跳过重绘）。
+let statModels=null,chartsReady=false;
+
+/* ---------- 主题：默认深色 ---------- */
+function applyTheme(){
+  document.documentElement.setAttribute('data-theme',localStorage.getItem('theme')||'dark');
+  redrawCharts();
+}
+// 主题切换后必须重绘：ECharts 在 setOption 时通过 getCSS() 把 CSS 变量的色值读一次
+// 就固化进实例里，data-theme 变了图不会自己跟着变。
+// 守卫：启动路径上 applyTheme() 在 DOMContentLoaded 监听器注册之前就被调用了一次，
+// 那时 chartsReady 仍是 false，这里直接返回——既不会碰还没初始化的模块级 const，
+// 也不会在没有任何实例的空态上白画一遍。
+function redrawCharts(){
+  if(!chartsReady)return;
+  // 容器被图表设置面板隐藏时 clientWidth 为 0，此时 echarts.init() 会落成 100×100
+  // 的默认画布；等它重新显示，ECharts 不会自动 resize，图就缩成左上角一小坨。
+  // 所以 0 宽容器一律跳过，由 toggleChart 的 show 分支在重新显示时补画。
+  const vis=el=>el&&el.clientWidth>0;
+  // #reqTrendChart 默认 display:none，只重画当前 tab 可见的那张（同 renderTrends 的写法）。
+  // 全部走静默路径：切主题要的是「颜色立刻换成另一套」，不是让四张图再从头长一遍。
+  if(vis(q('#trendChart')))initTrend(currentTrendDays,true);
+  if(vis(q('#reqTrendChart')))initReqTrend(currentTrendDays,true);
+  if(vis(q('#heatmapChart')))initHeatmap(true);
+  // statModels 为空说明 /api/stats 没成功：宁可不画，也别用空数据把现有甜甜圈刷成「暂无数据」。
+  if(statModels&&vis(q('#donutChart')))initDonut(statModels,true);
+}
+function toggleTheme(){
+  const cur=document.documentElement.getAttribute('data-theme');
+  localStorage.setItem('theme',cur==='dark'?'light':'dark');
+  applyTheme();
+}
+
+/* ---------- 自动刷新（概览页统计） ----------
+   只重跑 loadStats()，不碰节点状态——避免每次轮询都打一遍 /api/nodes。
+   离开概览页自动暂停：页面的统计是按时间窗算的，停在别的页时刷新它没有意义。
+   默认关闭：cc-switch 默认是 30s，这里不做自动刷新，除非用户显式选。 */
+let autoRefreshTimer=null,currentPage='overview';
+function setAutoRefresh(ms){
+  if(autoRefreshTimer){clearInterval(autoRefreshTimer);autoRefreshTimer=null}
+  const el=q('#autoRefreshSel');
+  // 非法值一律回落「关闭」：不要因为 localStorage 里被改坏的值而疯狂发请求
+  const ok=[0,10000,30000,60000].includes(ms)?ms:0;
+  if(el)el.value=String(ok);
+  localStorage.setItem('autoRefresh',String(ok));
+  applyAutoRefresh();
+}
+function applyAutoRefresh(){
+  if(autoRefreshTimer){clearInterval(autoRefreshTimer);autoRefreshTimer=null}
+  const ms=parseInt(localStorage.getItem('autoRefresh')||'0',10)||0;
+  if(ms>0&&currentPage==='overview')autoRefreshTimer=setInterval(()=>{loadStats({silent:true})},ms);
+}
+
+/* ---------- 导航 ---------- */
+const pageTitles={overview:['概览','OPENCODE TO API'],nodes:['节点池','节点健康与切换'],subs:['订阅与配额','订阅源 / 手动节点 / 免费额度'],misc:['代理与模型','推理 / 别名 / SOCKS5 / 网关'],logs:['运行日志','实时流式日志']};
+function showPage(id){
+  if(id!==currentPage){currentPage=id;applyAutoRefresh()}  // 离开/回到概览时暂停或恢复自动刷新
+  qa('.page').forEach(p=>p.classList.remove('active'));
+  q('#page-'+id).classList.add('active');
+  qa('.topnav button,.navsheet button').forEach(b=>b.classList.toggle('active',b.dataset.page===id));
+  closeNavSheet();
+  q('#pageTitle').firstChild.textContent=pageTitles[id][0]+' ';
+  q('#pageCrumb').textContent=pageTitles[id][1];
+  if(id==='logs'&&!DEMO_MODE)initLogs();
+}
+
+/* ---------- 工具 ---------- */
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
+function fmt(n){return Number(n||0).toString().replace(/\B(?=(\d{3})+(?!\d))/g,',')}
+function fmtFull(n){return Number(n||0).toLocaleString('en-US')}
+function toggleNavSheet(){const s=q('#navsheet'),b=q('.burger');const on=s.classList.toggle('open');b.setAttribute('aria-expanded',on?'true':'false')}
+function closeNavSheet(){const s=q('#navsheet'),b=q('.burger');if(!s)return;s.classList.remove('open');if(b)b.setAttribute('aria-expanded','false')}
+let toastT;
+function showToast(msg,t){const e=q('#toast');e.textContent=msg;e.className=t==='error'?'error show':'show';clearTimeout(toastT);toastT=setTimeout(()=>e.classList.remove('show'),2600)}
+function copyText(text,label){if(!text){showToast('暂无可复制内容','error');return}const done=()=>showToast('已复制'+label,'success');if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(text).then(done).catch(()=>fallbackCopy(text,done))}else{fallbackCopy(text,done)}}
+function fallbackCopy(text,done){const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();try{document.execCommand('copy');done()}catch{showToast('复制失败，请手动复制','error')}document.body.removeChild(ta)}
+function fmtBytes(b){b=Number(b)||0;if(b<=0)return '0B';const u=['B','KB','MB','GB','TB'];let i=0;while(b>=1024&&i<u.length-1){b/=1024;i++}return (b>=100?b.toFixed(0):b.toFixed(1))+u[i]}
+function fmtTokens(n){if(n==null||isNaN(n))return '-';if(n>=1000000)return (n/1000000).toFixed(n%1000000===0?0:1)+'M';if(n>=1000)return (n/1000).toFixed(n%1000===0?0:1)+'K';return ''+n}
+/* cc-switch formatTokensShort 的中文分支（format.ts:121）：>=1e8 亿 / >=1e4 万 / 否则千分位。
+   d 是小数位：Hero 的 ≈ 徽标用 2 位（cc-switch 传 compactDecimals=2），
+   小格用 1 位。 */
+function fmtTokensShort(n,d){
+  const v=Number(n)||0;
+  if(!(v>0))return '0';
+  if(v>=1e8)return (v/1e8).toFixed(2)+' 亿';
+  if(v>=1e4)return (v/1e4).toFixed(d)+' 万';
+  return v.toLocaleString();
+}
+/* 双 span 数字：.full 写完整数字（宽屏可见），同级的 .abbr 写缩写（窄屏可见）。
+   CSS 侧由 @media(max-width:760px) 二选一，两份文本始终同步刷新。 */
+function setDualNum(id,v){
+  const f=q('#'+id);if(!f)return;
+  f.textContent=fmtFull(v);
+  const box=f.parentElement;
+  const a=box?box.querySelector('.abbr'):null;
+  if(a)a.textContent=fmtTokensShort(v,1);
+}
+function fmtTime(t){return t?String(t).replace('T',' ').slice(0,16):'-'}
+function fmtModalities(list){if(!list||!list.length)return '-';const names={text:'文本',image:'图像',audio:'音频',video:'视频',pdf:'PDF'};return list.map(m=>names[m]||m).join(' / ')}
+function shortFp(fp){return fp?fp.slice(0,8):''}
+function latClass(ms){return ms<150?'':ms<400?'lat-warn':'lat-high'}
+/* ---------- 连接状态：三态，且只复用既有 DOM ----------
+   用户只要「数据正确」，不要新增横幅/角标/时间戳：失败要看得见，
+   但只能靠页面里本来就有的位置（侧栏这一处 + 表格自己的错误行 + 既有 toast）。
+   'online' 后端在且通 / 'demo' 这个 origin 根本不是后端（合法的演示场景）/
+   'error' 后端在、但它坏了 —— 旧判定把第三种也当成第二种，于是整块面板
+   被换成编造的夹具数据（清单里 N-5，数据正确性的头号事故）。 */
+const CONN_TEXT={online:{full:'已连接',short:'已连接',off:false},
+                 demo:{full:'演示数据 · 未连接后端',short:'演示',off:true},
+                 error:{full:'后端未连接',short:'未连接',off:true}};
+function setConn(state){
+  const s=CONN_TEXT[state]||CONN_TEXT.error;
+  const el=q('#connState');if(!el)return;
+  el.classList.toggle('offline',s.off);
+  const a=el.querySelector('.ctxt');if(a)a.textContent=s.full;
+  const b=el.querySelector('.cshort');if(b)b.textContent=s.short;
+  el.title=s.full;
+}
+/* X3：侧栏跟随【核心请求】（/api/stats、/api/nodes、/api/config）的最近一次结果。
+   ★ 只跟核心三发，不跟 call-log / models —— 那些挂了不代表面板数据不对，
+     拿它们去点侧栏正是我们正在修的那类「把局部故障说成全局故障」。
+   ★ 请求数不增加：coreOk 由已有请求的结算结果驱动，没有新增轮询。 */
+let backendState='online';
+const coreState={stats:true,nodes:true,config:true};
+function anyCoreBad(){return !coreState.stats||!coreState.nodes||!coreState.config}
+function applyConn(){
+  // 探测判 error 时【必须】直接转红：那一刻还没有任何核心请求发生过，
+  // coreState 全是初始 true，不特判的话侧栏会显示「已连接」——而我们刚刚
+  // 正是因为连不上才判的 error。（矩阵实测把这个缺陷抓出来了）
+  if(backendState==='demo'){setConn('demo');return}
+  setConn((backendState==='error'||anyCoreBad())?'error':'online')
+}
+/* ★ 必须【逐源】记账，不能用「最后一次请求的结局」：
+   否则 /api/nodes 失败后紧跟着 /api/stats 成功就把绿点刷回来 ——
+   那正是「局部故障被说成全局正常」。代价是「红的那个源没人重试时绿点回不来」，
+   所以自动刷新在红态下会【多打】/api/nodes 与 /api/config（健康态仍是 0 额外请求）。 */
+function noteCore(ok,src){coreState[src]=!!ok;applyConn()}
+/* N-7：陈旧标记。【只写 DOM 属性，不显示任何文字】——
+   「这份数据不是刚拿到的」这件事对人不可见（不显示时间戳、不做变化信号），
+   但对自动化可判定：body[data-stats-state] / body[data-heatmap-state]，
+   以及一个 body.stats-stale 类供纯 CSS 侧检查。 */
+function markSnapshot(ok){
+  document.body.dataset.statsState=ok?'fresh':'stale';
+  document.body.classList.toggle('stats-stale',!ok);
+  window.__statsFresh=!!ok;
+}
+function markHeatmap(ok){
+  document.body.dataset.heatmapState=ok?'fresh':'stale';
+  window.__heatmapFresh=!!ok;
+}
+/* X1 + X2 的公共原语：一次解决「无 r.ok ⇒ 把错误体当数据渲染」与
+   「无 AbortController ⇒ await 永不 settle」两条病根。
+   ★ 超时值分两类（实测依据见报告 §④）：探测 3s、数据 10s。 */
+const T_DATA=10000,T_PROBE=3000;
+async function fetchJSON(url,opts){
+  const o=opts||{},tmo=o.timeout||T_DATA;
+  const ac=new AbortController();
+  const tid=setTimeout(()=>ac.abort(),tmo);
+  try{
+    const r=await fetch(url,{headers:{'Accept':'application/json'},signal:ac.signal});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    if(o.core)noteCore(true,o.core);
+    return d;
+  }catch(e){
+    if(o.core)noteCore(false,o.core);
+    if(e&&e.name==='AbortError')e.timeout=true;   // 供调用方区分「超时」与「真失败」
+    throw e;
+  }finally{clearTimeout(tid)}                     // ★ 不 clear 会随页面存活线性堆积定时器
+}
+
+/* ============================================================
+   数据加载（真实后端 / 离线演示兜底）
+   ============================================================ */
+async function loadAll(){await Promise.all([loadConfig(),loadNodes(),loadStats(),loadCaps(),fetchModelList()]);renderConfigEditors()}
+async function loadConfig(){
+  if(DEMO_MODE){cfg=JSON.parse(JSON.stringify(DEMO.cfg));return}
+  try{
+    const c=await fetchJSON('/api/config',{core:'config'});
+    // 与 /api/stats 同款的形状守卫：200 + 合法 JSON 但不是 config（反代吐的错误体、
+    // 或某个别的端点的响应被缓存串了）时，cfg 会被写成一个无关对象，
+    // renderConfigEditors 随后渲染出一堆【看起来有值其实不是配置】的输入框。
+    if(!c||typeof c!=='object'||Array.isArray(c)||(!('log_level' in c)&&!('api_key' in c)&&!('subscriptions' in c)))
+      throw new Error('响应结构异常（不是 config）');
+    cfg=c;
+  }catch(e){noteCore(false,'config');showToast('配置加载失败: '+e.message,'error')}
+}
+async function loadNodes(){
+  if(DEMO_MODE){nodeData=DEMO.nodes.map(n=>({...n}));subData=DEMO.subscriptions.filter(s=>s.url!=='webshare API').map(s=>({...s}));wsData=DEMO.subscriptions.filter(s=>s.url==='webshare API').map(s=>({name:s.name,nodes:s.nodes,last_updated_at:s.last_updated_at}));renderOverview({nodes:nodeData,healthy:nodeData.filter(n=>n.state==='available').length,exhausted_count:nodeData.filter(n=>n.state==='exhausted').length,dead_count:nodeData.filter(n=>n.state==='dead').length,active_name:nodeData.find(n=>n.active)?.name||'',manual_name:''});renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable();return}
+  try{const d=await fetchJSON('/api/nodes',{core:'nodes'});nodeData=d.nodes||[];subData=(d.subscriptions||[]).filter(s=>s.url!=='webshare API');applyWsSnapshot(d.subscriptions||[]);renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable()}catch(e){
+    // 保留上一次渲染好的行：整表清空会把「拿不到」渲染成「这个网关一个节点都没有」。
+    const tb=q('#nodeTable tbody');
+    if(tb)tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="7" class="empty-hint">未更新：'+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>');
+  }
+}
+/* GET /api/stats?range=<当前时间窗> 一次返回 models 聚合 + trends_by_model，
+   所以顶部 Hero、两张表、甜甜圈、趋势图共用同一份响应——每次筛选只打这一发。
+   statsSeq 在发请求前自增，try 与 catch **两处**都判：过期响应既不能渲染成功态，
+   也不能覆盖失败态（否则先发后到的失败响应会把已渲染的新窗口擦成「加载失败」）。 */
+async function loadStats(opts){
+  // 静默标志按调用传，**绝不存模块级**：本函数是 async，自动刷新与手动刷新可能交错
+  // （自动刷新 await fetch 的间隙用户点了「刷新」），模块级标志会被后一次调用串掉，
+  // 于是自动刷新拿着 false 去画、又播一次入场动画。
+  const silent=!!(opts&&opts.silent);
+  const mySeq=++statsSeq;
+  // 热力图与本次筛选无关（恒为 180d），且它是独立请求、不受 statsSeq 保护，
+  // 所以照旧无条件触发；它也只负责热力图，不再碰命中率（见 updateCacheRate）。
+  //
+  // 提前到 stats 请求之前发出以与之并发：实测前端并发单独可得 1.25x，
+  // 配合后端单趟 1.38x 合计 2.25x。
+  // **不要**改成三路全并发——实测那比串行更慢（6.34s vs 5.98s），
+  // 4 核上三个全量解析并发会打满内存带宽与 GC。
+  const heatP=loadHeatmap(silent);
+  if(DEMO_MODE){window.__lastStatsSeq=mySeq;renderStats(DEMO.stats,silent);loadTrends(DEMO.stats.trends_by_model,mySeq,silent);await heatP;return}
+  try{
+    // X1：守卫必须落在 seq 守卫【之后】、renderStats 【之前】——放到 renderStats
+    // 之后毫无意义（值已经写进 DOM 了）。fetchJSON 内部已含 r.ok 与 10s 超时。
+    const d=await fetchJSON('/api/stats?range='+trendRange,{core:'stats'});
+    if(mySeq!==statsSeq)return;
+    // 形状守卫：200 + 合法 JSON 但不是 stats 响应（例如反代吐的 {"total_requests":0}）。
+    // 没有它，renderStats 会把「拿不到」渲染成 Hero=0 / 命中率=0%（N-1）。
+    if(!d||typeof d!=='object'||Array.isArray(d)||!d.models||typeof d.models!=='object')
+      throw new Error('响应结构异常（缺少 models）');
+    window.__lastStatsSeq=mySeq;
+    markSnapshot(true);
+    renderStats(d,silent);
+    loadTrends(d.trends_by_model,mySeq,silent);
+  }catch(e){
+    if(mySeq!==statsSeq)return;
+    noteCore(false,'stats');   // 形状守卫的失败发生在 fetchJSON 之外，这里补记
+    // ★ N-7：原来的 tb.innerHTML=… 把【已经渲染好的模型明细表整张清空】。
+    //   服务挂掉时用户丢掉的是已经确认过的真数据，而清空后「拿不到」在界面上
+    //   与「真的没有数据」长得一模一样。改为保留旧行 + 追加一行错误。
+    const tb=q('#statsTable tbody');
+    if(tb){
+      const first=tb.firstElementChild;
+      if(!first||!first.classList.contains('stat-err-row'))
+        tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="7" class="empty-hint">未更新：'+(e.timeout?'请求超时 '+T_DATA+'ms':esc(e.message))+' <button class="btn btn-sm btn-ghost" onclick="loadStats()">重试</button></td></tr>');
+    }
+    markSnapshot(false);
+  }
+  await heatP;
+}
+// 热力图：一次拉 180 天日桶。它必须保持独立的 range=180d——编码连续量级需要
+// sequential ramp，跟顶部 Hero 的当前窗口不是一回事。
+//
+// 它是 async，返回 Promise：loadStats 正是靠这个返回值把它与 stats 请求并发发起
+// （见 loadStats 里的 heatP）。所以**不要**把它改成同步的，也不要在中途 return。
+async function loadHeatmap(silent){
+  try{
+    const d=await fetchJSON('/api/stats/trends?range=180d');
+    heatmapData=Array.isArray(d)?d:[];
+    markHeatmap(true);
+  }catch(e){
+    // N-2 / N-9：原来这里是 heatmapData=[]，把一次失败变成一张空图。
+    // N-9 担心的是「加了超时后 AbortError 落进这个 catch」——本修法让【任何】失败
+    // 都保留上一份热力图（它恒为 range=180d，与时间窗/筛选无关，所以没有
+    // 「窗口变了旧图反而错」的情形），AbortError 与否已无需分支。
+    // 从未成功拿到过数据时 initHeatmap 会画出空网格，用标记把它标出来。
+    markHeatmap(false);
+  }
+  initHeatmap(silent);
+}
+// 缓存命中率（第 5 格）。公式一个字不动：命中 = cache_read / prompt，
+// 分母是 prompt 而不是「新增输入」，因为 prompt 本身已包含 cache_read。
+// 数据源从写死的 heatmapData.slice(-30)（恒定「最近 30 天」）换成当前窗口的
+// models 聚合，于是它同时跟随「时间窗」和「模型筛选」。
+//
+// 竞态守卫（两层，缺一不可）：
+//   (1) 调用方收敛——loadHeatmap 不再调本函数。命中率只可能由 loadStats 那条
+//       受 statsSeq 保护的路径写入，热力图的迟到响应因此永远碰不到它。
+//   (2) 本函数自带快照序号——即使将来有别的路径拿别处的数据来调，只要盖的
+//       statsRateSeq 对不上 window.__lastStatsSeq（当前已渲染 stats 的序号）
+//       就直接丢弃，不会把新窗口的命中率覆写成旧窗口的值。
+function updateCacheRate(models,seq){
+  if(seq!==window.__lastStatsSeq)return;   // 不是当前窗口的数据，丢弃
+  let cr=0,pt=0;
+  for(const k in (models||{})){const m=models[k]||{};cr+=m.cache_read_tokens||0;pt+=m.prompt_tokens||0}
+  const rate=pt>0?Math.round(cr/pt*100):0;
+  statsRateSeq=seq;
+  const el=q('#tcCacheRate');if(!el)return;
+  el.textContent=rate+'%';
+  const bar=q('#tcCacheBar');if(bar)bar.style.width=rate+'%';
+}
+// 吞吐 tps（第 4 格）：**直接读后端的 throughput_tps**，前端不再合成。
+// 后端口径 = Σ完成token ÷ Σ生成秒（不含首字延迟），与 DSH 面板同口径。
+//
+// ★ 旧实现是在这里自己按 Σ(avg_output_speed×stream_req_count)/Σstream_req_count 算的，
+// 那是「每条请求速率的算术平均」：每条请求权重相同，于是 0.8% 的超短请求
+// （窗口 < 75ms）贡献了分子的 69.4%、却只占总时间的 0.002%。
+// 生产实测旧口径 452.7 t/s，真实吞吐 93.1 t/s —— 前者不对应任何一个真实请求。
+// 前端合成还有第二个代价：口径分散在前后端两处，改一处忘一处就漂。
+// 现在只有一个口径：后端算，前端读。0 样本时后端**省略**该字段 ⇒ 这里显示 "—"，
+// 而不是把「没数据」渲染成 0 t/s。
+function renderTps(d){
+  const el=q('#tcAvgTps');if(!el)return;
+  const models=(d&&d.models)||{};
+  const ks=Object.keys(models);
+  const one=ks.length===1?models[ks[0]]:null;
+  // 模型筛选态：renderHeroDetailForFilter 传进来的是 {models:{[选中的模型]:…}}，
+  // 顶层字段不在里面，所以这时取该模型的 per-model 值（全量态才读顶层）。
+  const v=(one?one.throughput_tps:(d&&d.throughput_tps));
+  const n=(one?one.stream_tps_n:(d&&d.stream_tps_n))||0;
+  el.textContent=(typeof v==='number'&&isFinite(v)&&v>0)?Math.round(v)+' t/s':'—';
+  // 采样条数没有独立格子（cc-switch 的 MiniStat 只有「标签行 + 值」两行），
+  // 降级成整格的 title 悬浮说明，信息不丢但不占版式。
+  const cell=q('#tcTpsSamples');
+  if(cell)cell.title=n?('吞吐 = Σ完成token ÷ Σ生成秒（不含首字延迟），与 DSH 同口径 · '+n+' 次流式采样'+(one?' · 当前模型 '+ks[0]:'')):'窗口内无可计算吞吐的流式采样';
+}
+async function loadCaps(){
+  if(DEMO_MODE){renderCaps(DEMO.caps);return}
+  try{const d=await fetchJSON('/api/models');const freeSet=new Set(d.free_models||[]);renderCaps((d.data||[]).filter(x=>freeSet.has(x.id)).map(x=>{if(typeof x==='string')return{id:x};return{id:x.id,cw:x.context_window,mo:x.max_output_tokens,mod:x.input_modalities,il:x.input_limit}}).filter(x=>x.id))}
+  catch(e){
+    // 同上：不要用 innerHTML 整表重写（旧行是被确认过的真数据）。
+    const t=q('#capTable'),tb=t&&t.querySelector('tbody');
+    if(tb)tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="4" class="empty-hint">未更新：'+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadCaps()">重试</button></td></tr>');
+  }
+}
+async function fetchModelList(){if(DEMO_MODE){modelList=DEMO.models.slice().sort();return}try{
+  let m=await fetch('/api/models');
+  if(m.status===401){const v=await fetch('/v1/models');if(v.ok){const j=await v.json();modelList=(j.data||[]).map(x=>x.id||x).filter(Boolean).sort()}}
+  else if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort();freeModelIDs=(d.free_models||[]).slice().sort()}
+  else throw new Error('HTTP '+m.status);
+  modelListStale(false);
+}catch(e){
+  // 保留上一份列表（它曾经是真的），但不能再【静默】保留：换订阅后拉取失败时，
+  // 用户看到的是上一份的模型名，却以为那就是当前的。
+  modelListStale(true,e.message);
+}}
+function modelListStale(bad,msg){
+  const sel=q('#modelFilter');if(sel)sel.dataset.stale=bad?'1':'0';
+  window.__modelListStale=!!bad;
+  if(bad&&!window.__modelListToasted){window.__modelListToasted=1;showToast('模型列表未更新：'+(msg||'加载失败')+'（下拉里是上次的结果）','error')}
+}
+function renderOverview(d){
+  q('#ovTotal').textContent=d.nodes?d.nodes.length:0;
+  q('#ovHealthy').textContent=d.healthy??0;
+  q('#ovExhausted').textContent=d.exhausted_count??0;
+  q('#ovDead').textContent=d.dead_count??0;
+  q('#ovActive').textContent=d.active_name?('当前: '+d.active_name):(d.active_fp?'当前: '+shortFp(d.active_fp):'直连');
+  q('#ovManual').textContent=d.manual_name?('手动: '+d.manual_name):(d.manual_fp?shortFp(d.manual_fp):'自动轮询');
+  renderNodeAlert(d.node_alert);
+}
+/* C-5 节点层告警横幅。口径来自后端 /api/nodes 的 node_alert（见 node_alert.go）：
+   「最近 N 分钟内节点出口尝试成功率 0%」或「池内一个可用节点都没有」。
+   成功率在窗口内没有样本时后端给 null —— 必须显示「无数据」，不能显示 0%：
+   0% 会被读成「节点全挂了」，而 n=0 的意思是「这段时间没流量」，两者完全不同。 */
+function renderNodeAlert(a){
+  const el=q('#nodeAlert');if(!el)return;
+  if(!a||!a.active){el.classList.remove('on');return}
+  el.classList.add('on');
+  const rate=(a.window_success_rate===null||a.window_success_rate===undefined)?'无数据':
+    ((a.window_success_rate*100).toFixed(1)+'%');
+  q('#naTitle').textContent='节点层告警：节点出口整体不可用';
+  q('#naReason').textContent=a.reason||'节点出口持续全部失败，流量正在靠直连出口支撑';
+  const since=a.since?('，始于 '+new Date(a.since).toLocaleString('zh-CN')):'';
+  let meta='最近 '+(a.window_minutes??10)+' 分钟：'+(a.window_attempts??0)+
+    ' 次节点出口尝试，成功率 '+rate+'；池内可用 '+(a.pool_available??0)+' / '+(a.pool_total??0);
+  /* 判据也可能是「连续失败段」（段跨空档、或刚刚结束），这时窗口里可能只有寥寥几次
+     尝试、甚至还有成功样本 —— 不把连败信息摆出来，读的人会觉得前后矛盾。
+     后端 snapshot 里 run_failures/run_minutes 与判定用的是同一份口径。 */
+  if((a.run_failures||0)>=10){
+    const rm=(a.run_minutes||0)>0?('、跨 '+a.run_minutes.toFixed(1)+' 分钟'):'';
+    meta+='；另有连续失败 '+a.run_failures+' 次'+rm;
+  }
+  q('#naMeta').textContent=meta+since;
+}
+/* C-5 告警横幅自己的轮询。
+   横幅是「面板别骗我」的核心元素，所以它不能依赖两件事：
+     1) 用户有没有把「自动刷新」打开（默认关闭）；
+     2) 用户当前停在哪个页面。
+   只更新横幅、不重画节点表 —— loadNodes() 会重建表格，把用户的排序、筛选、
+   滚动位置全部丢掉（验收方 F7 提的就是"横幅要手动点刷新才出现"）。 */
+let nodeAlertWatchTimer=null;
+function refreshNodeAlertOnce(){
+  if(document.hidden)return;                       // 后台标签页不发请求
+  fetch('/api/nodes',{credentials:'same-origin'})
+    .then(r=>r.ok?r.json():null)
+    .then(d=>{if(d&&d.node_alert)renderNodeAlert(d.node_alert)})
+    .catch(()=>{});                                // 轮询失败保持上一次显示，不打断页面
+}
+function startNodeAlertWatch(){
+  if(nodeAlertWatchTimer||DEMO_MODE)return;
+  refreshNodeAlertOnce();
+  nodeAlertWatchTimer=setInterval(refreshNodeAlertOnce,30000);
+  document.addEventListener('visibilitychange',()=>{if(!document.hidden)refreshNodeAlertOnce()});
+}
+function renderStats(d,silent){
+  const all=(d&&d.models)||{};
+  // 模型下拉的选项必须取全量 d.models 的键。若改用过滤后的 ms 的键，
+  // 选中某模型后下拉里就只剩那一个模型，用户再也切不回去。
+  window.__lastStatsModels=Object.keys(all);
+  // d 仍以全量传入；顶部 Hero、甜甜圈、请求量表、模型明细表统一从过滤后的 ms 派生，
+  // 口径一致。选中模型已不在 all 里（陈旧筛选）时退回全量，配合下面的
+  // renderModelOptions() 自愈回「全部模型」。
+  const ms=(trendModel==='all'||!all[trendModel])?all:{[trendModel]:all[trendModel]};
+  statModels=ms;const ks=Object.keys(ms);
+  let totalTokens=0,cacheRead=0;
+  for(const k of ks){const m=ms[k];totalTokens+=m.total_tokens||0;cacheRead+=m.cache_read_tokens||0}
+  // 顶部 Hero（大数字/≈ 徽标/总请求数/五格）由 renderHeroDetailForFilter() 统一渲染，
+  // 不在这里重复写：这里算的是 ms，本函数算的是 all，两处各算一次必然漂。
+  // 请求量表
+  const reqRows=ks.map(k=>({k:k,req:ms[k].request_count||0})).sort((a,b)=>b.req-a.req);
+  const totalReq=reqRows.reduce((s,r)=>s+r.req,0);
+  let rh='';if(!reqRows.length){rh='<tr><td colspan="3" class="empty-hint">暂无数据</td></tr>'}
+  else{for(const r of reqRows){const pct=totalReq?Math.round(r.req/totalReq*100):0;rh+='<tr><td class="mono">'+esc(r.k)+'</td><td class="num">'+fmtFull(r.req)+'</td><td class="num"><div class="usage" style="justify-content:flex-end"><div class="usage-bar" style="width:60px"><i style="width:'+pct+'%"></i></div><span>'+pct+'%</span></div></td></tr>'}}
+  q('#reqTable').querySelector('tbody').innerHTML=rh;
+  // 模型明细表
+  let h='';if(!ks.length){h='<tr><td colspan="7" class="empty-hint">暂无数据</td></tr>'}
+  else{for(const k of ks){const m=ms[k];const ttft=m.avg_ttft_ms?Math.round(m.avg_ttft_ms)+'ms':'—';const spd=(typeof m.throughput_tps==='number'&&isFinite(m.throughput_tps)&&m.throughput_tps>0)?m.throughput_tps.toFixed(1)+' t/s':'—';h+='<tr><td class="mono">'+esc(k)+'</td><td class="num" style="color:var(--blue)">'+fmtFull(m.prompt_tokens)+'</td><td class="num" style="color:var(--ok)">'+fmtFull(m.completion_tokens)+'</td><td class="num" style="color:var(--purple)">'+fmtFull(m.cache_read_tokens||0)+'</td><td class="num" style="font-weight:700">'+fmtFull(m.total_tokens)+'</td><td class="num" style="color:var(--orange)">'+ttft+'</td><td class="num" style="color:var(--ok)">'+spd+'</td></tr>'}
+    h+='<tr style="font-weight:700;border-top:2px solid var(--border-strong)"><td>总计</td><td class="num" style="color:var(--blue)">'+fmtFull(Object.values(ms).reduce((s,m)=>s+(m.prompt_tokens||0),0))+'</td><td class="num" style="color:var(--ok)">'+fmtFull(Object.values(ms).reduce((s,m)=>s+(m.completion_tokens||0),0))+'</td><td class="num" style="color:var(--purple)">'+fmtFull(cacheRead)+'</td><td class="num">'+fmtFull(totalTokens)+'</td><td></td><td></td></tr>'}
+  q('#statsTable').querySelector('tbody').innerHTML=h;
+  // 更新甜甜圈图
+  initDonut(ms,silent);
+  window.__lastStats=d;
+  renderModelOptions();      // loadStats 与 loadTrends 并发返回，先后不定，双触发自愈
+  renderHeroDetailForFilter();
+}
+// renderHeroDetail 渲染顶部 UsageHero 卡：真实消耗大数字、≈ 徽标、总请求数与五格明细。
+// 数据源是 /api/stats?range=<窗口> 的 models，与下方两张表、甜甜圈、趋势图同一份响应。
+// 口径：注意 prompt_tokens 已包含 cache_read_tokens（实测命中约占 prompt 的 50%），
+// 故「新增输入」= prompt - cache_read（与趋势图 initTrend 的「输入」同义），
+// 于是 新增输入 + Output + 命中 ≡ (prompt-cr) + completion + cr = prompt + completion，
+// 恰好等于后端 total_tokens —— 三格之和与大数字永远闭合，diff 恒为 0。
+// 缓存写（cache_created_tokens）不参与展示：cc-switch 的第 3 格是「缓存写入」，
+// 本面板把那一格让给「命中」，所以 cache_created_tokens 在页面上没有任何读数。
+// 五格都取自同一份 models，因此随「时间窗 + 模型筛选」一起联动。
+function renderHeroDetail(d){
+  const models=(d&&d.models)||{};
+  const sum={in:0,out:0,cr:0,reqs:0};
+  for(const k in models){
+    const m=models[k]||{};
+    sum.in+=(m.prompt_tokens||0)-(m.cache_read_tokens||0);sum.out+=m.completion_tokens||0;
+    sum.cr+=m.cache_read_tokens||0;sum.reqs+=m.request_count||0;
+  }
+  const real=sum.in+sum.out+sum.cr;
+  const vEl=q('#tcTotalToken');if(vEl){vEl.textContent=fmtFull(real);vEl.title=fmtFull(real)}
+  const sEl=q('#tcTotalTokenShort');if(sEl)sEl.textContent='≈ '+fmtTokensShort(real,2);
+  const rEl=q('#tcTotalReq');if(rEl)rEl.textContent=fmtFull(sum.reqs);
+  // 三格数字：宽屏写完整数字、窄屏写缩写（CSS 媒体查询决定哪个可见）
+  setDualNum('gIn',sum.in);setDualNum('gOut',sum.out);setDualNum('gCR',sum.cr);
+  renderTps(d);
+  updateCacheRate(models,window.__lastStatsSeq);
+}
+/* 模型筛选后的顶部 Hero：复用 renderHeroDetail 的求和逻辑，但只取选中的模型。
+   renderStats 的 d 始终是全量，所以 Hero 必须经这里过滤，否则不跟筛选联动。
+   陈旧筛选（trendModel 已不在全量里）时退回全量，与 renderStats 里 ms 的
+   (trendModel==='all'||!all[trendModel])?all:{...} 同源；否则这里会渲染出
+   {[trendModel]:{}} 的全 0 Hero，而同一次 renderStats 的两表/甜甜圈已按
+   全量渲染，两者口径不一致——原先只靠调用序恰好等价。 */
+function renderHeroDetailForFilter(){
+  const all=window.__lastStats||{};
+  const models=all.models||{};
+  if(trendModel==='all'||!models[trendModel]){renderHeroDetail(all);return}
+  renderHeroDetail({models:{[trendModel]:models[trendModel]}});
+}
+function renderCaps(rows){
+  rows=(rows||[]).filter(x=>x&&x.id).sort((a,b)=>a.id.localeCompare(b.id));
+  let h='';
+  if(!rows.length){h='<tr><td colspan="4" class="empty-hint">暂无模型数据</td></tr>'}
+  else{for(const m of rows){const label=esc(m.id);const badge='<span class="auto-badge">免费</span>';h+='<tr class="row-auto"><td class="mono">'+label+badge+'</td><td class="num">'+fmtTokens(m.cw)+(m.il?'<div style="font-size:11px;color:var(--muted);font-weight:400">输入上限 '+fmtTokens(m.il)+'</div>':'')+'</td><td class="num">'+fmtTokens(m.mo)+'</td><td>'+fmtModalities(m.mod)+'</td></tr>'}}
+  q('#capTable').innerHTML='<thead><tr><th>模型</th><th class="num">上下文窗口</th><th class="num">最大输出</th><th>输入类型</th></tr></thead><tbody>'+h+'</tbody>';
+}
+
+/* ---------- 延迟分布：按节点延迟分档（真实来自 /api/nodes） ---------- */
+function renderLatencyDist(nodes){
+  const el=q('#latdist');if(!el)return;
+  const lat=(nodes||[]).filter(n=>n.latency_ms!=null&&n.latency_ms>=0).map(n=>n.latency_ms);
+  if(!lat.length){el.innerHTML='';return}
+  const buckets=[
+    {k:'<100ms',cls:'g',f:l=>l<100},
+    {k:'<200ms',cls:'b',f:l=>l<200},
+    {k:'<400ms',cls:'o',f:l=>l<400},
+    {k:'>=400ms',cls:'r',f:l=>l>=400}
+  ];
+  const total=lat.length;
+  let track='',legend='';
+  for(const b of buckets){
+    const c=lat.filter(b.f).length;
+    const pct=Math.round(c/total*100);
+    track+='<i class="ld-seg '+b.cls+'" style="width:'+pct+'%"></i>';
+    legend+='<span class="ld-key"><i class="'+b.cls+'"></i>'+b.k+' '+c+'</span>';
+  }
+  el.innerHTML='<div class="row"><span class="ld-title">延迟分布</span><div class="ld-track">'+track+'</div></div><div class="ld-legend">'+legend+'</div>';
+}
+
+/* ---------- ECharts 用量趋势 ---------- */
+const charts={};
+// ---- 图表实例复用（1A）------------------------------------------------
+// 统一入口：没有实例（或已被 dispose）就 echarts.init；已有实例就 resize()。
+// 旧的 dispose()+init() 让 ECharts 每次刷新都当成「第一次显示」，
+// 播 1000ms 完整入场（实测自动刷新 1075ms），而且 init() 顺带承担了容器尺寸跟随
+// ——保留实例后这个职责必须显式补回来，resize() 本身不产生动画。
+// 0 宽容器不 resize：此时量出来是 0，会把 canvas 缩成 0×0；等它重新显示，
+// 由 toggleChart 的 show 分支再 resize 一次（与 redrawCharts 的 vis() 守卫同源）。
+function reuseChart(el,key){
+  let c=charts[key];
+  if(!c||c.isDisposed()){c=echarts.init(el);charts[key]=c}
+  else if(el.clientWidth>0){c.resize()}
+  return c;
+}
+// 空态占位节点的类名：与 chart-load-fail 同为「自己挂上去、自己摘下来」的节点。
+const DONUT_EMPTY_CLS='donut-empty';
+function isDark(){return(document.documentElement.getAttribute('data-theme')||'dark')==='dark'}
+function getCSS(v){return getComputedStyle(document.documentElement).getPropertyValue(v).trim()}
+// seriesColor 返回第 i 个数据系列的色值，超出 5 个时循环取模。
+// 先取整：契约虽是 int，但后续任务若传进均值下标（如 2.5），
+// 不取整会算成 getCSS('--series-3.5') 拿到空串、数组下标也是 undefined，静默丢色。
+function seriesColor(i){const n=((Math.round(i)%5)+5)%5;return getCSS('--series-'+(n+1))||['#5b9bff','#2fd489','#b18cff','#f0b04a','#fb7185'][n]}
+let currentTrendDays=30,trendTab='token';
+
+/* CDN 不可用时在图表容器内显示可见提示，而不是静默留白。
+   静默 return 会让用户误以为"没有数据"。
+   提示节点带 chart-load-fail 类：echarts 迟到时（见下方探针）要能把它摘掉，
+   而 echarts.init() 只往容器里挂自己的节点、不会清空容器，所以必须显式摘。 */
+function chartLoadFail(chartId,label){
+  const el=q(chartId);if(!el)return;
+  clearChartFailNode(el);   // 同一容器只留一个提示节点
+  // 用 appendChild 而不是 el.innerHTML：容器里可能已经挂着 ECharts 的 canvas，
+  // innerHTML 会把它一起摘掉，实例随即变成僵尸（canvas 数归 0 且再也回不来）。
+  const box=document.createElement('div');
+  box.className=CHART_FAIL_CLS;
+  box.setAttribute('style','display:flex;align-items:center;justify-content:center;height:100%;min-height:120px;text-align:center;color:var(--text-ter);font-size:12.5px;padding:20px');
+  box.innerHTML='<div><div style="font-size:22px;margin-bottom:8px">📉</div>'
+    +label+' 加载失败<br><span style="font-size:11.5px;opacity:.75">ECharts 未能从 CDN 加载，请检查网络或改用本地资源</span></div>';
+  el.appendChild(box);
+  console.warn('ECharts 加载失败，'+label+' 无法渲染');
+}
+/* ---------- CDN 挂起兜底：不依赖 DOMContentLoaded ----------
+   head 里那个 ECharts script 带 defer：不阻塞解析，所以 CDN 挂起时页面照样渲染得出来；
+   但它必定在 DOMContentLoaded 之前执行完，所以一旦 CDN 挂起，DCL 永不触发，
+   DOMContentLoaded 处理器里的 initAllCharts() 从不执行——页面有卡片有表格、数据全停在 —，
+   四个图表区却没有任何说明，用户会以为网关坏了。
+
+   下面这段在本页内联脚本里（解析期就执行，早于 DCL）起一个探针，绕开 DCL 直接给提示：
+     · CHART_ALERT_MS 到点仍没有 echarts → 打提示（模式 B）；
+     · 打完提示继续观察，echarts 一旦迟到 → 撤掉提示并重绘（模式「慢」）。
+   正常情况下 CDN 实测 1.5–5s 到，探针到 8s 时早已停止，什么都不做，不会有假阳性。 */
+const CHART_ALERT_MS=8000;    // 慢网实测 1.5–5s；取 8s 留足余量再提示
+const CHART_RECHECK_MS=2000;  // 打完提示后的复查间隔
+const CHART_FAIL_CLS='chart-load-fail';
+const CHART_BOXES=[['#trendChart','趋势图'],['#reqTrendChart','请求数趋势图'],['#heatmapChart','请求热力图'],['#donutChart','模型请求分布']];
+let chartAlerted=false,chartProbeTimer=null;
+function scheduleChartProbe(delay){
+  if(chartProbeTimer)return;
+  chartProbeTimer=setTimeout(chartProbeTick,delay);
+}
+function chartProbeTick(){
+  chartProbeTimer=null;
+  if(typeof echarts!=='undefined'){
+    // echarts 迟到（慢加载）。只在真打过提示时才做事：正常路径上 chartsReady
+    // 可能已经是 true，无条件 redrawCharts() 会白白把三张图重画一遍。
+    if(chartAlerted){clearChartLoadFail();redrawCharts();}
+    return; // echarts 已就位，之后由 DOMContentLoaded 的 initAllCharts() 接管
+  }
+  if(!chartAlerted){chartAlerted=true;CHART_BOXES.forEach(([id,label])=>chartLoadFail(id,label))}
+  scheduleChartProbe(CHART_RECHECK_MS); // 还没有，继续探（echarts 迟到时靠这一轮收尾）
+}
+// 只摘提示节点，不能用 el.innerHTML=''：ECharts 的 canvas 也挂在同一个容器里，
+// 一把清空会把已经画好的图一起抹掉。
+function clearChartFailNode(el){
+  if(!el)return;
+  const box=el.querySelector('.'+CHART_FAIL_CLS);
+  if(box&&box.parentNode)box.parentNode.removeChild(box);
+}
+function clearChartLoadFail(){
+  chartAlerted=false;
+  // #reqTrendChart 默认 display:none、initAllCharts() 也不画它（只有切 tab 才画），
+  // 所以四个容器都得清一遍，否则隐藏容器里会一直留着过期的提示。
+  CHART_BOXES.forEach(([id])=>clearChartFailNode(q(id)));
+}
+scheduleChartProbe(CHART_ALERT_MS);
+function initAllCharts(){
+  // 只补还没建出来的图。DOMContentLoaded 处理器里 Promise.all([... loadStats() ...])
+  // 先跑完，loadStats 内部已经把 trend / heatmap 建出来了；原来这里无条件再画一遍，
+  // 后果是首屏趋势图把正在播的入场动画**打断重画一次**——实测入场动画直接消失
+  // （首屏 ink 一次性到位，settle=0）。dispose+init 时这叫"重画"，
+  // 保留实例后它变成"取消动画"，所以必须去掉这次重复渲染。
+  if(!charts.trend||charts.trend.isDisposed())initTrend(currentTrendDays);
+  if(!charts.heatmap||charts.heatmap.isDisposed())initHeatmap();
+  chartsReady=true;
+}
+// 视口变化后 ECharts 不会自己跟随（它只在 init/setOption 时量一次尺寸），
+// 现状是靠切主题时的 dispose+init 顺带修正的——那是副作用，不是设计。
+// 保留实例后由这里显式承担。节流用 rAF：连续 resize 事件在一个动画帧里合并成一次。
+let chartResizeRaf=0;
+window.addEventListener('resize',()=>{
+  if(chartResizeRaf)return;
+  chartResizeRaf=requestAnimationFrame(()=>{
+    chartResizeRaf=0;
+    if(!chartsReady)return;
+    ['trend','reqTrend','heatmap','donut'].forEach(k=>{
+      const c=charts[k];
+      if(!c||c.isDisposed())return;
+      const el=c.getDom();
+      if(!el||el.clientWidth<=0)return;   // 隐藏容器量出来是 0，resize 会把 canvas 缩没
+      c.resize();
+    });
+  });
+});
+// fmtAxisTs 把后端桶时间戳格式化成紧凑轴标签：
+//   小时桶 "2026-09-17T14:00" → "14:00"；日桶 "2026-09-17" → "09-17"。
+function fmtAxisTs(ts,hourly){
+  if(!ts)return'';
+  if(hourly){const i=ts.indexOf('T');return i>=0?ts.slice(i+1,i+6):ts}
+  return ts.length>=10?ts.slice(5,10):ts;
+}
+// trendTooltipTitle 悬浮标题：今日档只给时间（后端桶是 "2026-09-17T14:00"），
+// 7天/30天档给完整日期。
+function trendTooltipTitle(ts){return trendRange==='today'?fmtAxisTs(ts,true):ts}
+// silent=true ⇒ animation:false：不播补间（自动刷新 / 切主题 / 切 tab 用）。
+// 首屏、手动刷新、切时间范围、切模型筛选不传 silent ⇒ 保留动画。
+function initTrend(days,silent){
+  currentTrendDays=days;const el=q('#trendChart');if(!el)return;
+  if(typeof echarts==='undefined'){chartLoadFail('#trendChart','趋势图');return}
+  clearChartFailNode(el); // 迟到的 echarts：先摘掉先前打上的提示，否则提示与 canvas 并存
+  const ch=reuseChart(el,'trend');
+  const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
+  const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
+  const promptNoCache=slice.map(d=>(d.prompt_tokens||0)-(d.cache_read_tokens||0));
+  const cacheHit=slice.map(d=>d.cache_read_tokens||0);
+  const compT=slice.map(d=>d.completion_tokens||0);
+  const bC=seriesColor(0),oC=seriesColor(1),pC=seriesColor(2);
+  ch.setOption({
+    animation:!silent,
+    tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+trendTooltipTitle(params[0].axisValue)+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+fmtFull(p.value)+'<br/>');return s}},
+    legend:{data:['输入','命中缓存','输出'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
+    grid:{left:60,right:20,top:40,bottom:30},
+    xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.14)':'#e1e5ee'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11,interval:'auto',formatter:(v)=>fmtAxisTs(v,trendRange==='today')}},
+    yAxis:{type:'value',splitLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.08)':'rgba(20,30,60,.06)'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11,formatter:v=>fmt(v)}},
+    series:[
+      {name:'输入',type:'line',smooth:true,symbol:'none',data:promptNoCache,lineStyle:{width:2.5,color:bC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:bC+'40'},{offset:1,color:bC+'05'}])},itemStyle:{color:bC}},
+      {name:'命中缓存',type:'line',smooth:true,symbol:'none',data:cacheHit,lineStyle:{width:2.5,color:pC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:pC+'30'},{offset:1,color:pC+'05'}])},itemStyle:{color:pC}},
+      {name:'输出',type:'line',smooth:true,symbol:'none',data:compT,lineStyle:{width:2.5,color:oC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:oC+'30'},{offset:1,color:oC+'05'}])},itemStyle:{color:oC}}
+    ]
+  });
+}
+function initReqTrend(days,silent){
+  const el=q('#reqTrendChart');if(!el)return;
+  if(typeof echarts==='undefined'){chartLoadFail('#reqTrendChart','请求数趋势图');return}
+  clearChartFailNode(el);
+  const ch=reuseChart(el,'reqTrend');
+  const limit=trendRange==='today'?Math.min(trendsData.length,24):days;
+  const slice=trendsData.slice(-limit);const dates=slice.map(d=>d.ts);
+  const ok=slice.map(d=>d.ok||0);const fail=slice.map(d=>d.fail||0);
+  const okC=seriesColor(1),failC=getCSS('--red')||'#ff6b6b';
+  ch.setOption({
+    animation:!silent,
+    tooltip:{trigger:'axis',backgroundColor:isDark()?'#1a2336':'#ffffff',borderColor:isDark()?'rgba(148,163,184,.14)':'#e1e5ee',textStyle:{color:isDark()?'#e9eef8':'#161a26',fontSize:12},formatter:params=>{let s='<b>'+trendTooltipTitle(params[0].axisValue)+'</b><br/>';params.forEach(p=>s+=p.marker+' '+p.seriesName+': '+p.value+'<br/>');return s}},
+    legend:{data:['成功','失败'],top:0,textStyle:{color:isDark()?'#97a3bb':'#59637a',fontSize:12}},
+    grid:{left:50,right:20,top:35,bottom:30},
+    xAxis:{type:'category',data:dates,axisLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.14)':'#e1e5ee'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11,interval:'auto',formatter:(v)=>fmtAxisTs(v,trendRange==='today')}},
+    yAxis:{type:'value',splitLine:{lineStyle:{color:isDark()?'rgba(148,163,184,.08)':'rgba(20,30,60,.06)'}},axisLabel:{color:isDark()?'#7b87a5':'#616d88',fontSize:11}},
+    series:[
+      {name:'成功',type:'line',smooth:true,symbol:'none',data:ok,lineStyle:{width:2.5,color:okC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:okC+'30'},{offset:1,color:okC+'05'}])},itemStyle:{color:okC}},
+      {name:'失败',type:'line',smooth:true,symbol:'none',data:fail,lineStyle:{width:2.5,color:failC},areaStyle:{color:new echarts.graphic.LinearGradient(0,0,0,1,[{offset:0,color:failC+'30'},{offset:1,color:failC+'05'}])},itemStyle:{color:failC}}
+    ]
+  });
+}
+function switchTrendTab(tab,btn){
+  trendTab=tab;
+  btn.parentElement.querySelectorAll('button').forEach(b=>{b.style.background='';b.style.color='';b.className='btn btn-sm btn-ghost'});
+  btn.style.background='var(--accent-dim)';btn.style.color='var(--accent)';btn.className='btn btn-sm';
+  // 切 tab 用静默路径：重画是为了让被隐藏的那张图跟上最新数据，
+  // 不是「用户要求看一次从头生长」，播 1000ms 入场只会拖慢切换。
+  if(tab==='token'){q('#trendChart').style.display='';q('#reqTrendChart').style.display='none';initTrend(currentTrendDays,true)}
+  else{q('#trendChart').style.display='none';q('#reqTrendChart').style.display='';initReqTrend(currentTrendDays,true)}
+}
+function setTrendRange(range){
+  trendRange=range;
+  currentTrendDays=(range==='today')?24:parseInt(range,10)||30;
+  // 只调 loadStats()：顶部 Hero、两张表、甜甜圈与趋势图全部来自同一份 ranged 响应。
+  // 单独再调一次 loadTrends() 会多打一发请求，还可能让两者返回次序错位。
+  loadStats();
+}
+// 请求热力图：GitHub 贡献图样式 —— 7 行（周一→周日）× N 列（周）。
+// 某列只有在包含「某月 1 日」时才打月份标签，于是月份自然落在坐标轴下方。
+function initHeatmap(silent){
+  const el=q('#heatmapChart');if(!el)return;
+  if(typeof echarts==='undefined'){chartLoadFail('#heatmapChart','请求热力图');return}
+  clearChartFailNode(el);
+  const byDay={};
+  for(const b of (heatmapData||[])){const k=(b.ts||'').slice(0,10);if(k)byDay[k]=(b.prompt_tokens||0)+(b.completion_tokens||0)}
+  const today=new Date();today.setHours(0,0,0,0);
+  const start=new Date(today);
+  start.setDate(start.getDate()-((heatmapData&&heatmapData.length>1?heatmapData.length:180)-1));
+  start.setDate(start.getDate()-((start.getDay()+6)%7)); // 回退到周一，保证每列同一天
+  const cells=[];const cellDates=[];const monthAt={};let n=0;
+  for(const d=new Date(start);d<=today;d.setDate(d.getDate()+1)){
+    const ds=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    const wk=Math.floor(n/7);
+    // 数据项必须严格是 [x, y, value]：多塞一个日期进去 ECharts 会静默不画格子。
+    // 日期另存并行数组，tooltip 用 dataIndex 取。
+    cells.push([wk,n%7,byDay[ds]||0]);
+    cellDates.push(ds);
+    if(d.getDate()===1)monthAt[wk]=(d.getMonth()+1)+'月';
+    n++;
+  }
+  const xLabels=[];for(let w=0;w<Math.ceil(n/7);w++)xLabels.push(monthAt[w]||'');
+  // 让格子接近正方形（随容器宽度自适应），否则 7 行会被 210px 拉成长条。
+  const nWeeks=xLabels.length||1;
+  const avail=Math.max(180,(el.clientWidth||460)-12);
+  const cell=Math.max(8,Math.min(20,Math.floor(avail/nWeeks)));
+  el.style.height=(cell*7+34)+'px';
+  const maxV=Math.max(1,...cells.map(c=>c[2]));
+  const dark=isDark();
+  const base=dark?'#1b2434':'#ebedf0';
+  // 注意：reuseChart 必须排在 el.style.height 之后 —— resize() 会按当前容器高度
+  // 量画布，高度还没定就 resize 会量到上一轮的旧高度。
+  const ch=reuseChart(el,'heatmap');
+  ch.setOption({
+    animation:!silent,
+    tooltip:{formatter:p=>'<b>'+(cellDates[p.dataIndex]||'')+'</b><br/>Token: '+fmtFull(p.value[2])},
+    grid:{left:6,right:6,top:6,bottom:24},
+    xAxis:{type:'category',data:xLabels,axisLine:{show:false},axisTick:{show:false},
+      splitArea:{show:false},axisLabel:{color:dark?'#7b87a5':'#616d88',fontSize:11,interval:0,margin:7}},
+    yAxis:{type:'category',data:['一','二','三','四','五','六','日'],axisLine:{show:false},
+      axisTick:{show:false},splitArea:{show:false},axisLabel:{show:false}},
+    visualMap:{min:0,max:maxV,show:false,
+      inRange:{color:[base,'#cfe0ff','#a8c7ff','#7aa5ff','#4a7dff','#2b5fd9']}},
+    series:[{type:'heatmap',data:cells,progressive:0,
+      itemStyle:{borderRadius:3,borderWidth:2,borderColor:getCSS('--surface')||'#101828'},
+      emphasis:{itemStyle:{borderColor:dark?'#e9eef8':'#161a26'}}}]
+  });
+}
+function initDonut(ms,silent){
+  const el=q('#donutChart');if(!el)return;
+  if(typeof echarts==='undefined'){chartLoadFail('#donutChart','模型请求分布');return}
+  clearChartFailNode(el);
+  const data=ms?Object.entries(ms).map(([name,s])=>({name,value:s.request_count||0})).filter(d=>d.value>0):[];
+  // 空态：**绝不能用 el.innerHTML**。ECharts 的 canvas 也挂在同一个容器里，
+  // innerHTML='' 会把它摘掉，实例随即变成僵尸——实测容器内 canvas 数归 0，
+  // 之后 setOption()/resize() 都重建不出 canvas，饼图永远回不来。
+  // 与本文件 clearChartFailNode() 同一套写法：占位节点自己挂、自己摘。
+  const ph=el.querySelector('.'+DONUT_EMPTY_CLS);
+  if(ph&&ph.parentNode)ph.parentNode.removeChild(ph);
+  if(!data.length){
+    // setOption({series:[{data:[]}]}) 与 notMerge:true 都清不掉旧扇区
+    // （实测残留墨迹 3981，对照 clear() 为 0），只有 clear() 会真的清空，
+    // 且 clear 后实例仍活着、可以继续 setOption。
+    if(charts.donut&&!charts.donut.isDisposed())charts.donut.clear();
+    const box=document.createElement('div');
+    box.className=DONUT_EMPTY_CLS;
+    box.setAttribute('style','text-align:center;padding:40px 0;color:var(--text-ter);font-size:13px');
+    box.textContent='暂无数据';
+    el.appendChild(box);
+    return;
+  }
+  const ch=reuseChart(el,'donut');
+  ch.setOption({
+    animation:!silent,
+    tooltip:{trigger:'item',formatter:'{b}: {c} ({d}%)'},
+    color:[0,1,2,3,4].map(seriesColor),
+    series:[{type:'pie',radius:['42%','72%'],center:['50%','52%'],padAngle:3,
+      itemStyle:{borderRadius:8,borderColor:isDark()?'#101828':'#ffffff',borderWidth:3},
+      label:{show:true,formatter:'{b}\n{d}%',fontSize:12,color:isDark()?'#e9eef8':'#161a26',lineHeight:18},
+      emphasis:{label:{fontSize:14,fontWeight:'bold'},itemStyle:{shadowBlur:10,shadowColor:'rgba(0,0,0,.3)'}},
+      data}]
+  });
+}
+function toggleChartSettings(){q('#chartSettingsPanel').classList.toggle('open')}
+function toggleChart(name,show){
+  const el=q('#chart'+name.charAt(0).toUpperCase()+name.slice(1));
+  if(!el)return;
+  el.style.display=show?'':'none';
+  // 重新显示时必须重画：ECharts 不会自动 resize。隐藏期间若发生过主题切换，
+  // redrawCharts() 会跳过 0 宽容器而留下上一套配色，show 时必须按当前主题补画。
+  if(!show)return;
+  if(name==='donut'){if(statModels)initDonut(statModels,true)}
+  else if(name==='heatmap'){initHeatmap(true)}
+  else{renderTrends(true)}
+}
+function renderTrends(silent){
+  if(trendTab==='token')initTrend(currentTrendDays,silent);else initReqTrend(currentTrendDays,silent);
+}
+function setTrendRefresh(){}  /* no-op: ECharts handles refresh via loadStats */
+/* 趋势渲染阶段。trends_by_model 已随 /api/stats?range= 一起回来，所以本函数
+   不再自己 fetch，只负责「写入 + 渲染」；竞态守卫退化为一道 seq 校验
+   （loadStats 已用 statsSeq 保证只有最新响应会走到这里，但保留判断成本为零）。
+   调用方只有 loadStats —— 顶部 Hero、两张表、趋势图因此永远来自同一次响应。 */
+function loadTrends(rows,seq,silent){
+  if(seq!==statsSeq)return;                 // 过期响应，丢弃
+  TREND_BY_MODEL=Array.isArray(rows)?rows:[];
+  // renderModelOptions() 必须先于 aggTrend()：它可能把已不在下拉里的 trendModel
+  // 复位成 'all'（下拉模型集回退到 free_models 时必然发生，而 free_models 与趋势
+  // 查询的模型集完全不相交）。原序是 aggTrend()→renderModelOptions()→renderTrends()，
+  // 于是 renderTrends() 把「用即将被丢弃的模型算出的空聚合」画上去：下拉显示
+  // 「全部模型」而趋势图永久空白，且不重跑一次加载就没有恢复手段。
+  // 改序后 aggTrend() 拿到的永远是复位后的 trendModel，无需再判断是否发生过复位。
+  // ⚠️ 合并成单次请求后这个约束没有自动成立：renderStats 与本函数是先后调用，
+  //    谁先谁后完全取决于调用点，所以这里的调用序必须显式保持。
+  renderModelOptions();
+  aggTrend();
+  renderTrends(silent);
+}
+/* 按当前模型筛选把按模型分组的数据聚合成原 trendsData 的结构。
+   trendModel==='all' 时跨模型求和；否则只取该模型。 */
+function aggTrend(){
+  const byTs=new Map();
+  for(const r of TREND_BY_MODEL){
+    if(trendModel!=='all'&&r.model!==trendModel)continue;
+    let t=byTs.get(r.ts);
+    if(!t){t={ts:r.ts,requests:0,ok:0,fail:0,prompt_tokens:0,completion_tokens:0,cache_creation_tokens:0,cache_read_tokens:0};byTs.set(r.ts,t)}
+    t.requests+=r.requests||0;t.ok+=r.ok||0;t.fail+=r.fail||0;
+    t.prompt_tokens+=r.prompt_tokens||0;t.completion_tokens+=r.completion_tokens||0;
+    t.cache_creation_tokens+=r.cache_creation_tokens||0;t.cache_read_tokens+=r.cache_read_tokens||0;
+  }
+  trendsData=[...byTs.values()].sort((a,b)=>a.ts<b.ts?-1:1);
+  return trendsData;
+}
+
+function setTrendModel(m){
+  const want=m||'all';
+  trendModel=want;
+  aggTrend();
+  renderTrends();
+  // 护栏在调用点，renderStats 内部不动。__lastStats 只在 /api/stats 成功返回后由
+  // renderStats 写入，loadStats 的 catch 分支从不写它。所以它在两种情况下为空：
+  // (1) loadStats 仍在飞；(2) /api/stats 请求失败（页面此时唯一的恢复入口是 catch
+  // 写进 #statsTable 的那个「重试」按钮）。这两种情况下调 renderStats(undefined) 会
+  // 以 all={} 跑完，把顶部 Hero、两张表、甜甜圈全抹成 0/「暂无数据」，并把
+  // __lastStatsModels 从 8 清成 0 导致模型下拉回退到 10 个 free_models（与真正有量的
+  // 8 个模型完全不相交），最后 innerHTML 覆盖掉那个唯一的「重试」按钮。又因为
+  // setTrendRefresh 是 no-op、trendTimer 为 null、无人重调 loadStats，3 秒后仍不自愈。
+  // (d&&d.models)||{} 那处防御保留：它对 loadStats 正常路径的首次调用仍有用。
+  if(window.__lastStats)renderStats(window.__lastStats);
+  // renderStats 是这条路径上唯一会同步 sel.value 的调用点（它末尾调 renderModelOptions）。
+  // 被上面的守卫跳过时下拉会停在旧值、与内部 trendModel 脱节（显示「全部模型」而
+  // trendModel 已是某个具体模型，趋势图空白且无说明），所以这里无条件兜一次。
+  const sel=q('#trendModelSel');if(sel)sel.value=trendModel;
+  // renderStats 内部的 renderModelOptions() 可能把已不在列表里的 trendModel 复位成
+  // 'all'（下拉模型集回退到 free_models 时必然发生）。上面 aggTrend() 是用复位前的
+  // 模型聚合的，不重跑的话趋势图会停在空聚合上，而下拉已显示「全部模型」。
+  // 这与 loadTrends 里那处理由同一，两处调用点都得兜住。
+  if(trendModel!==want){aggTrend();renderTrends()}
+  // 这里刻意不再调 renderHeroDetailForFilter()：__lastStats 有值时 renderStats 末尾
+  // 已经调过一次；为空时它会把顶部 Hero 写成全 0（renderHeroDetail({})），正是
+  // Important 1 要消除的「静默全量抹除」。实测保留它会让 __lastStats 为空时
+  // gIn/gOut 从 4,162,713 / 1,564,415 被抹成 0。
+  // 顶部 Hero 随筛选联动由 renderStats 那一次调用保证。
+}
+
+/* 模型下拉选项：优先取 /api/stats 中真实产生过请求的模型（renderStats 缓存的
+   __lastStatsModels）；全新实例无用量时回退到 /api/models 的 free_models。
+   注意：函数名只说「渲染选项」，但它带一个副作用——trendModel 已不在列表里时会被
+   复位成 'all'。调用方凡是先用 trendModel 做过聚合的，都必须让本函数先跑。 */
+function renderModelOptions(){
+  const sel=q('#trendModelSel');if(!sel)return;
+  // 只列「当前时间窗内真的有量」的模型。没有数据就是没有选项——
+  // 不回退 free_models：那是「全新实例从未有过请求」的兜底清单，与本窗口
+  // 的真实用量的模型集完全不相交，回退只会让用户在一堆注定为 0 的选项里挑。
+  // 副作用是有意接受的：窗口内无量的模型不再出现在下拉里，用户无从选中它，
+  // 这与「选了也是 0」相比少一步误操作。
+  let models=(window.__lastStatsModels||[]).slice();
+  // 仅在选项集合真的变化时重建 innerHTML：整块重写会把手工打开着的下拉合上。
+  // 签名挂在 DOM 上，模型来源切换（__lastStatsModels ↔ free_models）也能正确触发重建。
+  const sig=JSON.stringify(models);
+  if(sel.dataset.optSig!==sig){
+    sel.innerHTML='<option value="all">全部模型</option>'
+      +models.map(m=>'<option value="'+esc(m)+'">'+esc(m)+'</option>').join('');
+    sel.dataset.optSig=sig;
+  }
+  // trendModel==='all' 要先短路掉：models 永不含 'all'，不短路的话最常见的这一档
+  // 每次都会「触发」复位，把 'all' 赋回 'all'，读起来像别的意思。
+  if(trendModel!=='all'&&models.indexOf(trendModel)<0)trendModel='all';
+  sel.value=trendModel;
+}
+function trendDemo(rng){
+  const out=[],now=new Date();const days=rng==='7d'?7:rng==='30d'?30:1;
+  for(let i=days-1;i>=0;i--){const d=new Date(now);d.setDate(d.getDate()-i);const ds=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    const req=Math.max(0,56+Math.round(Math.sin((days-i)/days*Math.PI*2)*30+Math.random()*24));
+    out.push({ts:ds,requests:req,ok:Math.max(0,req-Math.round(Math.random()*3)),fail:Math.round(Math.random()*3),prompt_tokens:req*(360+Math.round(Math.random()*300)),completion_tokens:req*(170+Math.round(Math.random()*260)),cache_creation_tokens:req*80,cache_read_tokens:req*(280+Math.round(Math.random()*200))})}
+  return out;
+}
+
+/* ============================================================
+   节点池
+   ============================================================ */
+function setFilter(f){filter=f;qa('#stateChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.f===f));renderNodeTable()}
+const badgeMap={available:'<span class="badge available"><span class="bdot"></span>可用</span>',exhausted:'<span class="badge exhausted"><span class="bdot"></span>已耗尽</span>',dead:'<span class="badge dead"><span class="bdot"></span>故障</span>',idle:'<span class="badge idle"><span class="bdot"></span>未知</span>'};
+function badgeHtml(s){return badgeMap[s]||badgeMap.idle}
+function renderNodeTable(){
+  const tb=q('#nodeTable tbody');const rows=nodeData.filter(n=>filter==='all'||n.state===filter);
+  q('#cntAll').textContent=nodeData.length;
+  q('#cntAvail').textContent=nodeData.filter(n=>n.state==='available').length;
+  q('#cntExh').textContent=nodeData.filter(n=>n.state==='exhausted').length;
+  q('#cntDead').textContent=nodeData.filter(n=>n.state==='dead').length;
+  if(!rows.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}
+  tb.innerHTML=rows.map(n=>{
+    const lat=(n.latency_ms!=null&&n.latency_ms>=0)?'<span class="num '+latClass(n.latency_ms)+'">'+n.latency_ms+' ms</span>':(n.latency_ms!=null&&n.latency_ms<0?'<span class="muted">超时</span>':'<span class="muted">-</span>');
+    return '<tr class="'+(n.active?'hl':'')+'"><td><span class="node-name">'+esc(n.name)+(n.active?'<span class="tag cur">当前</span>':'')+(n.manual?'<span class="tag man">手动</span>':'')+'</span></td><td><span class="proto">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="num">'+lat+'</td><td class="num muted">'+esc(fmtTime(n.cooldown_until))+'</td><td class="err">'+esc(n.last_error||'-')+'</td><td class="acts"><button class="btn btn-sm btn-primary" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-sm btn-ghost" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button></td></tr>';
+  }).join('');
+}
+async function nodeAction(action,fp){
+  const st=q('#nodeStatus');st.textContent='操作中…';
+  if(DEMO_MODE){await new Promise(r=>setTimeout(r,350));st.textContent=action==='switch'?'已切换':action==='reload'?'订阅已加载':action==='probe'?'测速完成':'已解除';showToast(st.textContent,'success');loadNodes();return}
+  try{const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:action,fingerprint:fp||''})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent=action==='switch'?'已切换':action==='reload'?('订阅已加载，节点 '+d.nodes+' 个'):action==='probe'?('测速完成 '+d.checked+' 个节点'):'已解除';showToast(st.textContent,'success')}catch(e){st.textContent='失败: '+e.message;showToast('操作失败: '+e.message,'error')}finally{loadNodes()}
+}
+function reloadSubs(){nodeAction('reload','')}
+function probeAll(){nodeAction('probe','')}
+async function resetAllMarks(){if(!confirm('解除所有节点的耗尽/故障标记？'))return;nodeAction('reset_all','')}
+
+/* ============================================================
+   订阅编辑
+   ============================================================ */
+function subUsageHtml(s){
+  if(!s.usage_total&&!s.usage_used&&!s.usage_expire)return '<span class="muted">-</span>';
+  let parts=[];
+  if(s.usage_total||s.usage_used){const pct=Math.min(100,Math.round((s.usage_used||0)/Math.max(1,s.usage_total)*100));parts.push('<div class="usage"><div class="usage-bar"><i style="width:'+pct+'%"></i></div><span>'+fmtBytes(s.usage_used)+' / '+fmtBytes(s.usage_total)+'</span></div>')}
+  if(s.usage_expire)parts.push('<span class="muted" style="font-size:11px">到期 '+new Date(s.usage_expire*1000).toLocaleDateString()+'</span>');
+  return parts.join('<span style="width:6px;display:inline-block"></span>');
+}
+function renderSubTable(){
+  const tb=q('#subTable tbody');
+  if(!subData.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">暂无订阅源，添加 Clash/URI/base64 订阅，或直接用手动配置节点</td></tr>';return}
+  tb.innerHTML=subData.map((s,i)=>'<tr><td><input value="'+esc(s.name||'')+'" data-f="name" placeholder="订阅名"></td><td><input value="'+esc(s.url||'')+'" data-f="url" placeholder="https://…"></td><td><input type="number" min="0" value="'+(s.update_interval_hours||'')+'" data-f="interval" placeholder="24"></td><td class="num muted">'+(s.nodes||0)+'</td><td>'+subUsageHtml(s)+'</td><td class="num muted" style="font-size:12px">'+esc(fmtTime(s.last_updated_at))+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delSub('+i+')">删除</button></td></tr>'+(s.last_error?'<tr><td colspan="7" class="muted" style="color:var(--red);font-size:12px">'+esc(s.last_error)+'</td></tr>':'')).join('');
+}
+function addSub(){subData.push({name:'',url:'',update_interval_hours:24});renderSubTable()}
+function delSub(i){subData.splice(i,1);renderSubTable()}
+function collectSubs(){const rows=qa('#subTable tbody tr');const seen=new Set();const out=[];rows.forEach(tr=>{const nf=tr.querySelector('[data-f="name"]');if(!nf)return;const name=nf.value||'';const u=(tr.querySelector('[data-f="url"]').value||'').trim();const iv=parseInt(tr.querySelector('[data-f="interval"]').value||'0',10)||0;if(!u||seen.has(u))return;seen.add(u);out.push({name:name,url:u,update_interval_hours:iv})});subData=out;return subData}
+
+/* ============================================================
+   Webshare 代理池编辑
+   ============================================================ */
+function applyWsSnapshot(subs){
+  wsInfo={};(subs||[]).forEach(s=>{if(s.url==='webshare API'&&s.name)wsInfo[s.name]=s});
+}
+function renderWebshareTable(){
+  const tb=q('#webshareTable tbody');
+  if(!wsData.length){tb.innerHTML='<tr><td colspan="8" class="empty-hint">暂无 Webshare 源，填入 API key 后自动拉取代理列表</td></tr>';return}
+  tb.innerHTML=wsData.map((w,i)=>{const m=wsInfo[w.name]||{};return '<tr><td><input value="'+esc(w.name||'')+'" data-f="ws-name" placeholder="例如: webshare-主池"></td><td><input value="'+esc(w.api_key||'')+'" data-f="ws-key" type="password" placeholder="Token APIKEY" style="font-family:monospace"></td><td><input value="'+esc(w.proxy_url||'')+'" data-f="ws-proxy" placeholder="http://127.0.0.1:7890 / socks5://" style="font-family:monospace"></td><td><input type="number" min="0" value="'+(w.update_interval_hours||'')+'" data-f="ws-interval" placeholder="24"></td><td class="num muted">'+(m.nodes||0)+'</td><td class="num muted" style="font-size:12px">'+esc(fmtTime(m.last_updated_at||w.last_updated_at))+'</td><td class="muted" style="font-size:12px;color:var(--red)">'+esc(m.last_error||w.last_error||'')+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delWebshare('+i+')">删除</button></td></tr>'}).join('');
+}
+function addWebshare(){wsData.push({name:'',api_key:'',update_interval_hours:24});renderWebshareTable()}
+function delWebshare(i){wsData.splice(i,1);renderWebshareTable()}
+function collectWebshare(){
+  const out=[];const seen=new Set();
+  qa('#webshareTable tbody tr').forEach(tr=>{
+    const name=(tr.querySelector('[data-f="ws-name"]').value||'').trim();
+    const key=(tr.querySelector('[data-f="ws-key"]').value||'').trim();
+    if(!name||!key||seen.has(name))return;
+    seen.add(name);
+    const iv=parseInt(tr.querySelector('[data-f="ws-interval"]').value||'0',10)||0;
+    const proxy=(tr.querySelector('[data-f="ws-proxy"]').value||'').trim();
+    out.push({name:name,api_key:key,proxy_url:proxy,update_interval_hours:iv});
+  });
+  wsData=out;return wsData;
+}
+
+/* ============================================================
+   手动节点编辑
+   ============================================================ */
+function nodeExtras(p){
+  const ck='<label class="check" style="padding:0"><input type="checkbox" data-f="insecure"> 跳过证书校验</label>';
+  if(p==='vless')return '<div class="field"><label>user_id（UUID）</label><input data-f="user_id" placeholder="uuid"></div><div class="field"><label>flow（留空）</label><input data-f="flow"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="example.com"></div><div class="field"><label>reality public_key</label><input data-f="rp" placeholder=""></div><div class="field"><label>reality short_id</label><input data-f="rs" placeholder=""></div><div class="field"><label>reality spider_x</label><input data-f="rx" placeholder="/"></div><div class="field" style="align-self:end">'+ck+'</div>';
+  if(p==='vmess')return '<div class="field"><label>user_id（UUID）</label><input data-f="user_id" placeholder="uuid"></div><div class="field"><label>security（auto/none/aes-128-gcm）</label><input data-f="security" placeholder="auto"></div><div class="field"><label>network（tcp/ws）</label><input data-f="network" placeholder="tcp"></div><div class="field"><label>path（ws 时）</label><input data-f="path"></div><div class="field"><label>host（ws 时）</label><input data-f="host"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label class="check" style="padding:0"><input type="checkbox" data-f="tls"> TLS 加密</label></div><div class="field" style="align-self:end">'+ck+'</div>';
+  if(p==='trojan')return '<div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni / server_name</label><input data-f="sni" placeholder="留空用地址"></div><div class="field"><label>network（tcp/ws）</label><input data-f="network" placeholder="tcp"></div><div class="field"><label>path（ws 时）</label><input data-f="path"></div><div class="field"><label>host（ws 时）</label><input data-f="host"></div><div class="field"><label class="check" style="padding:0"><input type="checkbox" data-f="tls"> TLS 加密</label></div><div class="field"><label>reality public_key</label><input data-f="rp" placeholder=""></div><div class="field"><label>reality short_id</label><input data-f="rs" placeholder=""></div><div class="field"><label>reality spider_x</label><input data-f="rx" placeholder="/"></div><div class="field" style="align-self:end">'+ck+'</div>';
+  if(p==='ss')return '<div class="field"><label>method（加密）</label><input data-f="method" placeholder="chacha20-ietf-poly1305"></div><div class="field"><label>password</label><input data-f="password" type="password"></div>';
+  if(p==='socks5')return '<div class="field"><label>用户名</label><input data-f="user_id"></div><div class="field"><label>密码</label><input data-f="password" type="password"></div>';
+  if(p==='hysteria2')return '<div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni" placeholder="留空用地址"></div><div class="field" style="align-self:end">'+ck+'</div>';
+  if(p==='anytls')return '<div class="field"><label>user_id</label><input data-f="user_id"></div><div class="field"><label>password</label><input data-f="password" type="password"></div><div class="field"><label>sni</label><input data-f="sni"></div><div class="field" style="align-self:end">'+ck+'</div>';
+  return '';
+}
+function renderNodeEditors(){const box=q('#manualEditors');if(!nodeEditors.length){box.innerHTML='<div class="empty-hint">暂无手动配置节点，点下方「添加节点」</div>';return}box.innerHTML=nodeEditors.map((n,i)=>nodeEditorHtml(n,i)).join('')}
+function nodeEditorHtml(n,i){
+  const p=n.protocol||'vless';
+  const protoOpts=['vless','vmess','trojan','ss','socks5','hysteria2','anytls'].map(x=>'<option value="'+x+'"'+(p===x?' selected':'')+'>'+x+'</option>').join('');
+  return '<div class="nedit" data-i="'+i+'"><select data-f="protocol" onchange="fillExtra('+i+')">'+protoOpts+'</select><input data-f="name" value="'+esc(n.name||'')+'" placeholder="节点名"><input data-f="address" value="'+esc(n.address||'')+'" placeholder="服务器地址"><input data-f="port" type="number" value="'+(n.port||'')+'" placeholder="端口"><button class="btn btn-sm btn-danger" onclick="delNodeEditor('+i+')">删除</button><details><summary>凭据与高级设置</summary><div class="extra" id="extra-'+i+'"></div></details></div>';
+}
+function fillExtra(i){
+  const row=q('#manualEditors .nedit[data-i="'+i+'"]');if(!row)return;
+  const n=nodeEditors[i]||{};const p=row.querySelector('[data-f="protocol"]').value;const box=row.querySelector('#extra-'+i);
+  box.innerHTML=nodeExtras(p);
+  const set=(f,v)=>{const el=box.querySelector('[data-f="'+f+'"]');if(el)el.value=v!=null?v:''};
+  set('user_id',n.user_id);set('password',n.password);set('method',n.method);set('sni',n.sni);set('flow',n.flow);set('network',n.network);set('security',n.security);set('path',n.path);set('host',n.host);
+  set('rp',(n.reality&&n.reality.public_key)||'');set('rs',(n.reality&&n.reality.short_id)||'');set('rx',(n.reality&&n.reality.spider_x)||'');
+  const ic=box.querySelector('[data-f="insecure"]');if(ic)ic.checked=!!n.insecure;
+  const tls=box.querySelector('[data-f="tls"]');if(tls)tls.checked=!!n.tls;
+}
+function addNodeEditor(){nodeEditors.push({protocol:'vless'});renderNodeEditors();fillExtra(nodeEditors.length-1)}
+function delNodeEditor(i){nodeEditors.splice(i,1);renderNodeEditors()}
+function collectNodes(){
+  const out=[];
+  qa('#manualEditors .nedit').forEach(row=>{
+    const i=+row.dataset.i;const g=f=>row.querySelector('[data-f="'+f+'"]');const address=((g('address')||{}).value||'').trim();if(!address)return;
+    const n={name:(g('name')||{}).value||'',protocol:g('protocol').value,address:address,port:parseInt((g('port')||{}).value||'0',10)||0};
+    for(const f of ['user_id','password','method','sni','flow','network','security','path','host']){const el=g(f);if(el&&el.value)n[f]=el.value}
+    if(g('insecure')&&g('insecure').checked)n.insecure=true;if(g('tls')&&g('tls').checked)n.tls=true;
+    const rp=((g('rp')||{}).value||'').trim(),rs=((g('rs')||{}).value||'').trim(),rx=((g('rx')||{}).value||'').trim();
+    if((n.protocol==='vless'||n.protocol==='trojan')&&(rp||rs)){n.reality={public_key:rp,short_id:rs,spider_x:rx||'/'}}
+    nodeEditors[i]=n;out.push(n);
+  });
+  return out;
+}
+
+/* ============================================================
+   配额
+   ============================================================ */
+function renderQuota(c){
+  q('#q_error_types').value=(c.quota_error_signals&&c.quota_error_signals.error_types||[]).join(', ');
+  q('#q_message_kw').value=(c.quota_error_signals&&c.quota_error_signals.message_keywords||[]).join(', ');
+  q('#q_max_switches').value=c.max_quota_node_switches||5;
+  q('#q_cooldown_h').value=c.node_cooldown_exhausted_hours||1;
+  q('#q_cooldown_m').value=c.node_cooldown_dead_minutes||1;
+  q('#q_health_interval').value=c.node_health_interval_minutes||15;
+  q('#q_health_url').value=c.node_health_probe_url||'';
+}
+function collectQuota(){return{quota_error_signals:{error_types:q('#q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:q('#q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(q('#q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(q('#q_cooldown_h').value||'1',10),node_cooldown_dead_minutes:parseInt(q('#q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(q('#q_health_interval').value||'15',10),node_health_probe_url:q('#q_health_url').value.trim()}}
+async function saveSubsConfig(){
+  const st=q('#subSaveStatus');st.textContent='保存中…';
+  if(DEMO_MODE){await new Promise(r=>setTimeout(r,350));collectSubs();collectNodes();st.textContent='已保存（演示）';showToast('订阅与节点已保存','success');return}
+  try{collectSubs();collectWebshare();const nodes=collectNodes();const r=await fetch('/api/nodes',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'save',subscriptions:subData,webshare:wsData,manual_nodes:nodes})});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');st.textContent='已保存，节点 '+d.nodes+' 个';showToast('订阅与节点已保存，节点池已刷新','success')}catch(e){st.textContent='失败: '+e.message;showToast('保存失败: '+e.message,'error')}finally{loadNodes()}
+}
+async function saveQuotaConfig(){
+  if(DEMO_MODE){showToast('配额设置已保存（演示）','success');return}
+  const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(collectQuota())});if(!r.ok){showToast('保存配额失败: '+await r.text(),'error');return}showToast('配额设置已保存','success');
+}
+
+/* ============================================================
+   配置编辑（代理与模型）
+   ============================================================ */
+function modelSelectHtml(selected){let h='<select data-field="val" class="m-select"><option value="">-- 选择模型 --</option>';for(const m of modelList){h+='<option value="'+esc(m)+'"'+(selected===m?' selected':'')+'>'+esc(m)+'</option>'}h+='</select>';return h}
+function freeAutoAliases(){
+  const out=[];
+  // 用后端返回的 free_models 列表生成自动映射
+  for(const id of freeModelIDs){
+    if(id.endsWith('-free')){
+      // 以 -free 结尾：客户端看到去掉后缀的名字
+      out.push({alias:id.slice(0,-5), upstream:id});
+    }else{
+      // 不以 -free 结尾（如 big-pickle）：客户端直接使用原始 ID
+      out.push({alias:id, upstream:id});
+    }
+  }
+  // 兜底：如果 freeModelIDs 为空，回退到旧逻辑（从 modelList 过滤 -free）
+  if(!out.length){
+    for(const m of modelList){
+      if(typeof m==='string'&&m.endsWith('-free'))out.push({alias:m.slice(0,-5),upstream:m});
+    }
+  }
+  out.sort((a,b)=>a.alias.localeCompare(b.alias));
+  return out;
+}
+function renderAliasTable(){
+  const tb=q('#aliasTable tbody');
+  const manual=cfg.model_alias||{};
+  const hidden=new Set(cfg.hidden_free_aliases||[]);
+  const editedAliases=cfg.edited_free_aliases||{};
+  const auto=freeAutoAliases().filter(a=>!hidden.has(a.alias));
+  const hiddenRows=freeAutoAliases().filter(a=>hidden.has(a.alias));
+  const ks=Object.keys(manual);
+  if(!auto.length&&!ks.length&&!hiddenRows.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无别名配置 · 免费模型自动映射，点「添加别名」可自定义</td></tr>';return}
+  let h='';
+  for(const a of auto){
+    const displayAlias=editedAliases[a.alias]||a.alias;
+    const isEdited=!!editedAliases[a.alias];
+    const editedBadge=isEdited?'<span class="auto-badge" style="background:var(--accent);color:#fff">已自定义</span>':'';
+    h+='<tr data-auto="1" class="row-auto"><td><span class="auto-name">'+esc(displayAlias)+'</span>'+editedBadge+'</td><td><span class="auto-up">'+esc(a.upstream)+'</span><span class="auto-badge">自动</span></td><td class="acts"><span class="auto-hide" onclick="renameAutoAlias(\''+esc(a.alias)+'\')" title="设置显示名称">设置</span><span class="auto-hide" onclick="hideAutoAlias(\''+esc(a.alias)+'\')" title="禁用此模型的对外暴露">禁用</span></td></tr>';
+  }
+  for(const a of hiddenRows)h+='<tr data-auto="1" class="row-auto" style="opacity:.45"><td><span class="auto-name">'+esc(a.alias)+'</span><span class="auto-badge" style="background:var(--bg-2);color:var(--text-ter)">已禁用</span></td><td><span class="auto-up">'+esc(a.upstream)+'</span></td><td class="acts"><span class="auto-hide" onclick="unhideAutoAlias(\''+esc(a.alias)+'\')" title="恢复此模型">启用</span></td></tr>';
+  h+=ks.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key" placeholder="例如: gpt-5.5"></td><td>'+modelSelectHtml(manual[k])+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>').join('');
+  tb.innerHTML=h;
+}
+function hideAutoAlias(alias){
+  if(!cfg.hidden_free_aliases)cfg.hidden_free_aliases=[];
+  if(!cfg.hidden_free_aliases.includes(alias)){cfg.hidden_free_aliases.push(alias);saveConfig()}
+  renderAliasTable();
+}
+function unhideAutoAlias(alias){
+  cfg.hidden_free_aliases=(cfg.hidden_free_aliases||[]).filter(a=>a!==alias);
+  saveConfig();
+  renderAliasTable();
+}
+function renameAutoAlias(alias){
+  if(!cfg.edited_free_aliases)cfg.edited_free_aliases={};
+  const current=cfg.edited_free_aliases[alias]||alias;
+  // 创建自定义对话框
+  const overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML='<div style="background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:24px;width:360px;max-width:90vw;box-shadow:0 8px 32px rgba(0,0,0,.3)"><div style="font-size:16px;font-weight:600;margin-bottom:12px">设置模型显示名称</div><div style="font-size:13px;color:var(--text-sec);margin-bottom:4px">原始 ID: <code>'+esc(alias)+'</code></div><div style="font-size:13px;color:var(--text-sec);margin-bottom:12px">上游模型: <code>'+esc(alias)+'</code></div><input id="renameInput" value="'+esc(current)+'" style="width:100%;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg-2);color:var(--text);font-size:14px;box-sizing:border-box" placeholder="输入显示名称"><div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end"><button id="renameCancel" style="padding:6px 16px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);cursor:pointer;font-size:13px">取消</button><button id="renameReset" style="padding:6px 16px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text-sec);cursor:pointer;font-size:13px">恢复默认</button><button id="renameOk" style="padding:6px 16px;border:none;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer;font-size:13px">确定</button></div></div>';
+  document.body.appendChild(overlay);
+  const inp=overlay.querySelector('#renameInput');
+  inp.focus();inp.select();
+  const close=()=>overlay.remove();
+  overlay.querySelector('#renameCancel').onclick=close;
+  overlay.querySelector('#renameOk').onclick=()=>{
+    const v=inp.value.trim();
+    if(v&&v!==alias){cfg.edited_free_aliases[alias]=v}
+    else if(v===alias){delete cfg.edited_free_aliases[alias]}
+    saveConfig();renderAliasTable();close();
+  };
+  overlay.querySelector('#renameReset').onclick=()=>{
+    delete cfg.edited_free_aliases[alias];
+    saveConfig();renderAliasTable();close();
+  };
+  overlay.onclick=e=>{if(e.target===overlay)close()};
+  inp.onkeydown=e=>{if(e.key==='Enter')overlay.querySelector('#renameOk').click();if(e.key==='Escape')close()};
+}
+function addAliasRow(){const tb=q('#aliasTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: gpt-5.5" data-field="key"></td><td>'+modelSelectHtml('')+'</td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delAlias(this)">删除</button></td></tr>';tb.appendChild(tr)}
+function delAlias(b){b.closest('tr').remove()}
+function collectAliases(){const r={};qa('#aliasTable tbody tr').forEach(tr=>{if(tr.dataset.auto)return;const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});cfg.model_alias=r;return r}
+function collectHidden(){return cfg.hidden_free_aliases||[]}
+function renderEffortTable(){const tb=q('#effortTable tbody');const es=Object.keys(cfg.reasoning_effort_map||{});if(!es.length){tb.innerHTML='<tr><td colspan="3" class="empty-hint">暂无映射配置</td></tr>';return}tb.innerHTML=es.map(k=>'<tr><td><input value="'+esc(k)+'" data-field="key" placeholder="例如: low"></td><td><input value="'+esc(cfg.reasoning_effort_map[k])+'" data-field="val" placeholder="例如: high"></td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delEffort(this)">删除</button></td></tr>').join('')}
+function addEffortRow(){const tb=q('#effortTable tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input placeholder="例如: low" data-field="key"></td><td><input placeholder="例如: high" data-field="val"></td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delEffort(this)">删除</button></td></tr>';tb.appendChild(tr)}
+function delEffort(b){b.closest('tr').remove()}
+function collectEfforts(){const r={};qa('#effortTable tbody tr').forEach(tr=>{const k=tr.querySelector('[data-field="key"]'),v=tr.querySelector('[data-field="val"]');if(k&&k.value.trim())r[k.value.trim()]=v?v.value.trim():''});cfg.reasoning_effort_map=r;return r}
+function renderSocks5Table(){const tb=q('#socks5Table tbody');const ps=cfg.socks5_proxies||[];if(!ps.length){tb.innerHTML='<tr><td colspan="5" class="empty-hint">暂无代理配置</td></tr>';return}tb.innerHTML=ps.map((p,i)=>'<tr><td><input value="'+esc(p.name||'')+'" data-field="name"></td><td><input value="'+esc(p.addr)+'" data-field="addr" placeholder="例如: 127.0.0.1:1080"></td><td><input value="'+esc(p.username||'')+'" data-field="username"></td><td><input value="'+esc(p.password||'')+'" data-field="password" type="password"></td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delSocks5(this)">删除</button></td></tr>').join('')}
+function addSocks5Row(){const tb=q('#socks5Table tbody');if(tb.querySelector('.empty-hint'))tb.innerHTML='';const tr=document.createElement('tr');tr.innerHTML='<td><input data-field="name"></td><td><input data-field="addr" placeholder="例如: 127.0.0.1:1080"></td><td><input data-field="username"></td><td><input data-field="password" type="password"></td><td class="acts"><button class="btn btn-sm btn-danger" onclick="delSocks5(this)">删除</button></td></tr>';tb.appendChild(tr)}
+function delSocks5(b){b.closest('tr').remove()}
+function collectSocks5(){const r=[];qa('#socks5Table tbody tr').forEach(tr=>{const a=tr.querySelector('[data-field="addr"]');if(a&&a.value.trim())r.push({addr:a.value.trim(),name:(tr.querySelector('[data-field="name"]')||{}).value||'',username:(tr.querySelector('[data-field="username"]')||{}).value||'',password:(tr.querySelector('[data-field="password"]')||{}).value||''})});cfg.socks5_proxies=r;return r}
+function renderSocks5Select(){const sel=q('#activeSocks5');sel.innerHTML='<option value="">直连（不使用代理）</option>';(cfg.socks5_proxies||[]).forEach(p=>{if(p.addr){const opt=document.createElement('option');opt.value=p.addr;opt.textContent=p.name?p.name+' ('+p.addr+')':p.addr;sel.appendChild(opt)}});if((cfg.socks5_proxies||[]).length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cfg.active_socks5||'';q('#socks5_paid_direct').value=cfg.socks5_paid_direct?'1':'0'}
+async function saveConfig(){
+  collectEfforts();collectAliases();collectSocks5();
+  const body={model_alias:cfg.model_alias,hidden_free_aliases:collectHidden(),edited_free_aliases:cfg.edited_free_aliases||{},reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:q('#force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:q('#activeSocks5').value,socks5_paid_direct:q('#socks5_paid_direct').value==='1',api_key:q('#apiKeyInput').value};
+  if(DEMO_MODE){cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存（演示）','success');return}
+  try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}
+}
+async function reloadConfig(){
+  if(DEMO_MODE){showToast('会话已刷新（演示）','success');return}
+  try{const r=await fetch('/api/reload',{method:'POST'});const d=await r.json();if(!r.ok)throw new Error(d.error||'请求失败');showToast('会话已刷新，模型 '+((d.models??d.free)||0)+' 个','success');fetchModelList().then(()=>renderAliasTable());loadCaps()}catch(e){showToast('刷新失败: '+e.message,'error')}
+}
+async function resetStats(){
+  if(!confirm('确认清空所有 Token 统计？此操作不可撤销。'))return;
+  const s=q('#resetStatus');s.textContent='清空中…';
+  if(DEMO_MODE){q('#statsTable').innerHTML='<tr><td colspan="7" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000);return}
+  try{const r=await fetch('/api/stats',{method:'DELETE'});if(!r.ok)throw new Error(await r.text());q('#statsTable').innerHTML='<tr><td colspan="7" class="empty-hint">暂无数据</td></tr>';s.textContent='已清空';setTimeout(()=>s.textContent='',2000)}catch(e){s.textContent='失败: '+e.message}
+}
+function renderConfigEditors(){
+  subData=(cfg.subscriptions||[]).map(s=>({...s}));
+  wsData=(cfg.webshare||[]).map(w=>({...w}));
+  nodeEditors=(cfg.manual_nodes||[]).map(n=>({...n}));
+  renderAliasTable();renderEffortTable();renderSocks5Table();renderSocks5Select();renderQuota(cfg);renderSubTable();renderWebshareTable();renderNodeEditors();
+  q('#force_disable_thinking').checked=!!cfg.force_disable_thinking;
+  q('#apiKeyInput').value=cfg.api_key||'';syncGatewayBox();
+}
+function gwBase(){
+  const h=(location.host||location.hostname||'').trim();
+  if(h)return location.protocol+'//'+h+'/v1';
+  return DEMO_MODE?'http://localhost:8000/v1':'/v1';
+}
+function syncGatewayBox(){
+  const base=gwBase();
+  const v=(cfg.api_key||q('#apiKeyInput').value||'');
+  const fill=(id)=>{const el=q(id);if(el){el.textContent=base;el.dataset.v=v;el.dataset.base=base}};
+  fill('#gwAddress');fill('#gwAddress2');
+  const fillK=(id)=>{const el=q(id);if(el){el.dataset.v=v;el.textContent=v||'未启用（留空）';el.style.opacity=v?'1':'.5'}};
+  fillK('#apiKeyShow');fillK('#apiKeyShow2');
+}
+function genApiKey(){
+  const b=new Uint8Array(24);if(window.crypto&&crypto.getRandomValues){crypto.getRandomValues(b)}else{for(let i=0;i<b.length;i++)b[i]=Math.floor(Math.random()*256)}
+  let k='';const chars='abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  for(let i=0;i<b.length;i++)k+=chars[b[i]%chars.length];
+  q('#apiKeyInput').value='sk-'+k;syncGatewayBox();showToast('已生成，点保存生效','info');
+}
+
+/* ============================================================
+   运行日志
+   ============================================================ */
+let logBuf=[],logES=null,logLastSeq=0,logFilterLevel='all',logKeyword='',logStick=true;
+let logRetryDelay=2000,logRetryTimer=null;
+const logListEl=q('#logList');const LOG_MAX_BUF=2000;
+function setLogLevelFilter(l){logFilterLevel=l;qa('#logLevelChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.l===l));renderLogs()}
+function setLogKeyword(v){logKeyword=(v||'').toLowerCase();renderLogs()}
+function logMatches(e){if(logFilterLevel!=='all'&&e.level!==logFilterLevel)return false;if(!logKeyword)return true;if((e.msg||'').toLowerCase().includes(logKeyword))return true;return (e.attrs||[]).some(a=>String(a.v).toLowerCase().includes(logKeyword))}
+function logRowHtml(e){
+  const cls=e.level==='ERROR'?'lv-error':e.level==='WARN'?'lv-warn':e.level==='DEBUG'?'lv-debug':'';
+  return '<div class="log-line '+cls+'" data-seq="'+e.seq+'">'+
+    '<span class="log-time">'+fmtLogTime(e.time)+'</span>'+
+    '<span class="log-lv lv-'+e.level.toLowerCase()+'">'+e.level+'</span>'+
+    '<span class="log-msg">'+esc(e.msg||'')+'</span>'+
+    (e.attrs&&e.attrs.length?'<button class="btn btn-ghost" style="padding:0 6px;flex:none" onclick="toggleLogAttrs('+e.seq+',this)">'+e.attrs.length+' 字段</button>':'')+
+    '</div>'+(e.attrs&&e.attrs.length?'<div class="log-attrs" id="la-'+e.seq+'" style="display:none">'+e.attrs.map(a=>'<span style="margin-right:10px"><b>'+esc(a.k)+'</b>='+esc(a.v)+'</span>').join('')+'</div>':'');
+}
+function renderLogs(){const rows=[];for(const e of logBuf){if(logMatches(e))rows.push(e)}logListEl.innerHTML=rows.map(logRowHtml).join('');const total=logBuf.length;const shown=rows.length;q('#logCount').textContent='缓冲 '+total+' 条 / 显示 '+shown+' 条';updateLogStick();logListEl.scrollTop=logListEl.scrollHeight}
+function toggleLogAttrs(seq,btn){const el=q('#la-'+seq);if(!el)return;const open=el.style.display!=='none';el.style.display=open?'none':'block';btn.textContent=(open?'展开 ':'收起 ')+el.querySelectorAll('span').length+' 字段'}
+function fmtLogTime(iso){const d=new Date(iso);const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}
+function onLogEntry(e){if(e.seq<=logLastSeq)return;logLastSeq=e.seq;if(logBuf.length>=LOG_MAX_BUF)logBuf.shift();logBuf.push(e);if(logMatches(e))logListEl.insertAdjacentHTML('beforeend',logRowHtml(e));updateLogCount();updateLogStick();q('#logStatus').textContent='实时 · seq '+logLastSeq}
+function updateLogCount(){q('#logCount').textContent='缓冲 '+logBuf.length+' 条 / 显示 '+logListEl.querySelectorAll('.log-line').length+' 条'}
+function updateLogStick(){if(logStick)logListEl.scrollTop=logListEl.scrollHeight;q('#logScrollBtn').style.display=logStick?'none':'inline-block'}
+logListEl.addEventListener('scroll',()=>{const el=logListEl;logStick=(el.scrollTop+el.clientHeight>=el.scrollHeight-40);q('#logScrollBtn').style.display=logStick?'none':'inline-block'});
+function logScrollToBottom(){logStick=true;logListEl.scrollTop=logListEl.scrollHeight;q('#logScrollBtn').style.display='none'}
+function initLogs(){
+  if(DEMO_MODE){if(!logBuf.length)applyDemoLogs();toggleLogStream(q('#logAutoRefresh').checked);return}
+  // 原写法没有 r.ok：500+JSON 时 r.json() 成功，于是错误体里的 log_level
+  // 静默覆盖下拉框。fetchJSON 拒绝把非 2xx 的体交给调用方，所以 catch 可以留空 ——
+  // 「拿不到」不再被写成「日志级别是 info」。
+  fetchJSON('/api/config').then(c=>{const lv=(c&&c.log_level)||'info';const sel=q('#logRunLevel');if(sel.value!==lv)sel.value=lv;if(sel)delete sel.dataset.stale}).catch(e=>{const sel=q('#logRunLevel');if(sel)sel.dataset.stale='1'});
+  toggleLogStream(q('#logAutoRefresh').checked);
+}
+function toggleLogStream(on){
+  const sel=q('#logAutoRefresh');if(sel&&sel.checked!==on)sel.checked=on;
+  if(on){
+    if(DEMO_MODE){if(demoLogTimer)return;demoLogTimer=setInterval(()=>{const seq=++logLastSeq;const levels=['INFO','INFO','DEBUG','WARN','INFO','ERROR'];const msgs=['request_started','upstream_attempt node=hk-01','stream_result tokens='+Math.floor(300+Math.random()*1800),'node health probe ok','switching node after quota signal','upstream_error retry=2'];const i=Math.floor(Math.random()*levels.length);onLogEntry({seq,time:new Date().toISOString(),level:levels[i],msg:msgs[i],attrs:i%2?[{k:'request_id',v:'req_'+Math.floor(9000+Math.random()*900)},{k:'model',v:Math.random()>.5?'gpt-5.5':'glm-5.2'}]:[]})},2600);q('#logStatus').textContent='实时（演示）· seq '+logLastSeq;return}
+    if(logES)return;
+    if(logRetryTimer){clearTimeout(logRetryTimer);logRetryTimer=null}
+    logES=new EventSource('/api/logs/stream');
+    logES.onopen=()=>{logRetryDelay=2000};
+    logES.onmessage=ev=>{try{onLogEntry(JSON.parse(ev.data))}catch(_){}};
+    // ★★ onerror 必须 close()：EventSource 在【连接级掉线】时不会进终态，
+    // 浏览器会自己按算法重连。只把它置 null 而不 close，那个孤儿会一直自己重连，
+    // 每掉一次又多造一个新的 ⇒ 连接数指数自激（实测 128/s→211/s，且取消勾选停不下来）。
+    // close() 是必需项，退避只是锦上添花。
+    logES.onerror=()=>{q('#logStatus').textContent='连接中断，重连中…';
+      const dead=logES;logES=null;if(dead){try{dead.close()}catch(_){}}
+      if(logRetryTimer)clearTimeout(logRetryTimer);
+      const d=logRetryDelay;logRetryDelay=Math.min(logRetryDelay*2,60000);
+      logRetryTimer=setTimeout(()=>{logRetryTimer=null;if(sel&&sel.checked)toggleLogStream(true)},d)};
+    q('#logStatus').textContent='已连接';
+  }else{
+    if(DEMO_MODE){if(demoLogTimer){clearInterval(demoLogTimer);demoLogTimer=null}q('#logStatus').textContent='已暂停';return}
+    // ★ 暂停必须把待重试的定时器也撤掉，否则「已暂停」只是文字
+    if(logRetryTimer){clearTimeout(logRetryTimer);logRetryTimer=null}
+    logRetryDelay=2000;
+    if(logES){try{logES.close()}catch(_){};logES=null;q('#logStatus').textContent='已暂停'}
+  }
+}
+function setLogRunLevel(v){
+  if(DEMO_MODE){showToast('日志级别已切换为 '+v+'（演示）','success');return}
+  fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({log_level:v})}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status)}).then(()=>showToast('日志级别已切换为 '+v,'success')).catch(e=>showToast('切换级别失败: '+e.message,'error'));
+}
+function exportLogs(){
+  const text=logBuf.map(e=>fmtLogTime(e.time)+' ['+e.level+'] '+(e.msg||'')).join('\n')||'(无日志)';
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type:'text/plain'}));a.download='opencode2api-logs.txt';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);
+}
+
+/* ---------- 调用日志（Call Log） ---------- */
+let callLogData=[],callLogExpanded={},clLogView='list',callLogTimer=null;
+const CL_ISSUE_TYPES=['switch','ttft_timeout','silence_timeout','stream_interrupt','stream_error','connect_error','upstream_error','all_failed'];
+function clHasIssue(r){if(r.status!=='ok')return true;return (r.events||[]).some(e=>CL_ISSUE_TYPES.includes(e.type))}
+function clIssueLabel(r){for(const e of r.events||[]){switch(e.type){case 'all_failed':return '全部节点失败';case 'switch':return '已切换节点';case 'ttft_timeout':return '首字超时';case 'silence_timeout':return '静默超时';case 'stream_interrupt':return '流中断';case 'stream_error':return '流错误';case 'connect_error':return '连接失败';case 'upstream_error':return '上游错误'}}return '异常'}
+function clFmtTime(ts){try{const d=new Date(ts);const p=n=>String(n).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds())}catch(_){return ts||''}}
+function clFmtDur(ms){if(!ms||ms<=0)return '-';if(ms<1000)return ms+'ms';return (ms/1000).toFixed(1)+'s'}
+function showLogTab(t){
+  const raw=t==='raw',call=t==='call';
+  q('#rawLogView').style.display=raw?'':'none';
+  q('#callLogView').style.display=call?'':'none';
+  q('#logTabRaw').className=raw?'active':'';
+  q('#logTabCall').className=call?'active':'';
+  if(call){loadCallLog(false);if(!callLogTimer)callLogTimer=setInterval(()=>loadCallLog(true),5000)}
+  else if(callLogTimer){clearInterval(callLogTimer);callLogTimer=null}
+}
+function loadCallLog(showStatus){
+  if(DEMO_MODE){if(!callLogData.length)applyDemoCallLog();clRefreshView();return}
+  // ★ 2s 超时。**实测依据**（/tmp/impl，环满 2000 条 × 12 events，-benchtime=2s -count=5，
+  // 中位数）：latest(500)+反转+JSON 编码 = **3.17 ms**、1.4 MB、22 allocs。
+  // ⇒ 2s 是实测值的 ~630 倍余量；又必须远小于本页 5s 的自动刷新周期
+  // （showLogTab 里的 setInterval(loadCallLog,5000)），否则下一次刷新会在上一次还在飞时发起。
+  // ★ 注意：**这个端点不读日志文件**（latest() 是 2000 条的内存环），
+  // 所以「95.7 MB 让它变慢」不成立 —— 原缺陷是【完全没有超时】，
+  // 请求一旦挂住就永远停在那里（日志页随之失明），而不是「慢」。
+  const ac=new AbortController();const tid=setTimeout(()=>ac.abort(),2000);
+  fetch('/api/call-log?limit=500',{signal:ac.signal}).then(r=>{clearTimeout(tid);if(!r.ok)throw new Error('HTTP '+r.status);return r.json()}).then(recs=>{
+    callLogData=recs||[];clRefreshView();
+    if(showStatus)q('#clStatus').textContent=clFmtTime(new Date().toISOString())+' 刷新 '+callLogData.length+' 条';
+  }).catch(e=>{
+    clearTimeout(tid);
+    // N-8：showLogTab 首次进页面传的是 showStatus=false，而 catch 被它门控，
+    // 于是「进页面那一刻失败」永远不显示，只有 5s 后的定时刷新才显示。
+    // 错误无条件上报（它是状态行不是 toast，不会吵）；成功才受 showStatus 门控。
+    q('#clStatus').textContent='加载失败: '+(e.name==='AbortError'?'请求超时 2000ms':e.message)});
+}
+function clVisible(){
+  const kw=(q('#clKeyword').value||'').trim().toLowerCase();
+  const date=q('#clDate').value;
+  const only=q('#clOnlyIssues').checked;
+  return callLogData.filter(r=>{
+    if(only&&!clHasIssue(r))return false;
+    if(date&&(r.ts||'').slice(0,10)!==date)return false;
+    if(kw){const hay=[r.model||'',r.path||'',r.err_msg||'',r.req_id||'',(r.node_names||[]).join(' '),(r.nodes||[]).join(' ')].join(' ').toLowerCase();if(!hay.includes(kw))return false}
+    return true;
+  });
+}
+function clRefreshView(){
+  const visible=clVisible();
+  const ok=callLogData.filter(r=>r.status==='ok').length;
+  const issue=callLogData.filter(clHasIssue).length;
+  q('#clTotal').textContent=callLogData.length;
+  q('#clOk').textContent=ok;
+  q('#clFail').textContent=callLogData.length-ok;
+  q('#clIssue').textContent=issue;
+  // 真实成功率：分母是**全部**记录（含走直连、没经过节点的），分子是 status==='ok'。
+  // 这个数之前就算好了（上面 ok / callLogData.length），只是没显示——面板只给了
+  // 绝对值，用户只能自己拿 100×成功/总数去算，而节点表里又看不到那批直连记录，
+  // 于是 94.60% 这种「只算走节点」的比率就成了唯一可见的口径。
+  const totalAll=callLogData.length;
+  q('#clRealRate').textContent=totalAll?(ok/totalAll*100).toFixed(2)+'%':'—';
+  const dates=new Set(callLogData.map(r=>(r.ts||'').slice(0,10)).filter(Boolean));
+  const sel=q('#clDate'),cur=sel.value;
+  sel.innerHTML='<option value="">全部日期</option>'+[...dates].sort().reverse().map(d=>'<option'+(d===cur?' selected':'')+'>'+d+'</option>').join('');
+  q('#clList').style.display=clLogView==='list'?'':'none';
+  q('#clHour').style.display=clLogView==='hour'?'':'none';
+  q('#clNode').style.display=clLogView==='node'?'':'none';
+  if(clLogView==='list')clRenderList(visible);
+  else if(clLogView==='hour')clRenderHour(visible);
+  else clRenderNode(visible);
+}
+function clSetView(v){
+  clLogView=v;
+  for(const id of ['clViewList','clViewHour','clViewNode']){const el=q('#'+id);el.className='btn btn-sm'+(id==='clView'+v.charAt(0).toUpperCase()+v.slice(1)?'':' btn-ghost')}
+  clRefreshView();
+}
+function clNodeChain(r){
+  const fps=r.nodes||[],names=r.node_names||[];
+  return fps.map((fp,i)=>names[i]||fp).join(' → ');
+}
+function clNodeLabel(ev){
+  const name=ev.node_name||'',fp=ev.node||'';
+  if(!name&&!fp)return '';
+  return '<span class="cl-ev-node" title="'+esc(fp)+'">'+esc(name||fp)+'</span> ';
+}
+function clRenderList(visible){
+  const el=q('#clList');
+  if(!visible.length){el.innerHTML='<div class="cl-empty">'+(callLogData.length?'没有匹配的日志':'暂无调用日志 · 发起一次 /v1 请求后在此查看结构化调用记录')+'</div>';return}
+  el.innerHTML=visible.map(r=>{
+    const issue=clHasIssue(r),exp=callLogExpanded[r.req_id];
+    const nodes=clNodeChain(r);
+    const badge=r.status==='ok'?'<span class="cl-badge ok">【成功】</span>':'<span class="cl-badge fail">【失败】</span>';
+    const tag=issue?'<span class="cl-issue-tag">'+clIssueLabel(r)+'</span>':'';
+    const chev=issue?(exp?'▾':'▸'):'';
+    let body='';
+    if(issue&&exp){
+      const evs=(r.events||[]).map(ev=>'<div class="cl-ev"><span class="cl-ev-time">'+clFmtTime(ev.at)+'</span><span class="cl-ev-tag '+(ev.type||'').replace(/\./g,'_')+'">'+esc(ev.type)+'</span><span>'+clNodeLabel(ev)+(ev.detail?'<span class="cl-ev-detail">'+esc(ev.detail)+'</span>':'')+'</span></div>').join('');
+      body='<div class="cl-body"><div class="cl-meta">req_id: '+esc(r.req_id||'-')+' · '+esc(r.path||'/v1/chat/completions')+' · stream: '+(r.stream?'是':'否')+' · 路由: '+esc(r.route_mode||'-')+(r.err_msg?'<span class="err"> · 错误: '+esc(r.err_msg)+'</span>':'')+'</div><div class="cl-meta">token: 输入 '+(r.prompt_tokens||0)+' / 输出 '+(r.completion_tokens||0)+' · 耗时 '+clFmtDur(r.duration_ms)+'</div><div class="cl-events">'+(evs||'<span style="color:var(--text-ter)">无事件明细</span>')+'</div></div>';
+    }
+    return '<div class="cl-item'+(issue?' issue':'')+'"><button class="cl-head" '+(issue?'onclick="clToggle(\''+r.req_id+'\')"':'')+'><span class="cl-badge '+(r.status==='ok'?'ok':'fail')+'">'+(r.status==='ok'?'【成功】':'【失败】')+'</span>'+tag+'<span class="cl-time">'+clFmtTime(r.ts)+'</span><span class="cl-model">'+esc(r.model||'-')+'</span>'+(nodes?'<span class="cl-nodes">'+esc(nodes)+'</span>':'')+'<span class="cl-dur">'+clFmtDur(r.duration_ms)+'</span><span style="flex:none;color:var(--text-ter)">'+chev+'</span></button>'+body+'</div>';
+  }).join('');
+}
+function clToggle(id){callLogExpanded[id]=!callLogExpanded[id];clRefreshView()}
+function clRenderHour(visible){
+  const el=q('#clHour');
+  const hours=Array.from({length:24},(_,h)=>({h,req:0,ok:0,totalMs:0,issue:0}));
+  for(const r of visible){
+    const d=new Date(r.ts);if(isNaN(d))continue;
+    const s=hours[d.getHours()];s.req++;if(r.status==='ok')s.ok++;s.totalMs+=r.duration_ms||0;s.issue+=(r.events||[]).filter(e=>CL_ISSUE_TYPES.includes(e.type)).length;
+  }
+  const withData=hours.filter(h=>h.req>0);
+  if(!withData.length){el.innerHTML='<div class="cl-empty">暂无日志数据</div>';return}
+  const maxReq=Math.max(1,...hours.map(h=>h.req));
+  el.innerHTML='<div style="font-size:13px;font-weight:600;margin-bottom:4px">时段分析</div><div style="font-size:12px;color:var(--text-ter);margin-bottom:8px">按小时统计请求分布与成功率（数据来自保留期内调用日志）</div>'+
+    '<div class="cl-chart">'+hours.map(h=>h.req>0?'<div class="bar" title=""><div class="tip">'+String(h.h).padStart(2,'0')+' 时 · '+h.req+' 请求 · 均耗 '+clFmtDur(Math.round(h.totalMs/h.req))+'</div><div class="fill'+(h.ok/h.req>=0.9?'':' issue')+'" style="height:'+Math.max(h.req/maxReq*100,4)+'%"></div></div>':'<div class="bar"></div>').join('')+'</div>'+
+    '<table class="cl-tbl"><thead><tr><th>时段</th><th class="num">请求数</th><th class="num">平均耗时</th><th class="num">失败率</th><th class="num">异常/切换</th></tr></thead><tbody>'+withData.map(h=>'<tr><td>'+String(h.h).padStart(2,'0')+':00 - '+String(h.h).padStart(2,'0')+':59</td><td class="num">'+h.req+'</td><td class="num">'+clFmtDur(Math.round(h.totalMs/h.req))+'</td><td class="num">'+Math.round((1-h.ok/h.req)*100)+'%</td><td class="num">'+h.issue+'</td></tr>').join('')+'</tbody></table>';
+}
+function clRenderNode(visible){
+  const el=q('#clNode');
+  const m=new Map();
+  // 「全部」行的累加器：分母包含直连请求。★ 这是修掉「面板说漂亮话」的关键一行——
+  // 原来表格每一行都是「最终出口节点」，直连记录被塞进一个叫「未知」的桶，
+  // 而那一桶恰好是最差的一批（实测成功率 57.9%，占全量 35.49%），
+  // 于是用户看到的每一行都好看，加总却对不上真实成功率。
+  const all={node:'全部',req:0,ok:0,totalMs:0,issue:0,isTotal:true};
+  for(const r of visible){
+    const last=r.nodes&&r.nodes.length?r.nodes.length-1:-1;
+    // 走直连（没有节点）的记录：按事件类型细分成三类，不再糊成一个「未知」。
+    // 判定顺序即优先级；三类互斥，且必须覆盖全部直连记录（否则会多出第四类残留）。
+    let node;
+    if(last<0){
+      const evs=r.events||[];
+      const has=k=>evs.some(e=>e&&e.type===k);
+      const blocked=evs.some(e=>e&&e.type==='quota_halt'&&(e.detail||'').includes('blocked'));
+      node=blocked?'直连·闸门拒绝':has('connect_error')?'直连·连不上':'直连·其他';
+    }else{
+      node=(r.node_names&&r.node_names[last])||r.nodes[last];
+    }
+    let s=m.get(node);if(!s){s={node,req:0,ok:0,totalMs:0,issue:0};m.set(node,s)}
+    const issueN=(r.events||[]).filter(e=>CL_ISSUE_TYPES.includes(e.type)).length;
+    s.req++;if(r.status==='ok')s.ok++;s.totalMs+=r.duration_ms||0;s.issue+=issueN;
+    all.req++;if(r.status==='ok')all.ok++;all.totalMs+=r.duration_ms||0;all.issue+=issueN;
+  }
+  // 「全部」置顶，其余仍按请求数降序。
+  const rows=[all].concat([...m.values()].sort((a,b)=>b.req-a.req||b.issue-a.issue));
+  if(!rows.length){el.innerHTML='<div class="cl-empty">暂无日志数据</div>';return}
+  el.innerHTML='<div style="font-size:13px;font-weight:600;margin-bottom:4px">节点分析</div><div style="font-size:12px;color:var(--text-ter);margin-bottom:8px">按最终出口节点聚合；「直连·*」为未经过节点直接出站的请求，按失败形态细分；「全部」行的分母含直连</div>'+
+    '<table class="cl-tbl"><thead><tr><th>节点</th><th class="num">请求数</th><th class="num">成功率</th><th class="num">平均耗时</th><th class="num">异常/切换</th></tr></thead><tbody>'+rows.map(n=>{const rate=n.req?n.ok/n.req:0;const cls=rate>=0.9?'':rate>=0.5?'warn':'bad';return '<tr'+(n.isTotal?' style="font-weight:600"':'')+'><td style="font-family:var(--mono);font-size:12px">'+esc(n.node)+'<span class="ratebar"><i class="'+cls+'" style="width:'+(rate*100)+'%"></i></span></td><td class="num">'+n.req+'</td><td class="num">'+(rate*100).toFixed(2)+'%</td><td class="num">'+clFmtDur(Math.round(n.totalMs/n.req))+'</td><td class="num">'+n.issue+'</td></tr>'}).join('')+'</tbody></table>';
+}
+function clearCallLog(){
+  if(!confirm('确定清空全部调用日志？\n\n该操作不可恢复：调用日志文件会被删除，同时 Token 累计统计也会一并清零（两者现在是同一份数据的两个视图）。'))return;
+  if(DEMO_MODE){callLogData=[];clRefreshView();showToast('日志已清空（演示）','success');return}
+  fetch('/api/call-log',{method:'DELETE'}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status)}).then(()=>{callLogData=[];clRefreshView();showToast('调用日志已清空','success')}).catch(e=>showToast('清空失败: '+e.message,'error'));
+}
+function applyDemoCallLog(){
+  const now=Date.now(),models=['deepseek-v4-flash','mimo-v2.5','gpt-5.5','glm-5.2'],nodes=[['hk-01'],['hk-01','jp-02'],['us-03']],paths=['/v1/chat/completions','/v1/messages','/v1/responses'];
+  callLogData=[];
+  for(let i=0;i<40;i++){
+    const ok=Math.random()>0.22;
+    const rec={req_id:'req_demo'+String(9100+i),ts:new Date(now-(40-i)*64000).toISOString(),path:paths[i%3],model:models[i%4],stream:i%2===0,route_mode:i%3?'public':'auto',nodes:nodes[i%3],status:ok?'ok':'fail',prompt_tokens:ok?Math.floor(300+Math.random()*1200):0,completion_tokens:ok?Math.floor(120+Math.random()*900):0,duration_ms:Math.floor(400+Math.random()*3000),events:[]};
+    if(ok)rec.events.push({type:'connect_ok',node:rec.nodes[0],at:rec.ts});
+    else{
+      rec.events.push({type:'connect_ok',node:rec.nodes[0],at:rec.ts});
+      rec.events.push({type:'upstream_error',node:rec.nodes[0],detail:'http 429',at:rec.ts});
+      if(rec.nodes.length>1){rec.events.push({type:'switch',node:rec.nodes[0],detail:'quota:FreeUsageLimitError',at:rec.ts});rec.events.push({type:'connect_ok',node:rec.nodes[1],at:rec.ts})}
+      else{rec.events.push({type:'all_failed',node:rec.nodes[0],detail:'quota budget exhausted',at:rec.ts})}
+      rec.err_msg=rec.nodes.length>1?'upstream http 429':'quota budget exhausted';
+    }
+    callLogData.push(rec);
+  }
+}
+function applyDemoLogs(){
+  logBuf=[];const levels=['INFO','INFO','DEBUG','INFO','WARN','INFO','ERROR','INFO','DEBUG','INFO'];
+  const msgs=['request_started','upstream_attempt node=hk-01 latency=48ms','stream_result tokens=1284','request_done ok','node marked exhausted (FreeUsageLimitError)','switching node → jp-02','upstream_error retry=2 backoff=500ms','subscription refreshed nodes=14','health probe ok latency=62ms','token stats saved'];
+  const now=Date.now();
+  for(let i=0;i<42;i++){
+    logBuf.push({seq:i+1,time:new Date(now-(42-i)*1400).toISOString(),level:levels[i%levels.length],msg:msgs[i%msgs.length],attrs:i%3===0?[{k:'request_id',v:'req_'+String(9100+i)},{k:'model',v:i%2?'gpt-5.5':'glm-5.2'}]:[]});
+  }
+  logLastSeq=logBuf.length;
+}
+
+/* ============================================================
+   离线演示数据
+   ============================================================ */
+const DEMO={
+  cfg:{
+    subscriptions:[
+      {name:'主订阅',url:'https://sub.example.com/clash',update_interval_hours:24,nodes:14,usage_total:107374182400,usage_used:39728447488,usage_expire:1754000000,last_updated_at:'2026-08-10T21:03:00Z'},
+      {name:'备线路',url:'https://backup.example.com/uri',update_interval_hours:48,nodes:6,usage_total:536870912000,usage_used:12884901888,last_updated_at:'2026-08-09T08:12:00Z'}
+    ],
+    manual_nodes:[{protocol:'vless',name:'自建东京',address:'jp.example.com',port:443,user_id:'a3f2c9d1-…',sni:'example.com',reality:{public_key:'MIIBIjANBg…',short_id:'ab12',spider_x:'/'}}],
+    model_alias:{'gpt-5.5':'gpt-5.5','glm-5.2':'glm-5.2','deepseek-r1':'deepseek-r1'},
+    reasoning_effort_map:{low:'minimal',high:'high'},
+    force_disable_thinking:false,
+    socks5_proxies:[{name:'本地代理',addr:'127.0.0.1:7890'}],
+    active_socks5:'',socks5_paid_direct:false,
+    api_key:'sk-demo-xxxxxxxxxxxxxxxx',
+    quota_error_signals:{error_types:['FreeUsageLimitError','insufficient_quota'],message_keywords:['free usage limit','quota','limit exceeded']},
+    max_quota_node_switches:5,node_cooldown_exhausted_hours:1,node_cooldown_dead_minutes:1,
+    node_health_interval_minutes:15,node_health_probe_url:'https://opencode.ai/zen/v1/models',
+    log_level:'info'
+  },
+  nodes:[
+    {name:'香港 01',protocol:'vless',state:'available',latency_ms:48,cooldown_until:'',last_error:'',fingerprint:'a1b2c3d4',active:true,manual:false},
+    {name:'日本 02',protocol:'vless',state:'available',latency_ms:86,cooldown_until:'',last_error:'',fingerprint:'e5f6a7b8',active:false,manual:false},
+    {name:'新加坡 03',protocol:'trojan',state:'available',latency_ms:112,cooldown_until:'',last_error:'',fingerprint:'c9d0e1f2',active:false,manual:false},
+    {name:'美国 04',protocol:'hysteria2',state:'exhausted',latency_ms:184,cooldown_until:'2026-08-12T06:00:00Z',last_error:'FreeUsageLimitError: free usage limit reached',fingerprint:'33445566',active:false,manual:false},
+    {name:'德国 05',protocol:'ss',state:'dead',latency_ms:-1,cooldown_until:'2026-08-11T03:00:00Z',last_error:'dial tcp: i/o timeout',fingerprint:'778899aa',active:false,manual:false},
+    {name:'自建东京',protocol:'vless',state:'idle',latency_ms:null,cooldown_until:'',last_error:'未探测',fingerprint:'bbccddee',active:false,manual:true},
+    {name:'韩国 06',protocol:'anytls',state:'available',latency_ms:132,cooldown_until:'',last_error:'',fingerprint:'11223344',active:false,manual:false}
+  ],
+  subscriptions:[
+    {name:'主订阅',url:'https://sub.example.com/clash',update_interval_hours:24,nodes:14,usage_total:107374182400,usage_used:39728447488,usage_expire:1754000000,last_updated_at:'2026-08-10T21:03:00Z'},
+    {name:'备线路',url:'https://backup.example.com/uri',update_interval_hours:48,nodes:6,usage_total:536870912000,usage_used:12884901888,last_updated_at:'2026-08-09T08:12:00Z'},
+    {name:'webshare-主池',url:'webshare API',update_interval_hours:12,nodes:5,last_updated_at:'2026-08-10T22:05:00Z'}
+  ],
+  // 离线兜底的 /api/stats 响应。字段必须与 ranged 响应同形（models 带
+  // cache_read_tokens / avg_ttft_ms / avg_output_speed / stream_req_count /
+  // throughput_tps / stream_tps_n，
+  // 外加 total_requests、顶层 throughput_tps 与 trends_by_model），
+  // 否则演示模式下顶部 Hero 会缺格、五格闭合不成立，verify_ui.py 的 DEMO 判定也会失效。
+  // ★ throughput_tps 与 avg_output_speed 必须分开填：前者是 Σtok/Σsec（按秒加权），
+  // 后者是速率的算术平均，不是同一个数。夹具里刻意让两者差出一截
+  // （gpt-4o-mini 58.4 vs 41.2），任何一处误读 avg_output_speed 的代码都会立刻显形。
+  // 顶层值 = Σm.throughput_tps 按各模型 decode 窗加权（非各模型吞吐的平均）。
+  stats:{total_requests:4532,throughput_tps:36.39961257976299,stream_tps_n:4388,models:{
+    'gpt-4o-mini':{request_count:1280,prompt_tokens:12345678,completion_tokens:2345678,total_tokens:14691356,cache_read_tokens:6700000,cache_created_tokens:0,avg_ttft_ms:412,avg_output_speed:58.4,stream_req_count:1240,throughput_tps:41.2,stream_tps_n:1240},
+    'gpt-5.5':{request_count:342,prompt_tokens:8912345,completion_tokens:1234567,total_tokens:10146912,cache_read_tokens:4100000,cache_created_tokens:0,avg_ttft_ms:538,avg_output_speed:44.1,stream_req_count:331,throughput_tps:24.8,stream_tps_n:331},
+    'glm-5.2':{request_count:876,prompt_tokens:4567890,completion_tokens:987654,total_tokens:5555544,cache_read_tokens:1900000,cache_created_tokens:0,avg_ttft_ms:305,avg_output_speed:71.6,stream_req_count:852,throughput_tps:52.6,stream_tps_n:852},
+    'deepseek-r1':{request_count:2034,prompt_tokens:22334455,completion_tokens:3344556,total_tokens:25679011,cache_read_tokens:9600000,cache_created_tokens:0,avg_ttft_ms:690,avg_output_speed:37.2,stream_req_count:1965,throughput_tps:28.3,stream_tps_n:1965}
+  },trends_by_model:[]},
+  caps:[
+    {id:'gpt-4o-mini',cw:128000,mo:16384,mod:['text','image']},
+    {id:'gpt-5.5',cw:400000,mo:32768,mod:['text','image','pdf']},
+    {id:'glm-5.2',cw:200000,mo:16384,mod:['text']},
+    {id:'deepseek-r1',cw:128000,mo:8192,mod:['text']}
+  ],
+  models:['gpt-4o-mini','gpt-5.5','glm-5.2','deepseek-r1','deepseek-v4-flash-free','mimo-v2.5-free']
+};
+
+/* ============================================================
+   启动
+   ============================================================ */
+async function detectBackend(){
+  // file:// 是原型预览路径，设计文档写明保留 ⇒ 合法的 demo。
+  if(location.protocol==='file:')return 'demo';
+  const ac=new AbortController();const tid=setTimeout(()=>ac.abort(),T_PROBE);
+  try{
+    const r=await fetch('/api/config',{headers:{'Accept':'application/json'},signal:ac.signal});
+    // 404/405：这个 origin 根本不是后端（静态预览服务器）⇒ demo 合法。
+    // 5xx / 2xx-非JSON / 302 跟随后的 200+HTML / 网络错误 / 超时：后端在、它坏了
+    // ⇒ 一律 error，绝不 demo。fetch 会跟随 302，所以前端看到的是 200+HTML。
+    if(r.status===404||r.status===405)return 'demo';
+    if(!r.ok)return 'error';
+    const c=await r.json();
+    return (c&&typeof c==='object'&&!Array.isArray(c))?'online':'error';
+  }catch(e){return 'error'}
+  finally{clearTimeout(tid)}
+}
+/* N-5 的 D′：探测判 error 后持续重试，一旦不再是 error 就 reload。
+   ★ 用 reload 而不是把 DEMO_MODE 翻回 false：DEMO_MODE 保持「运行期不可变」，
+     1A 依赖这个前提论证 demoLogTimer 不会与 EventSource 打架；
+     热切换会让 19 处读取点全部变成「必须重新求值」，且 :1700 的 demoLogTimer
+     不随模式退出清理 ⇒ 在新位置复现 N-5（编造数据持续再生）。
+     恢复时自动 F5 一次，而这正是用户今天【必须手动做】的动作。
+   ★ 只在 error 时重试：demo 是合法终态，对它 reload 会永远循环。 */
+let backendRetryTimer=null;
+function scheduleBackendRetry(){
+  if(backendRetryTimer)return;
+  backendRetryTimer=setInterval(async()=>{
+    const s=await detectBackend();
+    if(s!=='error'){clearInterval(backendRetryTimer);backendRetryTimer=null;location.reload()}
+  },5000);
+}
+applyTheme();
+window.addEventListener('DOMContentLoaded',async()=>{
+  /* N-6：与后端无关的初始化必须排在 await detectBackend() 【之前】。
+     原顺序下探测一挂起，Promise.all 不开始 ⇒ initAllCharts 不跑（canvas=0）
+     且 setAutoRefresh 不跑（没有任何重试来源）—— 用户看到一片永远不会动的骨架屏。
+     探测超时（3s）解决「判定不收敛」，提到前面解决「挂起时页面全残」，两者互补。 */
+  initAllCharts();
+  setAutoRefresh(parseInt(localStorage.getItem('autoRefresh')||'0',10)||0);
+  startNodeAlertWatch();   // 告警横幅独立轮询（30s），与「自动刷新」开关无关
+  const state=await detectBackend();
+  backendState=state;DEMO_MODE=(state==='demo');applyConn();
+  const sa=q('#sideAddr');if(sa)sa.textContent=(location.host||location.hostname)||(DEMO_MODE?'localhost:8000':'-');
+  if(state==='error')scheduleBackendRetry();
+  await Promise.all([fetchModelList(),loadConfig(),loadNodes(),loadStats(),loadCaps()]);
+  renderConfigEditors();
+  initLogs();
+});
+</script>
+</body>
+</html>

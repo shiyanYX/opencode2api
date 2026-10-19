@@ -28,14 +28,15 @@ import (
 
 // httpClient 用于流式 API 调用。不设 Client.Timeout——流式 SSE 响应可持续数分钟，
 // 全局超时会误杀正常流（context deadline exceeded while reading body）。
-// 改用 Transport 级超时：DialContext 保护连接阶段，ResponseHeaderTimeout 保护头部阶段，
-// Body 读取阶段不设超时，由上游关闭连接自然结束。
+// 改用 Transport 级超时：DialContext 保护连接阶段，TLSHandshakeTimeout 保护握手阶段，
+// ResponseHeaderTimeout 保护头部阶段，Body 读取阶段不设超时，由上游关闭连接自然结束。
 var httpClient = &http.Client{
 	Transport: &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
 		ResponseHeaderTimeout: 60 * time.Second,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
@@ -54,6 +55,7 @@ var mgmtClient = &http.Client{
 		MaxIdleConnsPerHost: 5,
 		IdleConnTimeout:     30 * time.Second,
 		Proxy:               http.ProxyFromEnvironment,
+		TLSHandshakeTimeout: tlsHandshakeTimeout,
 		DialContext: (&net.Dialer{
 			Timeout:   10 * time.Second,
 			KeepAlive: 15 * time.Second,
@@ -2587,6 +2589,18 @@ func maxAttemptsForUpstreamStatus(status int) int {
 	return maxUpstreamRetries
 }
 
+// upstreamLoopBudget 单个请求在重试循环里最多花多久（墙钟），只用于在两次 attempt
+// 之间决定「还要不要再试」——绝不打断在途响应。
+// 为什么不用超时 ctx：非流式耗时包含模型生成时间，实测【成功】请求里 >75s 占 2.34%
+// （历史口径 8.69%）、>120s 占 1.66%。套 ctx 会在生成中途把本来会成功的请求掐成失败
+// （R2 独立验收 blocker C1），代价大于收益。
+// 取值 120s：把「反复失败」的病态链收在 120s 量级。
+// ⚠️ 它【不】给单次 attempt 设上界：dial 60s + ResponseHeaderTimeout 60s 之外，
+// body 读取与整体耗时仍可能更长（实测有 >1200s 的失败样本）。
+// 「发出去了却卡住不返回」的正解是空闲读超时（每读到字节就重置），另立任务。
+// 流式路径同样只做墙钟检查（body 在函数返回后继续读）。
+var upstreamLoopBudget = 120 * time.Second
+
 func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) ([]byte, int, http.Header, error) {
 	// 配额熔断闸门：节点池无可用节点且直连出口已被上游 429 限流时，
 	// 直接返回 429，不再访问上游（见 quota_halt.go）。
@@ -2633,6 +2647,12 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		maxAttempts = max401Retries
 	}
 
+	// 【不要】用超时 ctx：非流式耗时含模型生成时间，套 ctx 会把「本来会成功」的请求
+	// 在生成中途掐断（R2 验收 blocker C1：成功请求 >75s 占 2.34%、>120s 占 1.66%）。
+	// 预算只以墙钟 break 形式生效（见循环内），绝不打断在途响应。
+	// 仍然把调用方 ctx 挂到请求上（见下方 up.WithContext）：客户端断开可取消上游。
+	loopCtx := ctx
+
 	// 免费额度耗尽自动切节点：独立预算（默认 5 个节点），不占用重试闸门；
 	// 循环上限 = 重试上限 + 配额预算，两者各自封顶互不挤占（重试仍由 canRetry 限制）。
 	nodeSwitchPending := false
@@ -2645,10 +2665,19 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	pendingBadFp := ""
 	pendingVer := ""
 	freeTierSwitches := 0
+	upstreamLoopStart := time.Now()
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
+		// 请求级总预算：到点就收手，不再叠加等待（砍掉 135s 的病态尾部）。
+		if attempt > 0 && time.Since(upstreamLoopStart) >= upstreamLoopBudget {
+			log.Warn("upstream_loop_budget_exhausted",
+				"try_model", modelID, "surface", surface,
+				"attempt_index", attempt,
+				"elapsed_ms", time.Since(upstreamLoopStart).Milliseconds())
+			break
+		}
 		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
 		client, nodeFp := egResult.Client, egResult.NodeFP
 		// I2：本 attempt 实际发出的 UA 版本由本请求自己携带（builder 不再读全局），
@@ -2658,6 +2687,9 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		if err != nil {
 			return nil, 500, nil, err
 		}
+		// 把上下文真正挂到上游请求上（builder 用的是 http.NewRequest，Context 是
+		// Background）：预算超时与客户端断开取消靠这一行才会生效。
+		up = up.WithContext(loopCtx)
 		nodeSwitchPending = false
 		// I6：并发下 pick 可能又把刚失败的节点选回来（force 只排除 activeID），
 		// 静默空转会让「换了节点还是 403」事后无法解释，故显式记一条事件。
@@ -2670,6 +2702,14 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		// 的真实建连成本落进调用记录 —— 此前成功侧完全没有这个维度，只有失败侧
 		// 的 connect_error，能据此观测的建连分布全是失败尾部。
 		resp, err := client.Do(withDialTrace(ctx, up))
+		if err == nil && resp != nil {
+			// C-2：body 阶段套「空闲读超时」——连续 idleReadTimeout 没有字节就中止。
+			// 不用总时长上限：长生成/长流式只要有数据在走就不该被误杀。
+			resp.Body = newIdleReadCloser(resp.Body, idleReadTimeout)
+		}
+		// C-5：喂节点层告警样本。口径是【传输层】——拿到任何上游响应（含 403/429）
+		// 都说明这条出口是通的；账号级限流不该记到节点头上。direct 出口不计。
+		nodeAlerts.recordNodeAttempt(nodeFp != "", err == nil)
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
@@ -3013,6 +3053,11 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		maxAttempts = max401Retries
 	}
 
+	// 流式路径【不能】套超时 ctx：body 在函数返回后由调用方继续读，超时 context 会在
+	// 中途把流掐断。这里只做墙钟检查；但仍把调用方 ctx 挂上去，修复「上游请求的
+	// Context 一直是 Background ⇒ 客户端断开也不会取消上游」这个既有问题。
+	loopCtx := ctx
+
 	// 免费额度耗尽自动切节点（流式：仅头部非 2xx 时可切；已吐字节不可重试）：
 	// 独立预算（默认 5 个节点），不占用重试闸门；循环上限 = 重试上限 + 配额预算。
 	nodeSwitchPending := false
@@ -3025,10 +3070,19 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	pendingBadFp := ""
 	pendingVer := ""
 	freeTierSwitches := 0
+	upstreamLoopStart := time.Now()
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
+		// 请求级总预算：到点就收手，不再叠加等待（砍掉 135s 的病态尾部）。
+		if attempt > 0 && time.Since(upstreamLoopStart) >= upstreamLoopBudget {
+			log.Warn("upstream_loop_budget_exhausted",
+				"try_model", modelID, "surface", surface,
+				"attempt_index", attempt,
+				"elapsed_ms", time.Since(upstreamLoopStart).Milliseconds())
+			break
+		}
 		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
 		client, nodeFp := egResult.Client, egResult.NodeFP
 		// I2：同非流式——版本由本请求携带，见上方注释。
@@ -3037,6 +3091,9 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		if err != nil {
 			return nil, 500, nil, err
 		}
+		// 把上下文真正挂到上游请求上（builder 用的是 http.NewRequest，Context 是
+		// Background）：预算超时与客户端断开取消靠这一行才会生效。
+		up = up.WithContext(loopCtx)
 		nodeSwitchPending = false
 		// I6：同非流式——换节点后可能又拿到同一个坏节点，必须可观测。
 		if pendingBadFp != "" && nodeFp == pendingBadFp {
@@ -3046,6 +3103,14 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		attemptStart := time.Now()
 		// 同上：流式路径也挂 dial trace，否则 dial_ms 只覆盖非流式一半流量。
 		resp, err := client.Do(withDialTrace(ctx, up))
+		if err == nil && resp != nil {
+			// C-2：body 阶段套「空闲读超时」——连续 idleReadTimeout 没有字节就中止。
+			// 不用总时长上限：长生成/长流式只要有数据在走就不该被误杀。
+			resp.Body = newIdleReadCloser(resp.Body, idleReadTimeout)
+		}
+		// C-5：喂节点层告警样本。口径是【传输层】——拿到任何上游响应（含 403/429）
+		// 都说明这条出口是通的；账号级限流不该记到节点头上。direct 出口不计。
+		nodeAlerts.recordNodeAttempt(nodeFp != "", err == nil)
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
@@ -7045,6 +7110,7 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 			"dead_count":      health["dead"],
 			"nodes":           out,
 			"subscriptions":   subManager.snapshot(),
+			"node_alert":      nodeAlerts.snapshot(),
 		})
 	case http.MethodPost:
 		var payload struct {

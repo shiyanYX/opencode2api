@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -94,6 +95,10 @@ type ProxyNode struct {
 	// LatencyMs 最近一次健康探测延迟（毫秒）；0/未探测表示尚无结果。
 	LatencyMs   int64     `json:"-"`
 	LastProbeAt time.Time `json:"-"`
+	// ProbeFailStreak 连续探测失败次数（运行时态，不持久化）。
+	// 只有连续 probeFailStreakThreshold 次失败才判 dead —— 一次网络抖动不该丢掉一个 IP
+	// （2026-10-19 生产：一轮抖动让 86 个节点同时被判死、70 分钟不恢复）。
+	ProbeFailStreak int `json:"-"`
 	// GateState 推理闸门状态（unknown | ok | rejected），归 T3 所有。
 	// T1 的 confirm-then-mark 只写 "rejected"：该出口被上游按 IP 拒绝。
 	// 当 gateReviveRequiresProbe=true 时，rejected 节点不接受「冷却到期」的时间复活，
@@ -259,6 +264,14 @@ const defaultDialTimeout = 60 * time.Second
 // dialTimeout 实际生效的建连超时。做成 var 而非直接用 const，是为了让测试能临时
 // 下调到秒级验证机制（真等 60 秒的测试没有实用价值）；生产取值恒为 defaultDialTimeout。
 var dialTimeout = defaultDialTimeout
+
+// tlsHandshakeTimeout TLS 握手阶段的上限。
+// 为什么必须有它：Go 里 http.Transport.TLSHandshakeTimeout 的零值表示【不超时】。
+// 2026-10-19 生产实测：节点接受 TCP 但 TLS 握手被黑洞时，单次 upstream attempt 挂了
+// 940~1034 秒（15~17 分钟）才报 transport_error，请求日志里 status=0（连响应头都没拿到）
+// ⇒ 挂住的阶段只能是建连或 TLS 握手，而这两者此前只有建连有 ctx 上限。
+// 做成 var 便于测试注入更短的值。
+var tlsHandshakeTimeout = 15 * time.Second
 
 var proxyPool = newProxyPool("proxy_state.json")
 
@@ -489,6 +502,7 @@ func (p *nodePool) markLocked(fp string, st NodeState, reason, gate string) bool
 	n.MarkedAt = now
 	n.LastError = reason
 	n.GateState = gate
+	n.ProbeFailStreak = 0 // 显式状态变更后重新计数，避免跨状态累积
 	switch st {
 	case NodeExhausted:
 		n.CooldownUntil = now.Add(p.effectiveExhaustedCooldown())
@@ -602,6 +616,36 @@ func (p *nodePool) markFreeTierRejected(fp string) bool {
 
 // ======================= 健康检查 =======================
 
+const (
+	// probeFailStreakThreshold 连续探测失败多少次才判 dead。
+	// =2：一次网络抖动/上游偶尔的 TLS 失败不判死；两次（相隔一个周期）说明节点确实坏。
+	probeFailStreakThreshold = 2
+	// probeMaxConcurrent 单轮探测的最大并发数。生产曾出现「86 个 dead ⇒ 每分钟 86 路
+	// 并发探测」的自压制循环，必须限并发。
+	probeMaxConcurrent = 8
+)
+
+// testProbeNode 测试钩子：非 nil 时替代真实探测（与 testNodeClient 同一风格）。
+var testProbeNode func(ctx context.Context, n *ProxyNode, probeURL string) (int64, error)
+
+// blipStreak 连续多少轮探测被判为「全局抖动」。
+// 抖动轮次一节点都不判死，缺了它就会静默掩盖「本机网络长期异常」——所以要有升级信号。
+var blipStreak atomic.Int64
+
+// probeRoundLooksLikeGlobalBlip 判断一整轮探测的失败是否像「我们自己的网络问题」。
+// 依据（2026-10-19 生产）：一次约 2 分钟的出口抖动让 90/218 个节点在同一轮超时。
+// 判据：一轮里失败 >=20 个，或（该轮 >=8 个且失败占 >=75%）。
+// 命中时整轮失败不予采信 —— 不判死、也不累积 streak。
+func probeRoundLooksLikeGlobalBlip(total, failed int) bool {
+	if total < 8 || failed <= 0 {
+		return false
+	}
+	if failed >= 20 {
+		return true
+	}
+	return failed*4 >= total*3
+}
+
 // healthIntervalLocked 返回当前探测周期（调用方持锁）。
 // probeInterval 为负数表示禁用健康检查；0 表示使用默认 15min。
 func (p *nodePool) healthIntervalLocked() time.Duration {
@@ -637,6 +681,9 @@ func (p *nodePool) healthInterval() time.Duration {
 // 当探测目标为 opencode.ai 时，自动注入 Authorization 与 x-opencode-session 头，
 // 模拟真实请求以验证代理对上游域名的可达性（而非仅验证通用互联网连通性）。
 func (p *nodePool) probeNode(ctx context.Context, n *ProxyNode, probeURL string) (int64, error) {
+	if testProbeNode != nil {
+		return testProbeNode(ctx, n, probeURL)
+	}
 	client := p.getClient(n.Fingerprint)
 	if client == nil {
 		return 0, errors.New("node client unavailable")
@@ -667,6 +714,19 @@ func (p *nodePool) probeNode(ctx context.Context, n *ProxyNode, probeURL string)
 
 // probeFilter 限定一次探测的节点子集。
 type probeFilter int
+
+// String 让日志能区分「是哪一种轮次触发了闸门」。
+func (f probeFilter) String() string {
+	switch f {
+	case probeAll:
+		return "all"
+	case probeAvailable:
+		return "available"
+	case probeDead:
+		return "dead"
+	}
+	return "unknown"
+}
 
 const (
 	probeAll       probeFilter = iota // 全量（含 exhausted）：面板手动"测速"使用
@@ -711,8 +771,12 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 		return 0
 	}
 	var (
-		wg     sync.WaitGroup
-		probed int
+		wg       sync.WaitGroup
+		probed   int
+		mu       sync.Mutex
+		failedFP []string
+		failWhy  = map[string]string{}
+		sem      = make(chan struct{}, probeMaxConcurrent)
 	)
 	for _, n := range nodes {
 		switch filter {
@@ -727,13 +791,18 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 		}
 		probed++
 		wg.Add(1)
+		sem <- struct{}{}
 		go func(n *ProxyNode) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			pctx, cancel := context.WithTimeout(ctx, probeTimeout)
 			defer cancel()
 			ms, err := p.probeNode(pctx, n, probeURL)
 			if err != nil {
-				p.markProbeDead(n.Fingerprint, "probe: "+err.Error())
+				mu.Lock()
+				failedFP = append(failedFP, n.Fingerprint)
+				failWhy[n.Fingerprint] = err.Error()
+				mu.Unlock()
 				// 降 Debug：markProbeDead 已按「首次 / 重复 / exhausted」三级分级
 				// （Info / Debug / Debug，见 :650 / :634 / :628），重复失败的节流
 				// 已在它内部完成。这条无状态转移信息的重复记录不应再以 Warn 刷屏
@@ -748,6 +817,29 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 		}(n)
 	}
 	wg.Wait()
+
+	// 全局抖动闸【只对可用节点巡检轮次生效】。
+	// dead 复探轮天然大面积失败（它们本来就是 dead），若参与判定会让 WARN 每分钟一条、
+	// ERROR 每 10 分钟一条且永久常亮 —— 恰好反转了这条告警本该提供的信号（R2 复审 D1）。
+	guarded := filter == probeAvailable
+	if guarded && probeRoundLooksLikeGlobalBlip(probed, len(failedFP)) {
+		n := blipStreak.Add(1)
+		slog.Warn("probe_round_global_blip",
+			"filter", filter.String(),
+			"probed", probed, "failed", len(failedFP), "consecutive", n,
+			"action", "整轮失败不予采信（疑似本机出口/网络问题）")
+		if n == 3 || n%10 == 0 {
+			slog.Error("probe_round_global_blip_persistent", "consecutive", n,
+				"hint", "连续多轮抖动：节点不会被判死，但本机网络/出口可能长期异常，需人工检查")
+		}
+		return probed
+	}
+	if guarded {
+		blipStreak.Store(0)
+	}
+	for _, fp := range failedFP {
+		p.markProbeDead(fp, "probe: "+failWhy[fp])
+	}
 	return probed
 }
 
@@ -774,6 +866,16 @@ func (p *nodePool) markProbeDead(fp, reason string) {
 			"node", n.Name, "fp", fp, "error", reason)
 		return
 	}
+	// 连续失败守卫：一次失败只累计 streak，不判死 —— 一次网络抖动不该丢掉一个出口 IP
+	// （2026-10-19 生产：一轮抖动让 86 个节点同时被判死，其中至少一个 TCP 实际可达）。
+	n.ProbeFailStreak++
+	if n.ProbeFailStreak < probeFailStreakThreshold {
+		slog.Info("node health probe failed (streak, not dead yet)",
+			"node", n.Name, "fp", fp, "streak", n.ProbeFailStreak,
+			"threshold", probeFailStreakThreshold, "error", reason)
+		return
+	}
+	n.ProbeFailStreak = 0
 	n.State = NodeDead
 	n.MarkedAt = now
 	n.LastError = reason
@@ -803,6 +905,7 @@ func (p *nodePool) recordProbeSuccess(fp string, ms int64) {
 	}
 	n.LatencyMs = ms
 	n.LastProbeAt = time.Now()
+	n.ProbeFailStreak = 0 // 探测成功即清零，避免历史抖动累积成误判
 	if n.State == NodeDead {
 		n.State = NodeAvailable
 		n.MarkedAt = time.Time{}
@@ -856,25 +959,36 @@ func (p *nodePool) getClient(fp string) *http.Client {
 		return nil
 	}
 	client := &http.Client{
-		Transport: &http.Transport{
-			// ★ 建连超时必须在这里加，不能套 net.Dialer{Timeout:}：
-			// dialNode 走的是内嵌 mihomo 内核（mihomo.go:196 mihomoDial），
-			// 根本没有 net.Dialer 可套。唯一能约束它的就是 ctx，
-			// 所以用 context.WithTimeout 把 ctx 截止时间传下去。
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				dctx, cancel := context.WithTimeout(ctx, dialTimeout)
-				defer cancel()
-				return dialNode(dctx, n, network, addr)
-			},
-			// ↓ 响应头阶段的上限，【不在本次改动范围】，保持 60s。
-			ResponseHeaderTimeout: 60 * time.Second,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   20,
-			IdleConnTimeout:       90 * time.Second,
-		},
+		Transport: newNodeTransport(func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialNode(ctx, n, network, addr)
+		}),
 	}
 	p.clients[fp] = client
 	return client
+}
+
+// newNodeTransport 构造节点出口用的 http.Transport。
+// 抽成函数是为了让测试能注入 dial 并验证各阶段的上界真的生效。
+//
+// 每个阶段都必须有上界，否则「节点接受 TCP 但后续被黑洞」就会挂到天荒地老：
+//   - 建连：套 ctx 超时（dialNode 走内嵌 mihomo，没有 net.Dialer 可套，只能靠 ctx）；
+//   - TLS 握手：TLSHandshakeTimeout（★ 2026-10-19 生产缺失 ⇒ 单次尝试挂 940~1034 秒）；
+//   - 响应头：ResponseHeaderTimeout。
+//
+// body 读取阶段仍不设限（长生成/流式不能被误杀）；「卡住不返回」的正解是空闲读超时。
+func newNodeTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dctx, cancel := context.WithTimeout(ctx, dialTimeout)
+			defer cancel()
+			return dial(dctx, network, addr)
+		},
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ResponseHeaderTimeout: 60 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+	}
 }
 
 // setNodes 用新列表重置池；按指纹保留运行时状态，持久化。

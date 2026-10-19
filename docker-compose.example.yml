@@ -24,6 +24,14 @@ services:
       # 必须通过 .env 或环境变量提供，模板中不写任何默认密码。
       OPENCODE2API_PASSWORD: ${OPENCODE2API_PASSWORD:?请在 .env 中设置 OPENCODE2API_PASSWORD}
       TZ: ${TZ:-Asia/Shanghai}
+      # 显式钉住 no_proxy：docker CLI 会用 ~/.docker/config.json 的
+      # proxies.default.noProxy 给容器注入 NO_PROXY，那里通常只写 localhost,127.0.0.1。
+      # 2026-10-19 生产事故根因就是它：局域网订阅源 http://192.168.1.3:2090
+      # 被送到另一台机器上的 clash 代理（502），启动回退旧缓存 ⇒ 227 个陈旧节点
+      # 全部 EOF，节点池全灭 8 小时而面板仍显示「115 个可用」。
+      # 局域网/容器网段必须直连，不能交给外部代理。
+      NO_PROXY: "localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.local"
+      no_proxy: "localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,.local"
 
 volumes:
   opencode2api-data:
