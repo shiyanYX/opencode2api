@@ -2702,6 +2702,11 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		// 的真实建连成本落进调用记录 —— 此前成功侧完全没有这个维度，只有失败侧
 		// 的 connect_error，能据此观测的建连分布全是失败尾部。
 		resp, err := client.Do(withDialTrace(ctx, up))
+		if err == nil && resp != nil {
+			// C-2：body 阶段套「空闲读超时」——连续 idleReadTimeout 没有字节就中止。
+			// 不用总时长上限：长生成/长流式只要有数据在走就不该被误杀。
+			resp.Body = newIdleReadCloser(resp.Body, idleReadTimeout)
+		}
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
@@ -3095,6 +3100,11 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		attemptStart := time.Now()
 		// 同上：流式路径也挂 dial trace，否则 dial_ms 只覆盖非流式一半流量。
 		resp, err := client.Do(withDialTrace(ctx, up))
+		if err == nil && resp != nil {
+			// C-2：body 阶段套「空闲读超时」——连续 idleReadTimeout 没有字节就中止。
+			// 不用总时长上限：长生成/长流式只要有数据在走就不该被误杀。
+			resp.Body = newIdleReadCloser(resp.Body, idleReadTimeout)
+		}
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
