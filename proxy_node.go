@@ -265,6 +265,14 @@ const defaultDialTimeout = 60 * time.Second
 // 下调到秒级验证机制（真等 60 秒的测试没有实用价值）；生产取值恒为 defaultDialTimeout。
 var dialTimeout = defaultDialTimeout
 
+// tlsHandshakeTimeout TLS 握手阶段的上限。
+// 为什么必须有它：Go 里 http.Transport.TLSHandshakeTimeout 的零值表示【不超时】。
+// 2026-10-19 生产实测：节点接受 TCP 但 TLS 握手被黑洞时，单次 upstream attempt 挂了
+// 940~1034 秒（15~17 分钟）才报 transport_error，请求日志里 status=0（连响应头都没拿到）
+// ⇒ 挂住的阶段只能是建连或 TLS 握手，而这两者此前只有建连有 ctx 上限。
+// 做成 var 便于测试注入更短的值。
+var tlsHandshakeTimeout = 15 * time.Second
+
 var proxyPool = newProxyPool("proxy_state.json")
 
 func newProxyPool(statePath string) *nodePool {
@@ -951,25 +959,36 @@ func (p *nodePool) getClient(fp string) *http.Client {
 		return nil
 	}
 	client := &http.Client{
-		Transport: &http.Transport{
-			// ★ 建连超时必须在这里加，不能套 net.Dialer{Timeout:}：
-			// dialNode 走的是内嵌 mihomo 内核（mihomo.go:196 mihomoDial），
-			// 根本没有 net.Dialer 可套。唯一能约束它的就是 ctx，
-			// 所以用 context.WithTimeout 把 ctx 截止时间传下去。
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				dctx, cancel := context.WithTimeout(ctx, dialTimeout)
-				defer cancel()
-				return dialNode(dctx, n, network, addr)
-			},
-			// ↓ 响应头阶段的上限，【不在本次改动范围】，保持 60s。
-			ResponseHeaderTimeout: 60 * time.Second,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   20,
-			IdleConnTimeout:       90 * time.Second,
-		},
+		Transport: newNodeTransport(func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return dialNode(ctx, n, network, addr)
+		}),
 	}
 	p.clients[fp] = client
 	return client
+}
+
+// newNodeTransport 构造节点出口用的 http.Transport。
+// 抽成函数是为了让测试能注入 dial 并验证各阶段的上界真的生效。
+//
+// 每个阶段都必须有上界，否则「节点接受 TCP 但后续被黑洞」就会挂到天荒地老：
+//   - 建连：套 ctx 超时（dialNode 走内嵌 mihomo，没有 net.Dialer 可套，只能靠 ctx）；
+//   - TLS 握手：TLSHandshakeTimeout（★ 2026-10-19 生产缺失 ⇒ 单次尝试挂 940~1034 秒）；
+//   - 响应头：ResponseHeaderTimeout。
+//
+// body 读取阶段仍不设限（长生成/流式不能被误杀）；「卡住不返回」的正解是空闲读超时。
+func newNodeTransport(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Transport {
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dctx, cancel := context.WithTimeout(ctx, dialTimeout)
+			defer cancel()
+			return dial(dctx, network, addr)
+		},
+		TLSHandshakeTimeout:   tlsHandshakeTimeout,
+		ResponseHeaderTimeout: 60 * time.Second,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+	}
 }
 
 // setNodes 用新列表重置池；按指纹保留运行时状态，持久化。
