@@ -234,6 +234,12 @@ input,select,textarea{font-family:inherit;color:inherit}
 .node-alert.on{display:flex}
 .node-alert .na-ico{flex-shrink:0;width:18px;height:18px;border-radius:50%;background:var(--red);color:var(--bg);font-weight:800;font-size:12px;display:flex;align-items:center;justify-content:center;margin-top:1px}
 .node-alert .na-body{flex:1;min-width:0}
+/* overflow-wrap:anywhere —— 防「超长无空格 token 把整页撑宽」。
+   独立盲验实测（task-20）：#naReason 若塞入 30 字符无空格 token，320px 下页面即溢出 54px；
+   200 字符时溢出 1471px。真实 reason 目前全部由服务端 fmt.Sprintf 生成（最长 token 15 字符，
+   见 node_alert.go:302-360），所以当前不可触发 —— 但告警横幅是「面板别装健康」的唯一出口，
+   它自己把页面撑爆的后果远比多一行 CSS 严重，故按纵深防御先补上。 */
+.node-alert .na-body>div{overflow-wrap:anywhere}
 .node-alert .na-title{font-weight:700;color:var(--red)}
 .node-alert .na-meta{color:var(--text-sec);font-size:11.5px;font-variant-numeric:tabular-nums;margin-top:2px}
 .filter-chips{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
