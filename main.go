@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"flag"
@@ -1233,50 +1234,98 @@ func saveConfig(path string, cfg AppConfig) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// startConfigWatcher 后台轮询 config.json 修改时间，检测到变化时自动加载并应用。
-// 解析失败保留旧配置，仅打 warn 日志。
+// ======================== 配置热加载 watcher（task-55） ========================
+//
+// 判据以**内容指纹（SHA-256）**为准，不看 mtime。
+//
+// 原实现按 mtime 判定：watcher 应用新配置后调 saveConfig() 把配置规范化写回 ⇒ 文件
+// mtime 必然变 ⇒ 下一次轮询又满足「mtime 变大」⇒ 每 5 秒无限循环。生产 10-09~10-20
+// 实测 67,763 条 `config hot-reloaded`（6.7 MB，占运行日志 9.1%），且 config.json 每
+// 5 秒被重写一次。改成内容指纹后：
+//   - 用户真实改内容         ⇒ 恰好 1 条 reload；
+//   - watcher 自己写回        ⇒ 指纹与「自己写下去的字节」相同 ⇒ 0 条；
+//   - 只 touch mtime/内容不变 ⇒ 0 条（没有可加载的东西）。
+//
+// 为什么不用「自写抑制时间窗」（task-55 候选 C）：时间窗会漏掉用户在同一窗口内的真实
+// 修改 —— 那正是热加载要解决的场景，属于用一个缺陷换另一个缺陷。
+
+// configWatcherState 记录上一次已应用/已写盘的配置内容指纹。
+type configWatcherState struct {
+	lastHash [sha256.Size]byte
+	seeded   bool
+}
+
+// newConfigWatcherState 用当前磁盘内容做种：启动时已存在的配置不需要「热加载」。
+func newConfigWatcherState(path string) *configWatcherState {
+	st := &configWatcherState{}
+	if raw, err := os.ReadFile(path); err == nil {
+		st.lastHash = sha256.Sum256(raw)
+		st.seeded = true
+	}
+	return st
+}
+
+// configReloadOnce 检查一次配置文件是否被「外部」修改；有则应用并返回 (cfg, true)。
+// 解析失败保留旧配置，仅打 warn 日志；同一次坏编辑只警告一次（记下坏内容的指纹）。
+func configReloadOnce(st *configWatcherState, path string) (AppConfig, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		// 文件暂时不存在/读不到：保持旧行为（静默跳过，等下次轮询）。
+		return AppConfig{}, false
+	}
+	sum := sha256.Sum256(raw)
+	if st.seeded && sum == st.lastHash {
+		return AppConfig{}, false
+	}
+	var cfg AppConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		slog.Warn("config watcher: invalid JSON, keeping old config", "error", err)
+		st.lastHash, st.seeded = sum, true
+		return AppConfig{}, false
+	}
+	applyConfig(cfg)
+	// 保留原有行为：热加载后把配置规范化写回（缩进 / 补默认字段）。
+	// ★ 关键：指纹要记「我们自己写下去的字节」，不是「读到的字节」——否则下次轮询读到
+	// 的规范化内容与记录的原始内容不一致，会再触发一次 ⇒ 自触发循环只是从 mtime 换成 hash。
+	if err := saveConfig(path, cfg); err != nil {
+		slog.Warn("config watcher: save normalized config failed", "error", err)
+		st.lastHash, st.seeded = sum, true
+	} else if normalized, rerr := os.ReadFile(path); rerr == nil {
+		st.lastHash, st.seeded = sha256.Sum256(normalized), true
+	} else {
+		st.lastHash, st.seeded = sum, true
+	}
+	return cfg, true
+}
+
+// configWatchInterval 是配置轮询间隔（测试可覆盖；生产固定 5s）。
+var configWatchInterval = 5 * time.Second
+
+// startConfigWatcher 后台轮询 config.json，检测到外部修改时自动加载并应用。
 func startConfigWatcher() {
-	go func() {
-		var lastModTime time.Time
-		if info, err := os.Stat(configPath); err == nil {
-			lastModTime = info.ModTime()
-		}
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			info, err := os.Stat(configPath)
-			if err != nil {
+	go configWatchLoop(configPath, configWatchInterval, nil)
+}
+
+// configWatchLoop 是 watcher 主循环；stop 关闭后退出（生产传 nil = 随进程结束）。
+func configWatchLoop(path string, interval time.Duration, stop <-chan struct{}) {
+	st := newConfigWatcherState(path)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			cfg, ok := configReloadOnce(st, path)
+			if !ok {
 				continue
-			}
-			if !info.ModTime().After(lastModTime) {
-				continue
-			}
-			lastModTime = info.ModTime()
-			// 验证新配置：只解析，不改运行时
-			newCfg := loadConfig(configPath)
-			// loadConfig 不返回 error，但空 model_alias + 空 api_key 说明解析失败
-			// 用 JSON re-parse 验证格式
-			raw, readErr := os.ReadFile(configPath)
-			if readErr != nil {
-				slog.Warn("config watcher: read failed", "error", readErr)
-				continue
-			}
-			var verify AppConfig
-			if json.Unmarshal(raw, &verify) != nil {
-				slog.Warn("config watcher: invalid JSON, keeping old config")
-				continue
-			}
-			// 验证通过，应用新配置
-			applyConfig(newCfg)
-			if err := saveConfig(configPath, newCfg); err != nil {
-				slog.Warn("config watcher: save normalized config failed", "error", err)
 			}
 			slog.Info("config hot-reloaded",
-				"aliases", len(newCfg.ModelAlias),
-				"api_key_set", newCfg.ApiKey != "",
+				"aliases", len(cfg.ModelAlias),
+				"api_key_set", cfg.ApiKey != "",
 			)
 		}
-	}()
+	}
 }
 
 func applyConfig(cfg AppConfig) {
