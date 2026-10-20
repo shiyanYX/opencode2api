@@ -5,9 +5,13 @@ package main
 // 供管理面板“调用日志”视图（列表/时段分析/节点分析，参考 opencode2api_enhance）。
 
 import (
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -17,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -135,6 +140,19 @@ func (r CallRecord) IssueLabel() string {
 
 const callLogCapacity = 2000
 const callLogFileName = "call_log.jsonl"
+
+// callLogDirName 是 daily 模式的日文件目录名（与 legacy 文件同目录）。
+const callLogDirName = "call_log"
+
+// 落盘精简时被省略的默认值；读取侧据此还原（前端/第三方消费者看到的与精简前一致）。
+const (
+	defaultCallPath  = "/v1/chat/completions"
+	defaultRouteMode = "public"
+)
+
+// callLogHistoryMaxScanBytes 是单次历史查询的扫描预算（防御性上限，正常远达不到）：
+// 180 天全量 ≈ 276 MB，超过预算就返回已有结果并置 X-Call-Log-Truncated。
+const callLogHistoryMaxScanBytes = 256 << 20
 
 // ---- 小时聚合桶 ----
 //
@@ -467,6 +485,48 @@ var absorbMu sync.Mutex
 // 改错了也不会有人发现。
 var backfillAfterStat = func() {}
 
+// ---- task-56：按天分文件（daily 模式） ----
+//
+// daily 模式把「legacy 文件 + 日文件（升序）」当作**有序段列表**来吸收：
+//
+//	segIdx/segOff 游标替代单文件 parsedTo，段序 = 原单文件字节序，
+//	因此桶/everServed/unmapped 的结果与单文件逐字节相同（见 calllog_daily_test.go）。
+//
+// 单文件模式（dir==""）完全走原有代码路径：parsedTo / markBucketsSeededIfFullyAbsorbed
+// / handleBackfillOpenError 全部保持原语义 —— 这是既有 130+ 处测试引用不被打扰的前提。
+type callLogSegment struct {
+	name   string // "call_log.jsonl" 或 "2026-10-20.jsonl"/"2026-10-20.jsonl.gz"
+	path   string // 绝对路径
+	gz     bool
+	legacy bool
+	day    string // "YYYY-MM-DD"；legacy 为空串（排序恒最前）
+	size   int64  // 最近观测到的逻辑大小（gz 为解压后大小，未知时 0）
+}
+
+type absorbCursor struct {
+	idx int
+	off int64
+}
+
+var (
+	// dailySegs 是 daily 模式的段列表（由 callLog.dir 目录内容派生）。
+	dailySegs []callLogSegment
+	// dailySegsKey = path|dir，用于检测「测试切换了 store 路径」而重建段列表。
+	dailySegsKey string
+	// dailySegsDirMod 记录上次构建段列表时的目录 mtime；目录变了才重扫。
+	dailySegsDirMod time.Time
+	// dailyCur 是 daily 模式的吸收游标（等价单文件的 parsedTo）。
+	dailyCur absorbCursor
+)
+
+// callLogLayout / callLogGzipAfterDays / callLogRetainDays 由 main.go 的命令行参数写入。
+// 测试直接改这些变量（或只构造 store.dir）即可。
+var (
+	callLogLayout        = "daily"
+	callLogGzipAfterDays = 2
+	callLogRetainDays    = 180
+)
+
 // markBucketsSeededIfFullyAbsorbed 在**持有 callLog.mu 写锁**时置 bucketsSeeded。
 //
 // 为什么必须锁内重新 Stat，不能复用调用方在锁外拿到的那个 size：
@@ -505,6 +565,11 @@ func resetAbsorbedStateLocked() {
 	parsedTo = 0
 	absorbedRecords = 0
 	unabsorbedRecords = 0
+	// daily 模式的游标与段列表一起归零：下次吸收从头重放全部段。
+	dailyCur = absorbCursor{}
+	dailySegs = nil
+	dailySegsKey = ""
+	dailySegsDirMod = time.Time{}
 }
 
 // handleBackfillOpenError 处理日志文件打不开的情况。
@@ -610,6 +675,464 @@ func rebuildBucketsIfDue() bool {
 //   - 检查在锁**外**：checkBucketConservation 自己取读锁遍历 map。
 //     放在调用方的锁里既做不到（读锁不可重入），也没必要 —— 它遍历的是
 //     已提交的稳定状态，而 absorbMu 已经把并发 backfill 排开了。
+
+// ---- daily 模式：段列表维护 ----
+
+// ensureDailySegsLocked 在 dir != "" 时构建/刷新段列表。
+// 调用方必须持有 callLog.mu **写锁**（会改 dailySegs/dailyCur）。
+func (s *callLogStore) ensureDailySegsLocked() {
+	if s.dir == "" {
+		dailySegs, dailySegsKey, dailySegsDirMod = nil, "", time.Time{}
+		return
+	}
+	key := s.path + "|" + s.dir
+	var mod time.Time
+	if st, err := os.Stat(s.dir); err == nil {
+		mod = st.ModTime()
+	}
+	if dailySegsKey == key && dailySegs != nil && mod.Equal(dailySegsDirMod) {
+		return
+	}
+	segs := make([]callLogSegment, 0, 32)
+	if st, err := os.Stat(s.path); err == nil {
+		segs = append(segs, callLogSegment{name: filepath.Base(s.path), path: s.path, legacy: true, size: st.Size()})
+	}
+	if ents, err := os.ReadDir(s.dir); err == nil {
+		for _, e := range ents {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			var day string
+			gz := false
+			switch {
+			case strings.HasSuffix(name, ".jsonl.gz"):
+				day = strings.TrimSuffix(name, ".jsonl.gz")
+				gz = true
+			case strings.HasSuffix(name, ".jsonl"):
+				day = strings.TrimSuffix(name, ".jsonl")
+			default:
+				continue // 未知文件忽略（不崩、不吸）
+			}
+			if _, perr := time.Parse("2006-01-02", day); perr != nil {
+				continue
+			}
+			info, ierr := e.Info()
+			if ierr != nil {
+				continue
+			}
+			segs = append(segs, callLogSegment{name: name, path: filepath.Join(s.dir, name), gz: gz, day: day, size: info.Size()})
+		}
+	}
+	sort.SliceStable(segs, func(i, j int) bool {
+		if segs[i].legacy != segs[j].legacy {
+			return segs[i].legacy // legacy 恒第 0 段
+		}
+		if segs[i].day != segs[j].day {
+			return segs[i].day < segs[j].day
+		}
+		return !segs[i].gz && segs[j].gz // 同日 plain 优先
+	})
+	// 同日 plain + gz 并存：选 plain（数据更全），忽略 gz（压缩中途崩溃的残影）
+	dedup := segs[:0]
+	for _, sg := range segs {
+		if n := len(dedup); n > 0 && !sg.legacy && !dedup[n-1].legacy && sg.day == dedup[n-1].day {
+			slog.Warn("calllog: duplicate day segment, keeping plain", "day", sg.day, "ignored", sg.name)
+			continue
+		}
+		dedup = append(dedup, sg)
+	}
+	segs = dedup
+	// 段列表变化后按路径保住游标（压缩只换路径、删除只删前缀，游标不应回退）
+	if dailySegs != nil && dailyCur.idx >= 0 && dailyCur.idx < len(dailySegs) {
+		oldPath := dailySegs[dailyCur.idx].path
+		found := false
+		for i := range segs {
+			if segs[i].path == oldPath {
+				dailyCur.idx = i
+				found = true
+				break
+			}
+		}
+		if !found {
+			dailyCur = absorbCursor{}
+		}
+	}
+	dailySegs, dailySegsKey, dailySegsDirMod = segs, key, mod
+}
+
+// dailySegments 返回段列表副本（测试与诊断用）。
+func (s *callLogStore) dailySegments() []callLogSegment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ensureDailySegsLocked()
+	return append([]callLogSegment(nil), dailySegs...)
+}
+
+// dailySegmentsCurrent 返回当前吸收游标（测试与诊断用）。
+func (s *callLogStore) dailySegmentsCurrent() absorbCursor {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return dailyCur
+}
+
+// dailyTargetLocked 决定本次 append 写哪个文件，并保证**只追加到最后一段**。
+// 调用方必须持有 callLog.mu 写锁。dir=="" 时返回 path（单文件模式）。
+//
+// 单调性：跨午夜长请求的 rec.TS 属于昨天，但写入必须落"今天"的段——
+// 追加到已吸收的旧段会让新字节落在 parsedTo 之前，被永久重复计数。
+func (s *callLogStore) dailyTargetLocked() string {
+	if s.dir == "" {
+		return s.path
+	}
+	s.ensureDailySegsLocked()
+	today := time.Now().In(time.Local).Format("2006-01-02")
+	if n := len(dailySegs); n > 0 {
+		last := dailySegs[n-1]
+		if !last.legacy && last.day >= today {
+			return last.path // 已有今天（或时钟回拨）的段：追加
+		}
+	}
+	return s.dailyCreateSegmentLocked(today)
+}
+
+// dailyCreateSegmentLocked 为新的一天建立段并（已对齐时）把游标移过去。
+func (s *callLogStore) dailyCreateSegmentLocked(day string) string {
+	if err := os.MkdirAll(s.dir, 0o755); err != nil {
+		// 不降级成单文件写 legacy：那会让 parsedTo 与 daily 游标语义打架（双计风险）。
+		// 只丢这一条落盘（记录仍在内存环），并明确告警。
+		slog.Error("calllog: cannot create daily dir, record not persisted", "dir", s.dir, "error", err)
+		return ""
+	}
+	path := filepath.Join(s.dir, day+".jsonl")
+	dailySegs = append(dailySegs, callLogSegment{name: day + ".jsonl", path: path, day: day})
+	dailySegsDirMod = time.Time{} // 目录 mtime 已变，下次重新观测
+	if bucketsSeeded {
+		dailyCur = absorbCursor{idx: len(dailySegs) - 1, off: 0}
+	}
+	return path
+}
+
+// readDailySegment 读入一段的全部逻辑字节（plain 直接读，gz 解压后读）。
+func readDailySegment(path string, gz bool) ([]byte, int64, error) {
+	if !gz {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, 0, err
+		}
+		return data, int64(len(data)), nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer zr.Close()
+	data, err := io.ReadAll(zr)
+	if err != nil {
+		return nil, 0, err
+	}
+	return data, int64(len(data)), nil
+}
+
+// dailyAbsorb 累积一段扫描的 staged 结果（与单文件版本的中间变量同构）。
+type dailyAbsorb struct {
+	staged         map[hourModelKey]*hourModelAgg
+	stagedUnmapped map[hourModelKey]*hourModelAgg
+	stagedServed   map[string]struct{}
+	pending        []pendingServedRec
+	unmappedMemo   map[string]bool
+	lines          int64
+	skipped        int64
+}
+
+// consume 消费一行：与单文件解析循环逐字同语义（含 everServed / 未映射裁决）。
+func (a *dailyAbsorb) consume(line []byte) {
+	a.lines++
+	var r slimRec
+	if !parseStatsLine(line, &r) {
+		a.skipped++
+		return
+	}
+	k, ok := hourKeyFor(r.TS, r.Model)
+	if !ok {
+		a.skipped++
+		return
+	}
+	if r.Status == "ok" && r.Model != "" {
+		a.stagedServed[r.Model] = struct{}{}
+	}
+	unmapped := r.Unmapped
+	if r.SawUnmapped {
+		if r.Status == "ok" {
+			unmapped = false
+		}
+	} else {
+		v, hit := a.unmappedMemo[r.Model]
+		if !hit {
+			v = isUnmappedByFormula(r.Model)
+			a.unmappedMemo[r.Model] = v
+		}
+		if v {
+			a.pending = append(a.pending, pendingServedRec{k: k, r: r})
+			return
+		}
+		unmapped = false
+	}
+	target := a.staged
+	if unmapped {
+		target = a.stagedUnmapped
+	}
+	b := target[k]
+	if b == nil {
+		b = &hourModelAgg{}
+		target[k] = b
+	}
+	b.add(&r)
+}
+
+// resolvePending 等整轮扫完后再用 everServed 裁决老行（与单文件版同语义）。
+func (a *dailyAbsorb) resolvePending() {
+	if len(a.pending) == 0 {
+		return
+	}
+	ever := servedModelsSnapshot(a.stagedServed)
+	for i := range a.pending {
+		p := &a.pending[i]
+		target := a.stagedUnmapped
+		if _, served := ever[p.r.Model]; served {
+			target = a.staged
+		}
+		b := target[p.k]
+		if b == nil {
+			b = &hourModelAgg{}
+			target[p.k] = b
+		}
+		b.add(&p.r)
+	}
+}
+
+// absorbSegmentDaily 流式吸收一段：用 bufio 逐行读，不把整段读进内存。
+//
+// 为什么不用 readDailySegment 整读：legacy 段可能是 124 MB 的大文件，
+// 整读会让冷启动峰值内存回到 124 MB 且多一次大对象 GC（实测 L2 冷查询 1.71s
+// vs L3 1.01s，多出来的主要就是这次 124 MB 分配/回收）。流式后峰值 ≈ 256 KiB 缓冲。
+//
+// 返回 (段内已消费字节偏移, 逻辑大小, error)。
+// 非最后段尾部的半行会被消费（计入 unabsorbed）；最后段保留给下一轮。
+func absorbSegmentDaily(seg callLogSegment, start int64, isLast bool, a *dailyAbsorb) (int64, int64, error) {
+	f, err := os.Open(seg.path)
+	if err != nil {
+		return start, -1, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return start, -1, err
+	}
+	size := int64(-1)
+	if !seg.gz {
+		size = st.Size()
+		if size < start {
+			return start, size, nil // 截短：调用方负责全量重吸
+		}
+	}
+	if start > 0 {
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return start, size, err
+		}
+	}
+	var r io.Reader = f
+	if seg.gz {
+		zr, zerr := gzip.NewReader(f)
+		if zerr != nil {
+			return start, -1, zerr
+		}
+		defer zr.Close()
+		r = zr
+	}
+	br := bufio.NewReaderSize(r, 256*1024)
+	pos := start
+	for {
+		line, rerr := br.ReadBytes('\n')
+		if len(line) > 0 {
+			if rerr == nil {
+				a.consume(line[:len(line)-1])
+				pos += int64(len(line))
+			} else if !isLast {
+				// 非最后段残留半行：消费掉并记账，否则待吸区间永远卡在它前面
+				a.lines++
+				a.skipped++
+				pos += int64(len(line))
+			}
+		}
+		if rerr != nil {
+			if rerr == io.EOF {
+				break
+			}
+			return pos, size, rerr
+		}
+	}
+	if seg.gz {
+		// gz 段必然读到 EOF，pos-start 就是解压后总字节数（用于 seeded 判定）
+		size = pos
+	}
+	return pos, size, nil
+}
+
+// absorbOnceDaily 是 daily 模式的吸收本体。
+// 段序 = legacy → 日文件升序 → 段内追加序 = 原单文件字节序，故结果与单文件一致。
+func absorbOnceDaily() {
+	s := callLog
+	s.mu.Lock()
+	s.ensureDailySegsLocked()
+	segs := append([]callLogSegment(nil), dailySegs...)
+	gen := statsGen
+	from := dailyCur
+	seeded := bucketsSeeded
+	s.mu.Unlock()
+
+	if len(segs) == 0 {
+		// 无任何段：等价「日志文件不存在」——清空状态并视为已对齐。
+		s.mu.Lock()
+		if statsGen == gen {
+			resetAbsorbedStateLocked()
+			bucketsSeeded = true
+		}
+		s.mu.Unlock()
+		return
+	}
+	if from.idx < 0 || from.idx >= len(segs) {
+		from = absorbCursor{}
+	}
+	// 稳态快路径：游标在最后一段末尾且文件没长 ⇒ 无事可做
+	if seeded && from.idx == len(segs)-1 && !segs[from.idx].gz {
+		if st, err := os.Stat(segs[from.idx].path); err == nil && st.Size() == from.off {
+			return
+		}
+	}
+
+	a := &dailyAbsorb{
+		staged:         make(map[hourModelKey]*hourModelAgg, 512),
+		stagedUnmapped: make(map[hourModelKey]*hourModelAgg, 16),
+		stagedServed:   make(map[string]struct{}, 32),
+		unmappedMemo:   map[string]bool{},
+	}
+	finalIdx, finalOff := from.idx, from.off
+	lastSize := int64(-1)
+	for idx := from.idx; idx < len(segs); idx++ {
+		seg := segs[idx]
+		start := int64(0)
+		if idx == from.idx {
+			start = from.off
+		}
+		isLast := idx == len(segs)-1
+		consumed, size, err := absorbSegmentDaily(seg, start, isLast, a)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return // 段被压缩/删除：下轮重建段列表
+			}
+			if seg.gz {
+				// 坏 gz：跳过该段（该段统计缺失，但不阻塞其它段；守恒仍成立）
+				slog.Warn("calllog: cannot read segment, skipping", "path", seg.path, "error", err)
+				finalIdx, finalOff = idx, 0
+				continue
+			}
+			slog.Warn("calllog: cannot read segment", "path", seg.path, "error", err)
+			return
+		}
+		if !seg.gz && size >= 0 && size < start {
+			// 文件被截短/替换：全量重吸（与单文件 size<parsedTo 同款）
+			s.mu.Lock()
+			if statsGen == gen {
+				resetAbsorbedStateLocked()
+				bucketsSeeded = false
+			}
+			s.mu.Unlock()
+			return
+		}
+		finalIdx, finalOff = idx, consumed
+		if isLast {
+			lastSize = size
+		}
+	}
+	a.resolvePending()
+
+	// ---- 锁内提交（与单文件版的四条守卫一一对应）----
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if statsGen != gen {
+		return // 期间 clear 过：本次结果作废
+	}
+	if dailyCur != from {
+		return // 期间 append（seeded 时）推进过游标：整批丢弃，下轮重来
+	}
+	mergeStagedLocked(a.staged, a.stagedUnmapped, a.stagedServed)
+	absorbedRecords += a.lines
+	unabsorbedRecords += a.skipped
+	dailyCur = absorbCursor{idx: finalIdx, off: finalOff}
+	// 只有「段列表没变 + 停在最后一段末尾」才置位（否则新日文件刚出现，不能算吸干净）
+	if len(dailySegs) == len(segs) && finalIdx == len(segs)-1 && lastSize >= 0 && finalOff == lastSize {
+		bucketsSeeded = true
+	}
+}
+
+// mergeStagedLocked 把一批 staged 结果并进全局桶/everServed。
+// 调用方必须持有 callLog.mu **写锁**；单文件模式与 daily 模式共用（行为与合并顺序无关）。
+// 抽出来是为了让两种吸收路径共用同一份合并代码，避免「加字段漏改一处」。
+func mergeStagedLocked(staged, stagedUnmapped map[hourModelKey]*hourModelAgg, stagedServed map[string]struct{}) {
+	if hourBuckets == nil {
+		hourBuckets = make(map[hourModelKey]*hourModelAgg, len(staged))
+	}
+	// everServed 与两条桶表在**同一个临界区**里提交：这样「集合说它是我们的模型」
+	// 与「它的记录进了概览桶」永远不可能被看到一个已经生效、另一个还没生效的中间态。
+	// 只增不减，故直接合并、不需要 mergeAggTo 那种 += 语义。
+	if len(stagedServed) > 0 {
+		if servedModels == nil {
+			servedModels = make(map[string]struct{}, len(stagedServed))
+		}
+		for m := range stagedServed {
+			servedModels[m] = struct{}{}
+		}
+	}
+	// 未映射暂存区并进平行表。合并规则与 staged 完全一致（必须 +=，不能覆盖），
+	// 且**在同一临界区内**完成 —— 与 parsedTo 的提交同锁，不存在半合并可见窗口。
+	if len(stagedUnmapped) > 0 {
+		if unmappedBuckets == nil {
+			unmappedBuckets = make(map[hourModelKey]*hourModelAgg, len(stagedUnmapped))
+		}
+		for k, v := range stagedUnmapped {
+			b := unmappedBuckets[k]
+			if b == nil {
+				unmappedBuckets[k] = v
+				continue
+			}
+			mergeAggTo(b, v)
+		}
+	}
+	for k, v := range staged {
+		b := hourBuckets[k]
+		if b == nil {
+			hourBuckets[k] = v
+			continue
+		}
+		// 🔴 必须是 += ：生产日志 38.6% 乱序，新记录会落进**已存在**的小时桶
+		// （实测 610 条落进已结束的桶，最大回退 46 分钟）。
+		// 「不存在则新建并赋值」在新建分支正确、在命中分支会把旧值整个抹掉。
+		//
+		// 🔴🔴 这里**只能调 mergeAggTo**，不得再写逐字拷贝：
+		// 每加一个聚合字段要记得在这里补一行，而「忘了补」不报任何错——
+		// 实测故意不加时 go test ./... 全绿，真日志跑下来 ΣSpeedTokSum=0、
+		// 历史吞吐指标全量归零。mergeAggTo 是全仓唯一的合并写点，
+		// 由 tps_throughput_struct_test.go 的结构断言钉住。
+		mergeAggTo(b, v)
+	}
+}
+
 func ensureBucketsUpToDate() {
 	// single-flight：进入即取锁，第二个调用者在这里排队等待。
 	absorbMu.Lock()
@@ -657,6 +1180,18 @@ type pendingServedRec struct {
 // absorbOnce 是 ensureBucketsUpToDate 的吸收本体（不含 single-flight 与守恒检查）。
 // 调用方**必须持有 absorbMu**。
 func absorbOnce() {
+	callLog.mu.RLock()
+	dir := callLog.dir
+	callLog.mu.RUnlock()
+	if dir != "" {
+		absorbOnceDaily()
+		return
+	}
+	absorbOnceSingle()
+}
+
+// absorbOnceSingle 是原有的单文件吸收本体（dir=="" 的路径，语义逐字保留）。
+func absorbOnceSingle() {
 
 	// ---- 锁外快照：路径、起点、generation ----
 	callLog.mu.RLock()
@@ -901,52 +1436,7 @@ func absorbOnce() {
 		callLog.mu.Unlock()
 		return
 	}
-	if hourBuckets == nil {
-		hourBuckets = make(map[hourModelKey]*hourModelAgg, len(staged))
-	}
-	// everServed 与两条桶表在**同一个临界区**里提交：这样「集合说它是我们的模型」
-	// 与「它的记录进了概览桶」永远不可能被看到一个已经生效、另一个还没生效的中间态。
-	// 只增不减，故直接合并、不需要 mergeAggTo 那种 += 语义。
-	if len(stagedServed) > 0 {
-		if servedModels == nil {
-			servedModels = make(map[string]struct{}, len(stagedServed))
-		}
-		for m := range stagedServed {
-			servedModels[m] = struct{}{}
-		}
-	}
-	// 未映射暂存区并进平行表。合并规则与 staged 完全一致（必须 +=，不能覆盖），
-	// 且**在同一临界区内**完成 —— 与 parsedTo 的提交同锁，不存在半合并可见窗口。
-	if len(stagedUnmapped) > 0 {
-		if unmappedBuckets == nil {
-			unmappedBuckets = make(map[hourModelKey]*hourModelAgg, len(stagedUnmapped))
-		}
-		for k, v := range stagedUnmapped {
-			b := unmappedBuckets[k]
-			if b == nil {
-				unmappedBuckets[k] = v
-				continue
-			}
-			mergeAggTo(b, v)
-		}
-	}
-	for k, v := range staged {
-		b := hourBuckets[k]
-		if b == nil {
-			hourBuckets[k] = v
-			continue
-		}
-		// 🔴 必须是 += ：生产日志 38.6% 乱序，新记录会落进**已存在**的小时桶
-		// （实测 610 条落进已结束的桶，最大回退 46 分钟）。
-		// 「不存在则新建并赋值」在新建分支正确、在命中分支会把旧值整个抹掉。
-		//
-		// 🔴🔴 这里**只能调 mergeAggTo**，不得再写逐字拷贝：
-		// 每加一个聚合字段要记得在这里补一行，而「忘了补」不报任何错——
-		// 实测故意不加时 go test ./... 全绿，真日志跑下来 ΣSpeedTokSum=0、
-		// 历史吞吐指标全量归零。mergeAggTo 是全仓唯一的合并写点，
-		// 由 tps_throughput_struct_test.go 的结构断言钉住。
-		mergeAggTo(b, v)
-	}
+	mergeStagedLocked(staged, stagedUnmapped, stagedServed)
 	// 🔴🔴 **按快照 size 提交**，而不是「此刻的文件大小」。
 	//
 	// 反例（审查实测丢 1 条）：
@@ -976,13 +1466,23 @@ func absorbOnce() {
 // modelStatsFromCallLog）从这里开始，全部改读内存桶，**不再 os.ReadFile 日志文件**。
 // 唯一还在读文件的是 ensureBucketsUpToDate，且它只读「上次之后新增的那一段」。
 
-// callLogFileExists 报告调用日志文件是否存在。
-// 用途：trendsFromCallLog 需要区分「文件不存在」与「文件为空」——
+// callLogFileExists 报告调用日志是否存在。
+// 用途：trendsFromCallLog 需要区分「不存在」与「存在但为空」——
 // 前者必须返回 nil（handler 转成 []），否则冷进程上热力图会拿到 180 个零值点。
+//
+// 🔴 daily 模式必须看**段列表**而不是 legacy 单文件：全新部署下 legacy
+// call_log.jsonl 永远不会被创建（数据从第一天起就写 call_log/ 日文件），
+// 只 Stat legacy 会让 /api/stats/trends 在 L3 布局与全新部署上永远返回 []，
+// 且不报错（task-63 D1）。
+// 单文件模式保持原语义：只认 legacy 文件。
 func callLogFileExists() bool {
 	callLog.mu.RLock()
-	p := callLog.path
+	p, dir := callLog.path, callLog.dir
 	callLog.mu.RUnlock()
+	if dir != "" {
+		// daily / legacy+日文件布局：存在任一段即算存在
+		return len(callLog.readSegments()) > 0
+	}
 	if p == "" {
 		return false
 	}
@@ -1309,14 +1809,31 @@ type callLogStore struct {
 	// Task 8 起查询侧读 hourBuckets 也走 RLock。
 	mu      sync.RWMutex
 	records []CallRecord
-	path    string
+	path    string // legacy 文件（dir=="" 时是唯一文件）
+	// dir 非空 ⇒ daily 模式：新记录按天落盘到 dir/YYYY-MM-DD.jsonl，
+	// path 只作为「legacy 冻结段」。dir=="" ⇒ 单文件模式（既有语义逐字节不变）。
+	dir string
 }
 
 var callLog = &callLogStore{}
 
 func initCallLog(configPath string) {
+	base := filepath.Dir(configPath)
 	callLog.mu.Lock()
-	callLog.path = filepath.Join(filepath.Dir(configPath), callLogFileName)
+	callLog.path = filepath.Join(base, callLogFileName)
+	callLog.dir = ""
+	if callLogLayout != "single" {
+		dir := filepath.Join(base, callLogDirName)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			// 只读卷/ENOSPC：降级为单文件模式（与旧二进制语义相同），保证服务可用。
+			slog.Warn("calllog: daily layout disabled, falling back to single file",
+				"dir", dir, "error", err)
+		} else {
+			callLog.dir = dir
+		}
+	}
+	dailySegs, dailySegsKey, dailyCur = nil, "", absorbCursor{}
+	dailySegsDirMod = time.Time{}
 	callLog.mu.Unlock()
 	loadCallLogFromFile()
 }
@@ -1410,6 +1927,106 @@ func tailReadLastLines(path string, n int) ([]byte, error) {
 
 func loadCallLogFromFile() {
 	callLog.mu.RLock()
+	dir := callLog.dir
+	callLog.mu.RUnlock()
+	if dir != "" {
+		loadCallLogFromFileDaily()
+		return
+	}
+	loadCallLogFromFileSingle()
+}
+
+// installLoadedRecords 把尾部记录装进内存环并播种 everServed（单文件/daily 共用）。
+func installLoadedRecords(records []CallRecord) {
+	if len(records) > callLogCapacity {
+		records = records[len(records)-callLogCapacity:]
+	}
+	for i := range records {
+		restoreDiskRecord(&records[i])
+	}
+	callLog.mu.Lock()
+	callLog.records = records
+	if servedModels == nil {
+		servedModels = make(map[string]struct{}, 32)
+	}
+	for _, rec := range records {
+		if rec.Status == "ok" && rec.Model != "" {
+			servedModels[rec.Model] = struct{}{}
+		}
+	}
+	callLog.mu.Unlock()
+}
+
+// loadCallLogFromFileDaily 跨段倒读最后 callLogCapacity 条：
+// 从最新的一段开始，一段不够再往前一段，直到凑够或段用尽。
+func loadCallLogFromFileDaily() {
+	segs := callLog.dailySegments()
+	if len(segs) == 0 {
+		return
+	}
+	need := callLogCapacity
+	var chunks [][][]byte // 每块升序，块序 = 新→旧
+	for i := len(segs) - 1; i >= 0 && need > 0; i-- {
+		// 🔴 明文段必须走 tailReadLastLines：legacy 段可能是一个 124 MB 的大文件，
+		// 为拿最后 2000 条而读全文件会让冷启动多花 2~3 秒（实测 3.65s vs 0.98s）。
+		var lines [][]byte
+		if !segs[i].gz {
+			raw, err := tailReadLastLines(segs[i].path, need)
+			if err != nil {
+				continue
+			}
+			lines = splitJSONLines(raw)
+		} else {
+			data, _, err := readDailySegment(segs[i].path, true)
+			if err != nil {
+				continue
+			}
+			lines = splitJSONLines(data)
+		}
+		if len(lines) == 0 {
+			continue
+		}
+		take := need
+		if take > len(lines) {
+			take = len(lines)
+		}
+		chunks = append(chunks, lines[len(lines)-take:])
+		need -= take
+	}
+	records := make([]CallRecord, 0, callLogCapacity)
+	for c := len(chunks) - 1; c >= 0; c-- {
+		for _, line := range chunks[c] {
+			var rec CallRecord
+			if json.Unmarshal(line, &rec) == nil && rec.ReqID != "" {
+				records = append(records, rec)
+			}
+		}
+	}
+	installLoadedRecords(records)
+}
+
+// splitJSONLines 把原始字节切成非空行（保留首尾空白行剔除，行内不 trim）。
+func splitJSONLines(data []byte) [][]byte {
+	out := make([][]byte, 0, bytes.Count(data, []byte{'\n'})+1)
+	for len(data) > 0 {
+		i := bytes.IndexByte(data, '\n')
+		var line []byte
+		if i < 0 {
+			line, data = data, nil
+		} else {
+			line, data = data[:i], data[i+1:]
+		}
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// loadCallLogFromFileSingle 是原有的单文件尾部加载（语义逐字保留）。
+func loadCallLogFromFileSingle() {
+	callLog.mu.RLock()
 	p := callLog.path
 	callLog.mu.RUnlock()
 	if p == "" {
@@ -1432,11 +2049,6 @@ func loadCallLogFromFile() {
 			records = append(records, rec)
 		}
 	}
-	if len(records) > callLogCapacity {
-		records = records[len(records)-callLogCapacity:]
-	}
-	callLog.mu.Lock()
-	callLog.records = records
 	// 顺手从尾部记录里播种 everServed（Task 39）。
 	//
 	// 为什么要在启动时就播种、而不是等第一次 stats 查询触发回填：
@@ -1446,15 +2058,7 @@ func loadCallLogFromFile() {
 	// 重启后的判定就和重启前不一致（违反单调性）。尾部记录是**已经在内存里**的
 	// 现成数据，零额外 IO，覆盖「最近有流量」的全部模型名 —— 这是最划算的一层保险。
 	// 更久远的历史由首次回填补齐（同一份日志、同一套判据）。
-	if servedModels == nil {
-		servedModels = make(map[string]struct{}, 32)
-	}
-	for _, rec := range records {
-		if rec.Status == "ok" && rec.Model != "" {
-			servedModels[rec.Model] = struct{}{}
-		}
-	}
-	callLog.mu.Unlock()
+	installLoadedRecords(records)
 }
 
 // writeBytes 是 os.File.Write 的可注入包装，唯一目的是让测试能制造短写：
@@ -1505,13 +2109,72 @@ func writeCallLogLine(path string, line []byte) (int64, error) {
 	return sizeBefore, err
 }
 
+// diskRecordForWrite 生成落盘副本：先裁 events（原有逻辑），再按 task-56 精简默认/零值字段。
+// 只在 daily 模式启用 —— `-calllog-layout=single` 是回滚模式，连落盘格式也退回旧版，
+// 这样旧二进制读新文件、新二进制写旧格式两个方向都不会出意外。
+//
+// 只改落盘副本，内存环与无参数 /api/call-log 响应保持完整字段（老行不受影响）。
+func diskRecordForWrite(rec CallRecord) CallRecord {
+	d := rec
+	if !d.HasIssue() {
+		d.Events = nil
+	}
+	if d.Path == defaultCallPath {
+		d.Path = ""
+	}
+	if d.RouteMode == defaultRouteMode {
+		d.RouteMode = ""
+	}
+	if len(d.Events) > 0 {
+		// 🔴 必须**深拷贝**再清：d.Events 与内存环里的 rec.Events 共用底层数组，
+		// 直接改 d.Events[i] 会把内存环也污染掉（实测：append 后 /api/call-log
+		// 的事件名变空，面板时间线坏掉）。
+		evs := make([]CallEvent, len(d.Events))
+		copy(evs, d.Events)
+		for i := range evs {
+			// node_name 100% 可由顶层 nodes/node_names 还原（生产实测 233,750/233,750）
+			evs[i].NodeName = ""
+		}
+		d.Events = evs
+	}
+	// 零读者的两个字段（审计 §3.3：全仓库仅写入 1 处、无任何读取点）
+	d.FinalStatus = 0
+	d.DialMS = 0
+	return d
+}
+
+// restoreDiskRecord 把落盘精简掉的默认值/事件名还原回来。
+// 用于：启动时从磁盘恢复内存环（loadCallLogFromFile）、历史查询结果。
+// 老行（字段齐全）经过它是 no-op，因此不需要区分版本。
+func restoreDiskRecord(rec *CallRecord) {
+	if rec.Path == "" {
+		rec.Path = defaultCallPath
+	}
+	if rec.RouteMode == "" {
+		rec.RouteMode = defaultRouteMode
+	}
+	for i := range rec.Events {
+		if rec.Events[i].NodeName != "" || rec.Events[i].Node == "" {
+			continue
+		}
+		for j, fp := range rec.Nodes {
+			if fp == rec.Events[i].Node && j < len(rec.NodeNames) {
+				rec.Events[i].NodeName = rec.NodeNames[j]
+				break
+			}
+		}
+	}
+}
+
 func (s *callLogStore) append(rec CallRecord) {
 	s.mu.Lock()
 	s.records = append(s.records, rec)
 	if len(s.records) > callLogCapacity {
 		s.records = s.records[len(s.records)-callLogCapacity:]
 	}
-	p := s.path
+	// daily 模式：写入今天的天文件（保证只追加到最后一段，绝不回写旧段）。
+	// p == "" 表示日目录建不出来（只读卷/ENOSPC）：该条不落盘，仍在内存环里。
+	p := s.dailyTargetLocked()
 	// ---- 落盘裁 Events：只裁「干净」记录 ----
 	//
 	// Events 占落盘体积的大头（b3555de 实测 95.7 MB → 58.6 MB，−38.7%），
@@ -1548,7 +2211,9 @@ func (s *callLogStore) append(rec CallRecord) {
 	// Marshal 必须在锁内、且紧邻落盘：line 的长度就是 parsedTo 的增量，
 	// 两者必须是同一份字节，否则推进量与真正写下去的量会对不上。
 	diskRec := rec
-	if !diskRec.HasIssue() {
+	if s.dir != "" {
+		diskRec = diskRecordForWrite(rec)
+	} else if !diskRec.HasIssue() {
 		diskRec.Events = nil
 	}
 	var line []byte
@@ -1674,7 +2339,15 @@ func (s *callLogStore) append(rec CallRecord) {
 			// 文件大小恰好也是这个数 —— parsedTo == size 恒成立，
 			// 「size < parsedTo → 全量重建」不再被稳态触发
 			// （修复前实测 400 次观测命中 83 次，21%）。
-			parsedTo += int64(len(line))
+			if s.dir != "" {
+				// daily 模式：游标指向最后一段末尾（与 parsedTo == size 同构）
+				if n := len(dailySegs); n > 0 && dailySegs[n-1].path == p {
+					dailyCur = absorbCursor{idx: n - 1, off: dailyCur.off + int64(len(line))}
+					dailySegs[n-1].size += int64(len(line))
+				}
+			} else {
+				parsedTo += int64(len(line))
+			}
 			// 🔴 absorbedRecords 必须与 parsedTo 在**同一处**推进（边界情况③）。
 			// 落盘失败的两条回滚路径都在上面 return 了，到不了这里 ——
 			// 于是「parsedTo 没动但计数动了」不可能发生，两者的差恒为 0。
@@ -1721,6 +2394,19 @@ func (s *callLogStore) clear() {
 	// 被清空的趋势图立刻复活（幽灵统计）。
 	if p != "" {
 		os.Remove(p)
+	}
+	// daily 模式：日文件也必须一起删（用户显式清空 = 丢弃全部历史）。
+	if s.dir != "" {
+		if ents, err := os.ReadDir(s.dir); err == nil {
+			for _, e := range ents {
+				if e.IsDir() {
+					continue
+				}
+				if err := os.Remove(filepath.Join(s.dir, e.Name())); err != nil {
+					slog.Warn("calllog: cannot remove day segment on clear", "file", e.Name(), "error", err)
+				}
+			}
+		}
 	}
 	s.mu.Unlock()
 }
@@ -2395,22 +3081,596 @@ func modelStatsWithBuckets(ts []string, bidx func(time.Time) int) *TokenStatsDat
 
 // ---- API：GET /api/call-log?limit= / DELETE /api/call-log ----
 
+// ---- task-56：历史查询（无索引，按段倒读）----
+
+// callLogHistoryFilter 是历史查询的过滤条件；hasBefore/hasAfter 区分零值与未设置。
+type callLogHistoryFilter struct {
+	limit       int
+	hasBefore   bool
+	before      time.Time
+	beforeReqID string // 分页去重游标：(ts, req_id) 严格序
+	hasAfter    bool
+	after       time.Time
+	model       string
+	status      string // ""/"all"/"ok"/"fail"
+	q           string // 对原始行做大小写不敏感子串匹配
+
+	// 位置游标（task-65 D3）：直接指定「从哪一段的哪一行之后续扫」。
+	// 与 ts 是否有序无关——文件按完成序追加、ts 是开始时刻，两者本来就不一致。
+	hasCursor  bool
+	cursorSeg  string // "legacy" 或 "YYYY-MM-DD"（段标识，不用文件路径，明文→gz 改名后仍有效）
+	cursorLine int    // 段内物理行号（0 基），= 上一页最后返回行的行号
+}
+
+// ---- 位置游标（task-65 D3）----
+//
+// 生产日志按「请求完成序」追加，而 CallRecord.TS 是「请求开始时刻」：
+// 流式长请求先开始、后结束 ⇒ 相邻行的 ts 经常逆序（实测 29.3%）。
+// 因此 ts 不能做分页游标（下一页跳过 ts>before 会永久漏掉扫描序里更晚出现的
+// 更大 ts 行；反过来重复吐 ts 更小的行）。位置游标只记「扫到哪」，与 ts 无关：
+//
+//	X-Call-Log-Next-Cursor = "c1_" + base64url(段标识 + ":" + 行号)
+//
+// 段标识用 legacy / YYYY-MM-DD（不是文件路径）：日文件明文→gz 改名后游标仍有效。
+// 后续页从该行的**下一条物理行**（行号-1，倒序扫描）续扫，不再从最新段重扫。
+const callLogCursorPrefix = "c1_"
+
+// errCallLogCursorStale 表示游标指向的段已不存在或行号越界（段被保留策略删除、
+// 数据目录被替换等）。handler 把它转成 400 + X-Call-Log-Error: stale-cursor，
+// 由调用方从头重新分页——不静默回退，避免返回看似成功但缺页的结果。
+var errCallLogCursorStale = errors.New("calllog: history cursor stale (segment missing or line out of range)")
+
+type callLogCursor struct {
+	Seg  string
+	Line int
+}
+
+// callLogSegKey 返回段的稳定标识：legacy 段用 "legacy"，日文件用日期（YYYY-MM-DD）。
+func callLogSegKey(seg callLogSegment) string {
+	if seg.legacy {
+		return "legacy"
+	}
+	if seg.day != "" {
+		return seg.day
+	}
+	return strings.TrimSuffix(filepath.Base(seg.path), ".gz")
+}
+
+func encodeCallLogCursor(seg string, line int) string {
+	raw := seg + ":" + strconv.Itoa(line)
+	return callLogCursorPrefix + base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodeCallLogCursor(v string) (callLogCursor, bool) {
+	if !strings.HasPrefix(v, callLogCursorPrefix) {
+		return callLogCursor{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(v[len(callLogCursorPrefix):])
+	if err != nil {
+		return callLogCursor{}, false
+	}
+	parts := strings.SplitN(string(raw), ":", 2)
+	if len(parts) != 2 || parts[0] == "" {
+		return callLogCursor{}, false
+	}
+	line, err := strconv.Atoi(parts[1])
+	if err != nil || line < 0 {
+		return callLogCursor{}, false
+	}
+	return callLogCursor{Seg: parts[0], Line: line}, true
+}
+
+// readSegments 返回查询用的段列表（升序）；单文件模式返回单段。
+func (s *callLogStore) readSegments() []callLogSegment {
+	if segs := s.dailySegments(); len(segs) > 0 {
+		return segs
+	}
+	s.mu.RLock()
+	p := s.path
+	s.mu.RUnlock()
+	if p == "" {
+		return nil
+	}
+	if st, err := os.Stat(p); err == nil {
+		return []callLogSegment{{name: filepath.Base(p), path: p, legacy: true, size: st.Size()}}
+	}
+	return nil
+}
+
+// parseLogFilterTime 解析 before/after 参数；兼容带/不带毫秒与时区的写法。
+func parseLogFilterTime(v string) (time.Time, error) {
+	if tt, err := time.Parse(time.RFC3339, v); err == nil {
+		return tt, nil
+	}
+	for _, layout := range []string{
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	} {
+		if tt, err := time.ParseInLocation(layout, v, time.Local); err == nil {
+			return tt, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid time %q", v)
+}
+
+// historyQuery 从文件侧查历史（最新在前），返回 (记录, 是否还有更早的匹配, 是否被扫描预算截断)。
+//
+// 无索引：按段从新到旧、段内从尾到头倒读；命中行才做完整 Unmarshal。
+// 成本实测（审计 §4.3）：单日倒读 + limit=2000 命中即停 25~32 ms；
+// 尾部 2000 行 179 µs~1.95 ms；90 天最坏 ~0.7 s（有 256 MiB 预算兜底）。
+func (s *callLogStore) historyQuery(f callLogHistoryFilter) ([]CallRecord, bool, bool, string, error) {
+	if f.limit <= 0 {
+		f.limit = 200
+	}
+	if f.limit > callLogCapacity {
+		f.limit = callLogCapacity
+	}
+	if f.hasCursor {
+		// 位置游标本身已经精确指定了扫描起点，与 ts 无关；
+		// before/before_req_id 的 ts 边界语义在 cursor 模式下没有意义（也不该再用），
+		// 明确忽略，避免「位置续扫 + 旧 ts 跳过」叠加造成漏行。
+		f.hasBefore = false
+	}
+	qLower := strings.ToLower(f.q)
+	segs := s.readSegments()
+	out := make([]CallRecord, 0, f.limit)
+	var scanned int64
+	truncated := false
+	hasMore := false
+
+	// histHit 记住每条命中行的**物理位置**（段下标 + 段内行号），
+	// 用于在页尾产出位置游标（X-Call-Log-Next-Cursor）。
+	type histHit struct {
+		rec  CallRecord
+		seg  int
+		line int
+	}
+	lastSeg, lastLine := -1, -1
+	// emit 输出一条并维护 hasMore；返回 true 表示已到 limit、应停止扫描。
+	emit := func(h histHit) bool {
+		if len(out) >= f.limit {
+			hasMore = true
+			return true
+		}
+		out = append(out, h.rec)
+		lastSeg, lastLine = h.seg, h.line
+		return false
+	}
+
+	// tsBuf 暂存「ts == before」这一组的候选行（含物理位置）。
+	//
+	// 🔴 为什么必须整组缓冲而不能边扫边出：同 ts 行的物理顺序与 req_id 大小无关
+	// （生产快照 52% 的同 ts 组不是 req_id 升序），`before_req_id` 只能当
+	// **扫描位置游标**：组内游标行之前的行都已在上页返回过，游标行之后的还没返回。
+	// 只有把整组读完、找到游标行在组内的位置，才能正确接续（task-63 D2）。
+	//
+	// 兼容回退：客户端也可能传一个**不在数据里**的 before_req_id（旧实现把它当
+	// 排序键，返回 req_id < 游标的同 ts 行）。组结束时找不到游标行就退回旧语义，
+	// 保证老调用方行为不变。
+	var tsBuf []histHit
+	flushTSBuf := func() bool {
+		if len(tsBuf) == 0 {
+			return false
+		}
+		buf := tsBuf
+		tsBuf = nil
+		pos := -1
+		for k := range buf {
+			if buf[k].rec.ReqID == f.beforeReqID {
+				pos = k
+				break
+			}
+		}
+		if pos >= 0 {
+			for _, h := range buf[pos+1:] {
+				if emit(h) {
+					return true
+				}
+			}
+			return false
+		}
+		// 游标行不在本组：按旧实现的排序键语义过滤（req_id < cursor 才返回）
+		for _, h := range buf {
+			if h.rec.ReqID < f.beforeReqID {
+				if emit(h) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// 位置游标：从「上一页最后一条」的下一条物理行续扫（倒序扫描 ⇒ 行号 -1）。
+	startIdx, cursorLine := len(segs)-1, -1
+	if f.hasCursor {
+		startIdx = -1
+		for i := range segs {
+			if callLogSegKey(segs[i]) == f.cursorSeg {
+				startIdx = i
+				break
+			}
+		}
+		if startIdx < 0 {
+			// 段被保留策略删除 / 数据目录换过：明确失败，不静默回退（见 handler 400）
+			return nil, false, false, "", errCallLogCursorStale
+		}
+		cursorLine = f.cursorLine
+	}
+
+scan:
+	for i := startIdx; i >= 0; i-- {
+		seg := segs[i]
+		data, size, err := readDailySegment(seg.path, seg.gz)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // 段被归档/删除：跳过（列表会自愈）
+			}
+			slog.Warn("calllog: history query cannot read segment", "path", seg.path, "error", err)
+			continue
+		}
+		scanned += size
+		if scanned > callLogHistoryMaxScanBytes {
+			truncated = true
+			break
+		}
+		lines := splitJSONLines(data)
+		jFrom := len(lines) - 1
+		if f.hasCursor && i == startIdx {
+			if len(lines) == 0 || cursorLine >= len(lines) {
+				return nil, false, false, "", errCallLogCursorStale
+			}
+			jFrom = cursorLine - 1
+		}
+		for j := jFrom; j >= 0; j-- {
+			line := lines[j]
+			if qLower != "" && !bytes.Contains(bytes.ToLower(line), []byte(qLower)) {
+				continue
+			}
+			var slim slimRec
+			if !parseStatsLine(line, &slim) {
+				continue
+			}
+			if f.model != "" && slim.Model != f.model {
+				continue
+			}
+			switch f.status {
+			case "", "all":
+			case "ok":
+				if slim.Status != "ok" {
+					continue
+				}
+			case "fail":
+				if slim.Status == "ok" {
+					continue
+				}
+			}
+			ts, perr := parseLogFilterTime(slim.TS)
+			if perr != nil {
+				continue
+			}
+			if f.hasAfter && ts.Before(f.after) {
+				continue
+			}
+			if f.hasBefore {
+				if ts.After(f.before) {
+					continue
+				}
+				if ts.Equal(f.before) {
+					if f.beforeReqID == "" {
+						continue // 排他：整组都不返回
+					}
+					var rec CallRecord
+					if json.Unmarshal(line, &rec) != nil || rec.ReqID == "" {
+						continue
+					}
+					restoreDiskRecord(&rec)
+					tsBuf = append(tsBuf, histHit{rec: rec, seg: i, line: j})
+					continue
+				}
+				// ts 已经严格早于 before ⇒ 同 ts 组结束，按游标语义补出缓冲行
+				if len(tsBuf) > 0 && flushTSBuf() {
+					break scan
+				}
+			}
+			var rec CallRecord
+			if json.Unmarshal(line, &rec) != nil || rec.ReqID == "" {
+				continue
+			}
+			restoreDiskRecord(&rec)
+			if emit(histHit{rec: rec, seg: i, line: j}) {
+				break scan
+			}
+		}
+		if hasMore || truncated {
+			break
+		}
+	}
+	if !hasMore && !truncated {
+		flushTSBuf()
+	}
+
+	nextCursor := ""
+	if hasMore && lastSeg >= 0 {
+		nextCursor = encodeCallLogCursor(callLogSegKey(segs[lastSeg]), lastLine)
+	}
+	return out, hasMore, truncated, nextCursor, nil
+}
+
+// ---- task-56：保留策略（gzip 归档 + 按天删除）----
+
+// compressSegmentFile 把 plain 日文件压成 .jsonl.gz（tmp + fsync + rename + 删 plain）。
+// 崩溃在 rename 之后、remove 之前 ⇒ plain 与 gz 并存，重建段列表时选 plain，
+// 下次归档重试覆盖（数据不会丢）。
+func compressSegmentFile(path string) (string, error) {
+	in, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer in.Close()
+	tmp := path + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return "", err
+	}
+	zw := gzip.NewWriter(out)
+	if _, err := io.Copy(zw, in); err != nil {
+		zw.Close()
+		out.Close()
+		os.Remove(tmp)
+		return "", err
+	}
+	if err := zw.Close(); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return "", err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return "", err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	gzPath := path + ".gz"
+	if err := os.Rename(tmp, gzPath); err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return gzPath, err
+	}
+	return gzPath, nil
+}
+
+// maintainRetention 执行一次保留策略：压缩 gzipAfterDays 之前的明文段、
+// 删除 retainDays 之前的段。只在「已全部吸收（seeded）」时动手 ——
+// 否则删除会让尚未吸收的字节消失（统计永久缺失）。
+// 返回 (压缩段数, 删除段数)。
+func (s *callLogStore) maintainRetention(now time.Time) (compressed, pruned int, err error) {
+	if s.dir == "" || callLogRetainDays <= 0 {
+		return 0, 0, nil
+	}
+	s.mu.RLock()
+	seeded := bucketsSeeded
+	cur := dailyCur
+	s.mu.RUnlock()
+	if !seeded {
+		return 0, 0, nil
+	}
+
+	localNow := now.In(time.Local)
+	gzCutoff := localNow.AddDate(0, 0, -callLogGzipAfterDays).Format("2006-01-02")
+	// 1) 归档：只压缩「非最后一段 + 非游标段 + 超过归档天数」的明文段
+	segs := s.dailySegments()
+	for i, sg := range segs {
+		if i >= len(segs)-1 || i >= cur.idx {
+			break
+		}
+		if sg.legacy || sg.gz || sg.day == "" || sg.day > gzCutoff {
+			continue
+		}
+		if _, cerr := compressSegmentFile(sg.path); cerr != nil {
+			slog.Warn("calllog: gzip archive failed (will retry next hour)", "path", sg.path, "error", cerr)
+			continue
+		}
+		compressed++
+	}
+	if compressed > 0 {
+		s.mu.Lock()
+		dailySegsKey = "" // 路径变了：强制重建
+		s.ensureDailySegsLocked()
+		s.mu.Unlock()
+	}
+
+	// 2) 删除：只删游标之前的段，且保留 legacy（存量原样不动）
+	retainCutoff := localNow.AddDate(0, 0, -callLogRetainDays).Format("2006-01-02")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !bucketsSeeded {
+		return compressed, 0, nil
+	}
+	s.ensureDailySegsLocked()
+	for i, sg := range dailySegs {
+		if i >= dailyCur.idx {
+			break
+		}
+		if sg.legacy || sg.day == "" || sg.day >= retainCutoff {
+			continue
+		}
+		if rerr := os.Remove(sg.path); rerr != nil && !os.IsNotExist(rerr) {
+			slog.Warn("calllog: prune failed", "path", sg.path, "error", rerr)
+			continue
+		}
+		pruned++
+	}
+	if pruned > 0 {
+		dailySegsKey = ""
+		s.ensureDailySegsLocked() // 重建列表并按路径保住游标
+	}
+	return compressed, pruned, nil
+}
+
+// startCallLogArchiver 每小时跑一次保留策略（仅 daily 模式）。
+// 放在后台而不是请求路径：压缩/删除是磁盘 I/O，不该让面板查询等它。
+func startCallLogArchiver() {
+	callLog.mu.RLock()
+	dir := callLog.dir
+	callLog.mu.RUnlock()
+	if dir == "" {
+		return
+	}
+	go func() {
+		t := time.NewTicker(time.Hour)
+		defer t.Stop()
+		for range t.C {
+			if _, _, err := callLog.maintainRetention(time.Now()); err != nil {
+				slog.Warn("calllog: retention maintenance failed", "error", err)
+			}
+		}
+	}()
+}
+
 func adminCallLogHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		q := r.URL.Query()
 		limit := 500
-		if v := r.URL.Query().Get("limit"); v != "" {
+		if v := q.Get("limit"); v != "" {
 			var n int
 			if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
 				limit = n
 			}
 		}
+		if limit > callLogCapacity {
+			limit = callLogCapacity
+		}
+		// 无任何过滤参数 ⇒ 走内存环（旧行为逐字节兼容：最新在前、默认 500）。
+		filter := callLogHistoryFilter{limit: limit}
+		useFile := false
+		badCursor := func() {
+			w.Header().Set("X-Call-Log-Error", "bad-cursor")
+			http.Error(w, `{"error":"bad-cursor"}`, http.StatusBadRequest)
+		}
+		// 位置游标（task-65 D3）：?cursor=c1_xxx 精确指定「从哪一段的哪一行之后续扫」，
+		// 与 ts 是否有序无关；显式给 cursor 时 before/before_req_id 的 ts 语义不再参与。
+		if v := q.Get("cursor"); v != "" {
+			dec, ok := decodeCallLogCursor(v)
+			if !ok {
+				badCursor()
+				return
+			}
+			filter.hasCursor, filter.cursorSeg, filter.cursorLine = true, dec.Seg, dec.Line
+			useFile = true
+		}
+		var legacyBefore time.Time
+		legacyBeforeOK := false
+		legacyTokenCursor := false
+		if v := q.Get("before"); v != "" && !filter.hasCursor {
+			tt, err := parseLogFilterTime(v)
+			if err != nil {
+				http.Error(w, `{"error":"invalid before"}`, http.StatusBadRequest)
+				return
+			}
+			legacyBefore, legacyBeforeOK = tt, true
+			filter.hasBefore, filter.before, filter.beforeReqID = true, tt, q.Get("before_req_id")
+			// 兼容旧调用方：它们只回传 X-Call-Log-Next-Before-Req。新实现该头返回的是
+			// 不透明位置游标（c1_ 前缀），这里识别出来走位置续扫；裸 req_id（老实现/手工构造）
+			// 仍按原排序键语义处理，零影响。
+			if strings.HasPrefix(filter.beforeReqID, callLogCursorPrefix) {
+				dec, ok := decodeCallLogCursor(filter.beforeReqID)
+				if !ok {
+					badCursor()
+					return
+				}
+				filter.hasCursor, filter.cursorSeg, filter.cursorLine = true, dec.Seg, dec.Line
+				filter.hasBefore = false
+				legacyTokenCursor = true
+			}
+			useFile = true
+		}
+		if v := q.Get("after"); v != "" {
+			tt, err := parseLogFilterTime(v)
+			if err != nil {
+				http.Error(w, `{"error":"invalid after"}`, http.StatusBadRequest)
+				return
+			}
+			filter.hasAfter, filter.after = true, tt
+			useFile = true
+		}
+		if v := q.Get("model"); v != "" {
+			filter.model, useFile = v, true
+		}
+		if v := q.Get("status"); v != "" {
+			switch v {
+			case "all", "ok", "fail":
+				filter.status, useFile = v, true
+			default:
+				http.Error(w, `{"error":"invalid status"}`, http.StatusBadRequest)
+				return
+			}
+		}
+		if v := q.Get("q"); v != "" {
+			filter.q, useFile = v, true
+		}
 		w.Header().Set("Content-Type", "application/json")
+		if useFile {
+			recs, hasMore, truncated, nextCursor, err := callLog.historyQuery(filter)
+			if err != nil && errors.Is(err, errCallLogCursorStale) && legacyTokenCursor && legacyBeforeOK {
+				// 旧调用方只回传响应头、无法处理 400：游标段在分页之间被保留策略删除时
+				// 优雅回退到旧 before 语义（排他 ts），并用 X-Call-Log-Cursor-Fallback 标记。
+				// 显式 ?cursor= 的新调用方相反——明确 400 stale-cursor，由它从头重分页。
+				fallback := callLogHistoryFilter{
+					limit: filter.limit, hasBefore: true, before: legacyBefore,
+					hasAfter: filter.hasAfter, after: filter.after,
+					model: filter.model, status: filter.status, q: filter.q,
+				}
+				recs, hasMore, truncated, nextCursor, err = callLog.historyQuery(fallback)
+				if err == nil {
+					w.Header().Set("X-Call-Log-Cursor-Fallback", "before")
+				}
+			}
+			if err != nil {
+				if errors.Is(err, errCallLogCursorStale) {
+					w.Header().Set("X-Call-Log-Error", "stale-cursor")
+					http.Error(w, `{"error":"stale-cursor"}`, http.StatusBadRequest)
+					return
+				}
+				http.Error(w, `{"error":"query failed"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("X-Call-Log-Source", "file")
+			w.Header().Set("X-Call-Log-Has-More", fmt.Sprintf("%t", hasMore))
+			if truncated {
+				w.Header().Set("X-Call-Log-Truncated", "true")
+			}
+			if nextCursor != "" {
+				w.Header().Set("X-Call-Log-Next-Cursor", nextCursor)
+			}
+			if len(recs) > 0 {
+				oldest := recs[len(recs)-1]
+				w.Header().Set("X-Call-Log-Next-Before", oldest.TS)
+				if nextCursor != "" {
+					// 新实现：Next-Before-Req 回传不透明位置游标（不再是裸 req_id）。
+					// 旧调用方照原样回传即可得到精确续页——裸 req_id 会被当排序键，
+					// 在 ts 乱序的真实数据上会漏/重（task-65 D3）。
+					w.Header().Set("X-Call-Log-Next-Before-Req", nextCursor)
+				} else {
+					w.Header().Set("X-Call-Log-Next-Before-Req", oldest.ReqID)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(recs)
+			return
+		}
 		recs := callLog.latest(limit)
 		// 最新在前（前端直接渲染）
 		for i, j := 0, len(recs)-1; i < j; i, j = i+1, j-1 {
 			recs[i], recs[j] = recs[j], recs[i]
 		}
+		w.Header().Set("X-Call-Log-Source", "memory")
 		_ = json.NewEncoder(w).Encode(recs)
 	case http.MethodDelete:
 		callLog.clear()

@@ -1370,6 +1370,31 @@ test 分支合并到 main  →  GitHub Actions 构建并推送 ghcr 镜像  → 
 ## 更新记录
 
 ```
+10-20  ★★ 第六批上线：调用日志改造（按天分文件 + 180 天保留 + 字段精简 + 历史查询/位置游标分页）
+       背景：233k 行 / 124MB 单文件无上限增长；面板只能查内存环 500 条，历史不可查
+       方案：legacy 冻结为第 0 段 + call_log/YYYY-MM-DD.jsonl 按天写；>2 天 gzip；>180 天删；legacy 永不删
+            字段精简（path/route_mode/events[].node_name/零读者 final_status+dial_ms 不落盘，−16.2%/天）
+            读取侧 restoreDiskRecord 服务端还原（面板零改动，D2 决策）
+            新查询参数 limit/before/before_req_id/after/model/status/q + 位置游标 cursor
+       ★ 验收打了三轮（no-go → no-go → go），挖出 3 个真缺陷，全部由独立验收方在生产真实数据上抓到：
+         D1 纯日文件/全新部署下 /api/stats/trends 恒返回 []（callLogFileExists 只 Stat legacy）
+         D2 同 ts 多记录分页漏行（游标按 req_id 排序键，而文件物理序无关）
+         D3 ★ 根因类别：D2 只修同 ts 子类；真实原因 —— **文件按完成序追加、ts 是开始时刻**
+             ⇒ 相邻 ts 逆序 68,381 次 = 29.3%（p99 377s、max 46min），同 ts 组 2,266 组中 1,141 组不连续
+             ⇒ 生产全量 limit=500 翻 468 页漏 1,124 / 重 1,317；同数据按 ts 排序对照 0/0
+       终态：位置游标 X-Call-Log-Next-Cursor = c1_+base64url(段标识:行号)，与 ts 有序性无关
+             生产 233,444 行 limit=500 连翻 467 页 **0 漏 0 重**；错误契约 bad-cursor/stale-cursor（不静默给残缺页）
+       门禁加固（D1/D2/D3 漏网的真正原因）：T8 从「只比 stats」升级为三布局逐字节比
+             stats + trends(plain/group=model) + call-log 首页 + **全量分页并集==全集**；T56_REQUIRE_FIXTURE=1 缺夹具 Fatal
+             验收方破坏实验实证牙齿：还原 D1 缺陷→红；删 trends 比较→绿；游标 off-by-one→红；删分页判据→绿
+       红线未破：同钟对拍 old L1 == new L1=L2=L3（prod 990b3117…/syn c71d2246…）；回滚 -calllog-layout=single 落盘字节一致
+       数据：冷启动 635/704/670ms（旧 825ms）；峰值内存 124MB→256KiB（流式吸收）；磁盘 90d 141MB / 180d 155MB 封顶
+       回归：全量 go test 188~226s 绿、子系统 -race 0 race、vet/gofmt 干净、变异 13/13（实现方自报 17/17）CAUGHT
+       遗留（非阻断，记入待办）：
+         ① X-Call-Log-Next-Before-Req 值语义由裸 req_id 变不透明 token（旧调用方成对回传无感；手工解析会坏）
+            ⇒ 需在发布说明/前端文档标注「不透明游标，勿解析；hasMore=false 时无意义」
+         ② *_test.go 被 .gitignore 忽略 ⇒ 加固后的 T8/分页门禁**不进 CI**，目前只能本地跑（是否入库待用户裁定）
+         ③ t56PaginateRun 无页数上限（游标完全失效会挂到测试超时而非快速失败）
 10-20  ★★ 第五批上线：订阅刷新三处缺陷（假告警 / 计数清零 / **24h 自动刷新永不触发**）
        用户报「面板上明明有正常的节点，但日志报没有可用节点」
        根因链：ticker 每 10min 跑 refresh(force=false)，订阅默认 24h 间隔 ⇒ 未到期源返回空结果
