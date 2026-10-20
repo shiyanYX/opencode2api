@@ -7609,6 +7609,12 @@ func main() {
 	flag.IntVar(&logMaxAge, "log-max-age", 14, "旧日志保留天数")
 	flag.BoolVar(&logCompress, "log-compress", true, "轮换后 gzip 压缩")
 	flag.BoolVar(&logBodies, "log-bodies", false, "Debug 下记录截断的 body 摘要")
+	flag.StringVar(&callLogLayout, "calllog-layout", "daily",
+		"调用日志布局：daily=按天分文件（默认），single=单文件（回滚用）")
+	flag.IntVar(&callLogGzipAfterDays, "calllog-gzip-after-days", 2,
+		"调用日志日文件超过该天数后 gzip 归档（0=不归档）")
+	flag.IntVar(&callLogRetainDays, "calllog-retain-days", 180,
+		"调用日志日文件保留天数；legacy 单文件不受影响（0=不删除）")
 	flag.BoolVar(&showVersion, "version", false, "显示版本信息")
 	flag.Parse()
 
@@ -7635,6 +7641,8 @@ func main() {
 		slog.Warn("failed to save config", "path", configPath, "error", err)
 	}
 	initCallLog(configPath)
+	// 调用日志保留策略（gzip 归档 + 按天删除），仅 daily 模式；每小时一次。
+	startCallLogArchiver()
 
 	// 订阅管理器：缓存 + 状态与配置文件同目录
 	cacheDir := filepath.Join(filepath.Dir(configPath), ".subscriptions")
