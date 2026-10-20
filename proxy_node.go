@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net"
@@ -224,6 +225,14 @@ type nodePool struct {
 	clients   map[string]*http.Client // 节点指纹 → 缓存客户端
 	statePath string
 	saveWG    sync.WaitGroup // 跟踪异步状态写入（测试可排空等待）
+
+	// stateRestored 表示「本进程内已经把 proxy_state.json 合并进节点列表」。
+	// 只为首次装入节点时恢复一次：进程内的状态比磁盘新，后续 setNodes（订阅刷新）
+	// 若再读盘，会把刚判死的节点写回 available。
+	stateRestored bool
+	// lastProbeOK 是「上一轮可用节点巡检」里探测成功的指纹集合（对照组候选池）。
+	// 由 checkFiltered(probeAvailable) 在每轮结束时整体替换；只读快照给选样用。
+	lastProbeOK []string
 }
 
 // 健康检查默认值（Clash url-test 语义：真实连接 + HTTP 2xx 判定可用）。
@@ -283,7 +292,9 @@ func newProxyPool(statePath string) *nodePool {
 		deadCooldown:      time.Minute,
 		statePath:         statePath,
 	}
-	p.loadState()
+	// ★ 这里【不能】调用 loadState：此刻 p.nodes 还是空的，循环体一次都不会执行，
+	// proxy_state.json 写了也从来没被读进来（C-7）。状态恢复改在 setNodes 首次
+	// 装入节点列表之后进行（见 setNodes 里的 restoreStateLocked 调用点）。
 	return p
 }
 
@@ -635,7 +646,10 @@ var blipStreak atomic.Int64
 // probeRoundLooksLikeGlobalBlip 判断一整轮探测的失败是否像「我们自己的网络问题」。
 // 依据（2026-10-19 生产）：一次约 2 分钟的出口抖动让 90/218 个节点在同一轮超时。
 // 判据：一轮里失败 >=20 个，或（该轮 >=8 个且失败占 >=75%）。
-// 命中时整轮失败不予采信 —— 不判死、也不累积 streak。
+//
+// ⚠️ 这个判据只在**没有对照组可用**时使用（见 decideProbeRound）：
+// 在 213 节点的池子上 failed>=20 只有 9.4%，任何长期坏 10% 的池子都会被它永久
+// 锁在「抖动」态、dead 永不标记（task-30 诊断的直接成因）。主判据是 canary 对照组。
 func probeRoundLooksLikeGlobalBlip(total, failed int) bool {
 	if total < 8 || failed <= 0 {
 		return false
@@ -644,6 +658,175 @@ func probeRoundLooksLikeGlobalBlip(total, failed int) bool {
 		return true
 	}
 	return failed*4 >= total*3
+}
+
+// ======================= canary 对照组（task-30 §6 方案 A） =======================
+//
+// 判据换成语义正确的那个：**抖动的定义是「连最稳的节点也挂了」，不是「失败数超过某个数字」**。
+// 每轮从「上一轮探测成功」的节点里确定性抽 5 个当对照：
+//   - 对照组失败率 >=60% ⇒ 真·全局抖动 ⇒ 整轮不采信（不判死、不累积 streak）；
+//   - 否则 ⇒ 照常按 probeFailStreakThreshold 判死（长期坏的固定子集因此能被判死）。
+//
+// 「上一轮成功集合」天然排除了长期坏节点（它们从来不会成功），所以对照组反映的是
+// **变化**而不是池子固有的坏比例 —— 这正是 42.7% 固定子集坏掉时仍然能判死的原因。
+const (
+	// probeCanaryCount 每轮对照组大小。成本只 +5 探针/轮（+2.3% 探测预算）。
+	probeCanaryCount = 5
+	// probeCanaryMinSample 采信对照组结论所需的最小样本量。少于这个数时失败率没有
+	// 统计意义（1/1、2/2 都是 100%），此时**不采信对照组**，退回「无对照组」分支。
+	// 触发场景：小池子（2~3 节点）、或上一轮只有个别节点成功。
+	probeCanaryMinSample = 3
+	// probeCanaryBlipPercent 对照组失败率（百分比）达到多少判全局抖动。
+	probeCanaryBlipPercent = 60
+	// probeUnverifiedBlipMaxRounds 没有对照组（冷启动 / 整池坏）时，先按老口径抑制
+	// 多少轮；超过之后必须升级为「限量判死」，否则会永不判死。
+	probeUnverifiedBlipMaxRounds = 3
+	// probeNoCanaryMaxDeaths 无对照组升级后，单轮最多判死多少个。
+	// 防「整池一次性判死」：每轮推进一批，既不会卡住也不会一次性抽干池子。
+	probeNoCanaryMaxDeaths = 10
+)
+
+// probeRoundVerdict 是一轮可用节点巡检的采信结论。
+type probeRoundVerdict int
+
+const (
+	// probeRoundTrusted 采信本轮失败：按 streak 判死。
+	probeRoundTrusted probeRoundVerdict = iota
+	// probeRoundBlipVerified 对照组失败率 >=60%：真·全局抖动，整轮不采信。
+	probeRoundBlipVerified
+	// probeRoundBlipUnverified 无对照组且老口径判定像全局抖动：先抑制。
+	probeRoundBlipUnverified
+	// probeRoundEscalate 无对照组且已连续多轮：必须升级，限量判死。
+	probeRoundEscalate
+)
+
+func (v probeRoundVerdict) String() string {
+	switch v {
+	case probeRoundTrusted:
+		return "trusted"
+	case probeRoundBlipVerified:
+		return "blip_verified"
+	case probeRoundBlipUnverified:
+		return "blip_unverified"
+	case probeRoundEscalate:
+		return "escalate"
+	}
+	return "unknown"
+}
+
+// decideProbeRound 是本轮采信决策的**纯函数**（边界可测，无副作用）。
+//
+// 优先级：
+//  1. 对照组样本足够（>=probeCanaryMinSample）⇒ 只看对照组失败率（>=60% 抖动）。
+//     43% 子集坏、对照组正常 ⇒ 采信并判死。
+//  2. 对照组样本不足 / 没有对照组 ⇒ 退回老口径（probeRoundLooksLikeGlobalBlip）：
+//     - 尚未连续抑制 probeUnverifiedBlipMaxRounds 轮 ⇒ 抑制（防冷启动/真抖动误杀）；
+//     - 已经连续抑制够了 ⇒ 升级为限量判死（防「永不判死」）。
+//     老口径也没命中（例如小池子全挂）⇒ 直接采信（那种池子本来就该判死）。
+//
+// 为什么要有最小样本量：2 节点池里「上一轮成功的那 2 个这轮都挂了」既是 100% 对照组
+// 失败、也完全可能只是这 2 个节点真的坏了。1~2 个样本的失败率无法区分「全局抖动」
+// 与「局部故障」，硬判抖动会让小池子永不判死，所以此时退回老口径（老口径对小池子
+// 要求失败数 >=20 或 >=75%，本身就很保守）。
+func decideProbeRound(canaryProbed, canaryFailed, probed, failed int, prevBlipStreak int64) probeRoundVerdict {
+	if canaryProbed >= probeCanaryMinSample {
+		if canaryFailed*100 >= canaryProbed*probeCanaryBlipPercent {
+			return probeRoundBlipVerified
+		}
+		return probeRoundTrusted
+	}
+	if probeRoundLooksLikeGlobalBlip(probed, failed) {
+		if prevBlipStreak >= probeUnverifiedBlipMaxRounds {
+			return probeRoundEscalate
+		}
+		return probeRoundBlipUnverified
+	}
+	return probeRoundTrusted
+}
+
+// canaryPick 从「上一轮探测成功」的指纹集合里确定性抽 k 个作对照组。
+//
+// 抽样方式：按 FNV-1a 指纹哈希排序后取前 k 个。这样：
+//   - 与输入顺序、池内顺序都无关（订阅刷新换了顺序也不会换对照组）；
+//   - 同一个成功集合永远抽出同一批节点 ⇒ 测试可复现，抽到谁可被审计；
+//   - 哈希分散，不会永远只抽到「名字排前面」的那几个来源。
+//
+// 刻意不用随机数：随机抽样会让「对照组恰好全落在故障子集里」的概率不可观测，
+// 也无法在测试里稳定复现。
+func canaryPick(successFP []string, k int) []string {
+	if k <= 0 || len(successFP) == 0 {
+		return nil
+	}
+	ranked := make([]string, len(successFP))
+	copy(ranked, successFP)
+	sort.Slice(ranked, func(i, j int) bool {
+		hi, hj := fnv64a(ranked[i]), fnv64a(ranked[j])
+		if hi != hj {
+			return hi < hj
+		}
+		return ranked[i] < ranked[j]
+	})
+	if len(ranked) > k {
+		ranked = ranked[:k]
+	}
+	return ranked
+}
+
+func fnv64a(s string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(s))
+	return h.Sum64()
+}
+
+// lastProbeOKSnapshot 返回上一轮成功指纹集合的副本（对照组候选）。
+func (p *nodePool) lastProbeOKSnapshot() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	out := make([]string, len(p.lastProbeOK))
+	copy(out, p.lastProbeOK)
+	return out
+}
+
+// setLastProbeOK 用本轮成功集合替换对照组候选池。
+func (p *nodePool) setLastProbeOK(fps []string) {
+	cp := make([]string, len(fps))
+	copy(cp, fps)
+	p.mu.Lock()
+	p.lastProbeOK = cp
+	p.mu.Unlock()
+}
+
+// probeCanaries 在本轮结果之上补齐对照组的观测：
+// 对照组节点通常就在本轮被探测的集合里（上一轮成功的节点本轮仍是 available），
+// 此时**零额外探针**；只有不在本轮集合里的（例如刚被标 exhausted）才补探一次，
+// 最多 probeCanaryCount 次。补探只用于计数，不改节点状态（不是一次真实的巡检判定）。
+func (p *nodePool) probeCanaries(ctx context.Context, canary []string, probeURL string, probedSet, failedSet map[string]bool) (probed, failed int) {
+	for _, fp := range canary {
+		if probedSet[fp] {
+			probed++
+			if failedSet[fp] {
+				failed++
+			}
+			continue
+		}
+		p.mu.RLock()
+		n := p.byID[fp]
+		p.mu.RUnlock()
+		if n == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+		_, err := p.probeNode(pctx, n, probeURL)
+		cancel()
+		probed++
+		if err != nil {
+			failed++
+		}
+	}
+	return probed, failed
 }
 
 // healthIntervalLocked 返回当前探测周期（调用方持锁）。
@@ -771,12 +954,15 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 		return 0
 	}
 	var (
-		wg       sync.WaitGroup
-		probed   int
-		mu       sync.Mutex
-		failedFP []string
-		failWhy  = map[string]string{}
-		sem      = make(chan struct{}, probeMaxConcurrent)
+		wg        sync.WaitGroup
+		probed    int
+		mu        sync.Mutex
+		failedFP  []string
+		okFP      []string
+		probedFP  = map[string]bool{}
+		failedSet = map[string]bool{}
+		failWhy   = map[string]string{}
+		sem       = make(chan struct{}, probeMaxConcurrent)
 	)
 	for _, n := range nodes {
 		switch filter {
@@ -801,6 +987,8 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 			if err != nil {
 				mu.Lock()
 				failedFP = append(failedFP, n.Fingerprint)
+				failedSet[n.Fingerprint] = true
+				probedFP[n.Fingerprint] = true
 				failWhy[n.Fingerprint] = err.Error()
 				mu.Unlock()
 				// 降 Debug：markProbeDead 已按「首次 / 重复 / exhausted」三级分级
@@ -813,6 +1001,10 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 			} else {
 				p.recordProbeSuccess(n.Fingerprint, ms)
 				slog.Debug("node health probe ok", "node", n.Name, "latency_ms", ms)
+				mu.Lock()
+				okFP = append(okFP, n.Fingerprint)
+				probedFP[n.Fingerprint] = true
+				mu.Unlock()
 			}
 		}(n)
 	}
@@ -822,21 +1014,75 @@ func (p *nodePool) checkFiltered(ctx context.Context, filter probeFilter) int {
 	// dead 复探轮天然大面积失败（它们本来就是 dead），若参与判定会让 WARN 每分钟一条、
 	// ERROR 每 10 分钟一条且永久常亮 —— 恰好反转了这条告警本该提供的信号（R2 复审 D1）。
 	guarded := filter == probeAvailable
-	if guarded && probeRoundLooksLikeGlobalBlip(probed, len(failedFP)) {
+	if !guarded {
+		for _, fp := range failedFP {
+			p.markProbeDead(fp, "probe: "+failWhy[fp])
+		}
+		return probed
+	}
+
+	// ---- 对照组判定（task-30 §6 方案 A）----
+	// 从「上一轮探测成功」的节点里确定性抽 5 个：真抖动时它们也会挂（≥60% 判抖动），
+	// 而固定的坏子集从来不会进入成功集合，所以它们挂不掉 ⇒ 本轮采信、坏节点被判死。
+	canary := canaryPick(p.lastProbeOKSnapshot(), probeCanaryCount)
+	canaryProbed, canaryFailed := p.probeCanaries(ctx, canary, probeURL, probedFP, failedSet)
+	canaryRate := 0.0
+	if canaryProbed > 0 {
+		canaryRate = float64(canaryFailed) / float64(canaryProbed)
+	}
+	verdict := decideProbeRound(canaryProbed, canaryFailed, probed, len(failedFP), blipStreak.Load())
+
+	// 每轮一行观测：排查「为什么这轮没判死 / 判死了」只需要这一行。
+	// 健康轮降 Debug，避免每 15 分钟一条 Info 噪声。
+	logProbeRound := slog.Debug
+	if len(failedFP) > 0 || verdict != probeRoundTrusted {
+		logProbeRound = slog.Info
+	}
+	logProbeRound("probe_round_canary",
+		"filter", filter.String(),
+		"probed", probed, "failed", len(failedFP),
+		"canary_probed", canaryProbed, "canary_failed", canaryFailed,
+		"canary_rate", canaryRate, "canary_used", canaryProbed >= probeCanaryMinSample,
+		"verdict", verdict.String(), "consecutive", blipStreak.Load(),
+	)
+
+	switch verdict {
+	case probeRoundBlipVerified, probeRoundBlipUnverified:
 		n := blipStreak.Add(1)
 		slog.Warn("probe_round_global_blip",
 			"filter", filter.String(),
 			"probed", probed, "failed", len(failedFP), "consecutive", n,
+			"canary_probed", canaryProbed, "canary_failed", canaryFailed, "canary_rate", canaryRate,
+			"canary_used", canaryProbed >= probeCanaryMinSample,
+			"verified", verdict == probeRoundBlipVerified,
 			"action", "整轮失败不予采信（疑似本机出口/网络问题）")
 		if n == 3 || n%10 == 0 {
 			slog.Error("probe_round_global_blip_persistent", "consecutive", n,
 				"hint", "连续多轮抖动：节点不会被判死，但本机网络/出口可能长期异常，需人工检查")
 		}
+		// 抖轮里的成功集合仍然更新：下一轮对照组据此自愈（成功集合天然排除长期坏节点）。
+		p.setLastProbeOK(okFP)
 		return probed
-	}
-	if guarded {
+	case probeRoundEscalate:
+		// 无对照组且已经连续抑制 probeUnverifiedBlipMaxRounds 轮：不能再静默，
+		// 但也不能把整池一次性判死 ⇒ 按指纹排序后限量处理。
+		n := blipStreak.Add(1)
+		sort.Strings(failedFP)
+		skipped := 0
+		if len(failedFP) > probeNoCanaryMaxDeaths {
+			skipped = len(failedFP) - probeNoCanaryMaxDeaths
+			failedFP = failedFP[:probeNoCanaryMaxDeaths]
+		}
+		slog.Warn("probe_round_global_blip_escalated",
+			"filter", filter.String(),
+			"probed", probed, "failed", len(failedFP)+skipped, "consecutive", n,
+			"canary_probed", 0, "canary_failed", 0, "canary_rate", 0.0,
+			"judged", len(failedFP), "skipped", skipped, "cap", probeNoCanaryMaxDeaths,
+			"action", "无对照组可用（上一轮没有任何成功节点）：本轮起限量判死，防整池一次性判死也防永不判死")
+	default:
 		blipStreak.Store(0)
 	}
+	p.setLastProbeOK(okFP)
 	for _, fp := range failedFP {
 		p.markProbeDead(fp, "probe: "+failWhy[fp])
 	}
@@ -1024,7 +1270,23 @@ func (p *nodePool) setNodes(nodes []*ProxyNode) {
 	p.byID = byID
 	p.activeID = ""
 	p.rrIndex = 0
+	restored := 0
+	if !p.stateRestored {
+		// ★ C-7 修复点：状态恢复必须在这里、在节点列表装入之后、在 saveState 之前。
+		//   - 在这里：原来的 loadState() 在 newProxyPool() 里调，那时 p.nodes 还是空的，
+		//     循环体一次都不执行 ⇒ proxy_state.json 写了从来没读进来 ⇒ 每次重启把
+		//     dead/exhausted 全部复活（也解释了 14:03 那轮 probed=216）。
+		//   - 在 saveState 之前：否则第一次 setNodes 会先把「全 available」刷回磁盘，
+		//     把旧状态抹掉，再读也读不到了。
+		//   - 只在首次：进程内的状态比磁盘新，订阅刷新再读盘会把刚判死的节点写回 available。
+		p.stateRestored = true
+		restored = p.restoreStateLocked()
+	}
 	p.mu.Unlock()
+	if restored > 0 {
+		slog.Info("proxy state restored from disk",
+			"path", p.statePath, "nodes", restored)
+	}
 	p.saveState()
 }
 
@@ -1070,11 +1332,16 @@ func (p *nodePool) snapshot() []*ProxyNode {
 
 // ======================= 状态持久化 =======================
 
+// proxyStateVersion 是 proxy_state.json 的格式版本。
+// 写入时带上；读取时版本不在 [0, proxyStateVersion] 内就整份忽略（安全降级）。
+// 0 表示旧文件（没有 version 字段）—— 兼容接受，字段语义与 v1 相同。
+const proxyStateVersion = 1
+
 func (p *nodePool) saveState() {
 	p.saveWG.Add(1)
 	defer p.saveWG.Done()
 	p.mu.RLock()
-	st := persistentState{Nodes: map[string]nodeRuntimeState{}}
+	st := persistentState{Version: proxyStateVersion, Nodes: map[string]nodeRuntimeState{}}
 	for _, n := range p.nodes {
 		st.Nodes[n.Fingerprint] = nodeRuntimeState{
 			State:         n.State.String(),
@@ -1097,33 +1364,74 @@ func (p *nodePool) saveState() {
 	}
 }
 
-func (p *nodePool) loadState() {
-	data, err := os.ReadFile(p.statePath)
+// readPersistentState 读取并校验状态文件。任何异常（不存在/坏 JSON/版本不符）
+// 都返回 ok=false —— 调用方据此安全降级（不 panic、不把节点误标死）。
+func readPersistentState(path string) (persistentState, bool) {
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return
+		if !os.IsNotExist(err) {
+			slog.Warn("proxy state read failed (ignored)", "path", path, "error", err)
+		}
+		return persistentState{}, false
 	}
 	var st persistentState
 	if err := json.Unmarshal(data, &st); err != nil {
-		return
+		slog.Warn("proxy state file corrupt (ignored)", "path", path, "error", err)
+		return persistentState{}, false
 	}
-	p.mu.Lock()
+	if st.Version < 0 || st.Version > proxyStateVersion {
+		slog.Warn("proxy state version unsupported (ignored)",
+			"path", path, "version", st.Version, "supported", proxyStateVersion)
+		return persistentState{}, false
+	}
+	return st, true
+}
+
+// restoreStateLocked 把磁盘上的运行时状态合并进当前节点列表（调用方必须持写锁）。
+//
+// 逐条校验、逐条跳过：一条坏记录只影响它自己，绝不让整池降级成 available 或 dead。
+//   - 指纹对不上（换了池子/订阅）⇒ 跳过该条；
+//   - 未知状态字符串 ⇒ 按 available 处理（宁可漏标记，不能误标死）；
+//   - exhausted 但 cooldown_until 为空 ⇒ 跳过该条：这种节点永远不会被 sweepExpiredLocked
+//     翻回 available，等于永久封禁，属于坏数据。
+func (p *nodePool) restoreStateLocked() int {
+	st, ok := readPersistentState(p.statePath)
+	if !ok || len(st.Nodes) == 0 {
+		return 0
+	}
+	applied := 0
 	for _, n := range p.nodes {
-		if rs, ok := st.Nodes[n.Fingerprint]; ok {
-			n.State = nodeStateFromString(rs.State)
-			n.MarkedAt = rs.MarkedAt
-			n.CooldownUntil = rs.CooldownUntil
-			n.LastError = rs.LastError
-			n.LastUsedAt = rs.LastUsedAt
-			n.LatencyMs = rs.LatencyMs
-			n.LastProbeAt = rs.LastProbeAt
-			n.GateState = rs.GateState
+		rs, ok := st.Nodes[n.Fingerprint]
+		if !ok {
+			continue
 		}
+		state := nodeStateFromString(rs.State)
+		trimmed := strings.ToLower(strings.TrimSpace(rs.State))
+		if trimmed != "" && trimmed != "available" && trimmed != "dead" && trimmed != "exhausted" {
+			slog.Warn("proxy state entry has unknown state (treated as available)",
+				"node", n.Name, "fp", n.Fingerprint, "state", rs.State)
+		}
+		if state == NodeExhausted && rs.CooldownUntil.IsZero() {
+			slog.Warn("proxy state entry ignored: exhausted without cooldown_until",
+				"node", n.Name, "fp", n.Fingerprint)
+			continue
+		}
+		n.State = state
+		n.MarkedAt = rs.MarkedAt
+		n.CooldownUntil = rs.CooldownUntil
+		n.LastError = rs.LastError
+		n.LastUsedAt = rs.LastUsedAt
+		n.LatencyMs = rs.LatencyMs
+		n.LastProbeAt = rs.LastProbeAt
+		n.GateState = rs.GateState
+		applied++
 	}
-	p.mu.Unlock()
+	return applied
 }
 
 type persistentState struct {
-	Nodes map[string]nodeRuntimeState `json:"nodes"`
+	Version int                         `json:"version"`
+	Nodes   map[string]nodeRuntimeState `json:"nodes"`
 }
 
 // ======================= 区域推断 =======================
