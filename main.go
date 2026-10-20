@@ -900,16 +900,16 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPost {
 		if err := r.ParseForm(); err != nil {
-			renderLoginPage(w, "表单解析失败")
+			renderLoginPage(w, r, "表单解析失败")
 			return
 		}
 		if r.FormValue("password") != adminPassword {
-			renderLoginPage(w, "密码错误")
+			renderLoginPage(w, r, "密码错误")
 			return
 		}
 		token, err := generateToken()
 		if err != nil {
-			renderLoginPage(w, "创建会话失败")
+			renderLoginPage(w, r, "创建会话失败")
 			return
 		}
 		sessionsMu.Lock()
@@ -919,7 +919,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
-	renderLoginPage(w, "")
+	renderLoginPage(w, r, "")
 }
 
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
@@ -2596,9 +2596,11 @@ func maxAttemptsForUpstreamStatus(status int) int {
 // （R2 独立验收 blocker C1），代价大于收益。
 // 取值 120s：把「反复失败」的病态链收在 120s 量级。
 // ⚠️ 它【不】给单次 attempt 设上界：dial 60s + ResponseHeaderTimeout 60s 之外，
-// body 读取与整体耗时仍可能更长（实测有 >1200s 的失败样本）。
-// 「发出去了却卡住不返回」的正解是空闲读超时（每读到字节就重置），另立任务。
-// 流式路径同样只做墙钟检查（body 在函数返回后继续读）。
+// 整体耗时仍可能更长（实测有 >1200s 的失败样本）。
+// 「发出去了却卡住不返回」由 C-2 的【空闲读超时】兜住（idle_read.go：每读到字节就重置，
+// 连续 idleReadTimeout 无数据才中止）——它已覆盖两条路径的 body 读取，见下方
+// `newIdleReadCloser` 的两个调用点（非流式 / 流式）。不用总时长是因为长生成是合法的。
+// 流式路径同样只做墙钟检查（body 在函数返回后继续读，由空闲读超时保护）。
 var upstreamLoopBudget = 120 * time.Second
 
 func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) ([]byte, int, http.Header, error) {
@@ -7298,17 +7300,16 @@ func adminTrendsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(pts)
 }
 
+// adminPageHandler 下发内嵌面板。内容协商、Vary 与 Content-Length 都在
+// writeCompressedHTML 里（见 webcompress.go）；这里只负责取预压缩体。
 func adminPageHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(adminPageHTML)
+	writeCompressedHTML(w, r, adminPagePayload())
 }
 
-func renderLoginPage(w http.ResponseWriter, msg string) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write(loginPageHTML)
-	if msg != "" {
-		w.Write([]byte("<script>document.addEventListener('DOMContentLoaded',function(){var m=document.getElementById('login-msg');if(m){m.textContent='" + msg + "';m.style.display='block'}})</script>"))
-	}
+// renderLoginPage 下发登录页（可带一条错误消息）。msg 的取值集合很小，
+// 每个变体在首次请求时预压缩一次并缓存（见 webcompress.go）。
+func renderLoginPage(w http.ResponseWriter, r *http.Request, msg string) {
+	writeCompressedHTML(w, r, loginPagePayload(msg))
 }
 
 // ======================== Main ========================
@@ -7402,6 +7403,9 @@ func main() {
 	} else {
 		slog.Info("admin panel disabled (no password)")
 	}
+
+	// 面板 HTML 的 gzip 在启动期一次性做完：之后每个请求零压缩 CPU。
+	prewarmWebCompression()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", loggingMiddleware(chatCompletionsHandler))
