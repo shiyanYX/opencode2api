@@ -1371,6 +1371,45 @@ var (
 const defaultMaxQuotaNodeSwitches = 5
 
 func resolveModel(model string) string {
+	// ⚠️ `ensureFreeModelsFresh` 是**启动后唯一的按需刷新触发器**
+	// （isFreeModelFromDocs 里的那条），不能因为下面的重构而丢掉 ——
+	// 丢了之后免费表会一直停在启动那一刻，新上线的免费模型永远判不出来。
+	ensureFreeModelsFresh()
+	freeModelDocsMu.RLock()
+	docs := freeModelDocsCache
+	freeModelDocsMu.RUnlock()
+	return resolveModelWithDocs(model, docs)
+}
+
+// freeModelDocsStale 是「免费模型表是否需要刷新」的**单一判据**。
+// 缓存为空，或距上次刷新超过 1 小时，即视为陈旧。
+//
+// 抽成独立函数而不是内联，是为了让 ensureFreeModelsFresh 与测试共用同一份
+// 判据：测试若自己复刻一遍 `cache == nil || since > time.Hour`，日后调参就会
+// 出现「实现改了、测试还在验旧口径」的假绿。
+func freeModelDocsStale() bool {
+	freeModelDocsMu.RLock()
+	defer freeModelDocsMu.RUnlock()
+	return freeModelDocsCache == nil || time.Since(freeModelDocsTime) > time.Hour
+}
+
+// ensureFreeModelsFresh 保持 isFreeModelFromDocs 既有的按需刷新语义：
+// 缓存为空或超过 1 小时就异步刷一次。**只派发、不等待、不读取结果** ——
+// 本次调用的判定仍用当前快照，与重构前逐字一致。
+func ensureFreeModelsFresh() {
+	if freeModelDocsStale() {
+		go refreshFreeModelsDocs()
+	}
+}
+
+// resolveModelWithDocs 是 resolveModel 的**纯函数内核**：所有外部输入都来自
+// (model, docs) 两个参数 + configMu 保护下的别名表，**不刷新、不派发 goroutine**。
+//
+// 拆出来的理由：回填路径要对 20 万行老记录重算判定，那里**不能**触发后台刷新
+// （会改写仓库里的 free_models_cache.json，制造测试间的顺序依赖，见
+// isUnmappedModel 的注释）。两条路径共用这一个内核，避免「两份实现各自演化」
+// 导致口径分叉。
+func resolveModelWithDocs(model string, docs map[string]bool) string {
 	m := strings.TrimSpace(model)
 	configMu.RLock()
 	alias, ok := modelAlias[m]
@@ -1400,13 +1439,138 @@ func resolveModel(model string) string {
 	// Map the display name back to the upstream free ID whenever that free
 	// version exists in the catalog (project only serves free models, so the
 	// presence of a paid twin does not prevent the free mapping).
-	if m != "" && !isFreeModel(m) {
+	if m != "" && !isFreeModelIn(docs, m) {
 		freeID := m + "-free"
 		if modelExistsInCaches(freeID) {
 			return freeID
 		}
 	}
 	return m
+}
+
+// ==================== 未映射模型判定（Task 21 公式 B + Task 39 everServed） ====================
+//
+// 判据（task-39，用户 2026-10-20 08:30 裁决，**取代**纯公式 B）：
+//
+//	mapped = everServed(name) || 公式B
+//	everServed(name) = 历史上任何一条 status=ok 记录里出现过的模型名
+//
+// 语义（用户原话：「概览的图表啥的只显示有成功的模型，至于更详细的统计才记录全部请求」）：
+//   - **有过成功** ⇒ 永远算我们的模型：历史成功永久保留，它下架后的新失败照常算失败；
+//   - **从未成功过** ⇒ 概览（图表 / total_requests / 成功率分母）里完全不出现，
+//     但详细层（call_log.jsonl / 日志页 / `/api/call-log`）一条不少。
+//
+// 为什么必须从「名字长得像」升级成「曾经成功过」：公式 B 靠 `-free` 后缀与
+// 当前目录判定，而**不带 `-free` 后缀的裸名**（如 `big-pickle`）只靠目录表。
+// 一旦上游把它从目录摘掉，公式 B 会把它的历史成功记录追认为「未映射」并从概览删除 ——
+// 实测把 `big-pickle` 从目录里摘掉就会出现 11 条成功记录被逐出概览。
+// everServed 把「曾经成功过」变成永久事实，堵住这条退化路径。
+func isUnmappedModel(raw string) bool {
+	m := strings.TrimSpace(raw)
+	if m == "" {
+		// 空模型名不是「未映射」——它压根不是一次模型请求。生产日志里
+		// 模型名为空只出现在上游在解析请求体之前就拒掉的极端情况；
+		// 把它算进 unmapped 会让这个字段失去「客户端传了个野模型名」的语义。
+		return false
+	}
+	// Task 39：曾经成功过 ⇒ 永久 mapped（单调，只增不减）。
+	// 放在最前面：它**不依赖目录**，所以冷启动、目录不可用时也成立 ——
+	// 这正是它比公式 B 更可靠的地方。
+	if isServedModel(m) {
+		return false
+	}
+	return isUnmappedByFormula(m)
+}
+
+// ---- 以下为 task-21 的公式 B（「名字长得像不像我们的免费层模型」）----
+//
+// 单独拆出来的唯一理由是**回填要只用它**：老日志行（没有落盘 unmapped 键）的
+// 最终裁决 = 公式 B 判未映射 && !everServed，而 everServed 必须等整轮扫完才齐
+// （见 calllog.go 回填段的 stagedServed / pendingServed 注释）。
+// 判定路径**不再直接调它**，只经由 isUnmappedModel。
+//
+// // 背景：`CallRecord.Model` 存的是**客户端原样传来的名字**，不是 resolveModel
+// 的结果。于是 `mimo-v2.5`、`gpt-4o-mini` 这类名字自成一个模型键，进了
+// `/api/stats` 的 total_requests 与 models，作为**失败**拉低成功率分母 ——
+// 而它们从一开始就不可服务。生产实测（/tmp/prod-now.jsonl，204,237 行）：
+// 这类请求 661 条、**0 条成功**，占全部请求 0.32%，让成功率虚低 0.30 个百分点。
+//
+// 判据（Lead 裁决的 B 方案）：
+//
+//	mapped = isFreeModel(resolveModel(raw)) || strings.HasSuffix(resolveModel(raw), "-free")
+//
+// **为什么不查上游目录**（这是被否决的 A 方案，反例实测成立）：
+// `modelExistsInCaches` 查的是上游 `/v1/models` 全量目录（85 条 zen + 37 条 go），
+// 它有两个致命性质：
+//  1. 里面**绝大多数是付费模型** —— `claude-opus-4-5`、`claude-sonnet-*`、
+//     `gemini-3*`、`grok-*`、`hy3`、`mimo-v2.5` 全在。用「在目录里」当
+//     「可服务」，恰好把用户真正抱怨的那批（624 条 mimo-v2.5、4 条
+//     claude-opus-4-5、2 条 hy3）判成 mapped 而继续污染。
+//  2. 它会**漂移**：`deepseek-v4-flash-free`（4,565 条 / 97.2% 成功）与
+//     `x-preview-f-free`（1,419 条 / 89.1% 成功）至今还在跑，却已被上游从
+//     目录里摘掉。按今天的目录判历史数据，会把这 5,702 条**成功**记录
+//     从统计里删掉，成功率反而下降 0.09 个百分点。
+//
+// 而 `-free` 是**我们自己的**免费层命名约定（defaultFreeModels 与
+// free_models_cache.json 同步维护），比上游目录稳定得多。实测 B 的排除集
+// 与「上游返回 http 401 = 模型不被认」这个独立口径高度吻合（真·模型未知
+// 663 条 vs B 的 661 条），且**一条成功记录都不删**。
+//
+// **纯函数性**：本函数只读 `freeModelDocsCache`（+ 别名映射），不写任何全局、
+// 不派发 goroutine、不碰网络、不落盘，且**绝不触发后台刷新** —— 这是它能在
+// 回填路径对 20 万行老记录安全重算的前提（见 calllog.go 回填段的调用点）。
+//
+// ⚠️ 这里**刻意不调 `isFreeModel`**，而是走 `isFreeModelSnapshot`：后者除了
+// 判 membership，还会在「缓存为空 / 超过 1 小时」时 `go refreshFreeModelsDocs()`。
+// 那个副作用在请求路径上是既有的读侧行为、可以接受；但在回填路径上不行：
+//   - 它会在测试期间**改写仓库里的 free_models_cache.json**（saveFreeModelsCache），
+//     于是一个用例的判定会影响后面用例的判定，制造**顺序相关的假失败**；
+//   - 20 万行 × 多次派发（虽已按模型名记忆化到 ~18 次）仍是不可控的并发写；
+//   - 「同输入同输出」会被它破坏 —— 刷新完成后同一个模型名会给出不同答案。
+//
+// 刷新本身仍由主流程（main 启动 + 读侧首次调用）驱动，这里只是不做这件事。
+func isUnmappedByFormula(raw string) bool {
+	m := strings.TrimSpace(raw)
+	if m == "" {
+		// 空模型名不是「未映射」——它压根不是一次模型请求。生产日志里
+		// 模型名为空只出现在上游在解析请求体之前就拒掉的极端情况；
+		// 把它算进 unmapped 会让这个字段失去「客户端传了个野模型名」的语义。
+		return false
+	}
+	// 安全闸门：文档免费表不可用时**一律判 mapped**（维持现状）。
+	// 冷启动时 freeModelDocsCache 可能是 nil，此时任何判定都不可信；
+	// 宁可漏排除（数字偏保守）也不能误排除（把真实模型从统计里删掉）。
+	freeModelDocsMu.RLock()
+	docs := freeModelDocsCache
+	docsReady := len(docs) > 0
+	freeModelDocsMu.RUnlock()
+	if !docsReady {
+		return false
+	}
+
+	resolved := resolveModelWithDocs(m, docs)
+	// 判据必须与「本部署能服务什么」对齐，而不是「上游目录里有什么」。
+	if isFreeModelIn(docs, resolved) {
+		return false
+	}
+	// `-free` 后缀：与 defaultFreeModels / free_models_cache.json 的命名约定同源。
+	// 这一条覆盖了「文档表已把该模型摘掉、但它仍是免费层模型」的漂移场景
+	// （生产实例：deepseek-v4-flash-free、x-preview-f-free）。
+	if strings.HasSuffix(resolved, "-free") {
+		return false
+	}
+	return true
+}
+
+// isFreeModelIn 是 isFreeModel 的**无副作用、显式快照**版本：
+// 只在给定快照里查 membership，不读全局、不刷新、不派发 goroutine。
+//
+// 快照为 nil/空时退回 defaultFreeModels —— 与 isFreeModelFromDocs 的兜底一致。
+func isFreeModelIn(docs map[string]bool, modelID string) bool {
+	if len(docs) == 0 {
+		return defaultFreeModels[modelID]
+	}
+	return docs[modelID]
 }
 
 // lookupModelRegion 查找模型的区域限制。支持精确匹配和 "*" 通配符。
@@ -7193,6 +7357,29 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 type statsRangeResponse struct {
 	TokenStatsData
 	TrendsByModel []ModelTrendPoint `json:"trends_by_model"`
+	// UnmappedRequests 是**窗口内**未映射请求的计数（Task 21）。
+	//
+	// 为什么是对象而不是裸数字：旧后端没有这个字段，面板要能区分
+	// 「这条后端不支持该指标」与「窗口内确实是 0 条」，从而显示 "—" 而不是 0。
+	// 对象 + 明确的 count 键让前端一次判空即可（`if(!d.unmapped_requests)`）。
+	//
+	// 为什么**只加在 range 路径**、不加在 TokenStatsData 上：
+	// TokenStatsData 同时也是**不带 range**那条分支的响应体，而那条分支有一条
+	// 逐字节向后兼容红线（TestAdminStatsHandlerWithoutRangeIsByteIdentical 把
+	// 空响应钉成 `{"total_requests":0,"models":{}}`）。把它加进 TokenStatsData
+	// 会让那个 JSON 多出一个键，直接违约。而这个指标的语义本来就是**窗口内**的
+	// （它由小时桶折叠而来），放在带 range 的响应里才是自洽的。
+	UnmappedRequests UnmappedRequestsStats `json:"unmapped_requests"`
+}
+
+// UnmappedRequestsStats 是 /api/stats?range= 里 unmapped_requests 的形状。
+//
+// Count 只数「窗口内、被判定为未映射」的请求条数；它们**不在**同层
+// total_requests / models 里 —— 这正是本次修复的目的（口径更正）。
+// ByModel 是 Top N + "__other__"，见 topUnmappedModels。
+type UnmappedRequestsStats struct {
+	Count   int64            `json:"count"`
+	ByModel map[string]int64 `json:"by_model"`
 }
 
 // statsRangeResponseFor 组装 GET /api/stats?range=X 的响应。
@@ -7225,6 +7412,37 @@ func statsRangeResponseFor(rng string) statsRangeResponse {
 	if out.TrendsByModel == nil {
 		out.TrendsByModel = []ModelTrendPoint{}
 	}
+	// 未映射统计共用**同一份** ts/bidx —— 与 models / total_requests 同窗口。
+	// 传进去而不是在里面再取一次窗口，理由与 trends_by_model 完全相同：
+	// 两次取窗口之间跨过整点/午夜，会让 unmapped_requests 与 total_requests
+	// 落在不同窗口，「合计」与「分项」互相矛盾且不报错。
+	uc, ub := unmappedStatsInWindow(ts, bidx)
+	out.UnmappedRequests = UnmappedRequestsStats{
+		Count:   uc,
+		ByModel: topUnmappedModels(ub, unmappedTopN),
+	}
+	// ---- F1（Task 39）：展示层只输出「窗口内有成功」的模型 ----
+	//
+	// 用户口径：「概览的图表啥的只显示有成功的模型」。判据放在**后端出口**，
+	// 面板零改动（面板正在被 U3 大改，不能两个人同时改同一个文件）。
+	//
+	// 🔴 **只筛展示字段**：models 与 trends_by_model。
+	// 绝不动 total_requests / 成功率分母 —— 窗口内 0 成功的那几条失败是
+	// 真实免费模型的真实失败（生产实测 6 个模型 / 15 条 / 0 token），
+	// 从分母里拿掉就是藏失败。所以本函数是「删展示键」，不是「改统计」。
+	//
+	// 副作用（已知且用户已选）：`Σ models.request_count` 会比 total_requests
+	// 少这些条数（生产 15/233,045 = 0.0064%）。要解释「为什么少」请看
+	// docs/research/overview-vs-detail-served-models.md。
+	//
+	// 详细层（call_log.jsonl / /api/logs / /api/call-log）一条不少。
+	keep := modelsWithOKInWindow(ts, bidx)
+	for m := range out.Models {
+		if _, ok := keep[m]; !ok {
+			delete(out.Models, m)
+		}
+	}
+	out.TrendsByModel = filterTrendsByOK(out.TrendsByModel, keep)
 	return out
 }
 
@@ -7286,13 +7504,27 @@ func adminTrendsHandler(w http.ResponseWriter, r *http.Request) {
 	rng := normalizeTrendRange(r.URL.Query().Get("range"))
 	w.Header().Set("Content-Type", "application/json")
 	if r.URL.Query().Get("group") == "model" {
-		pts := trendsByModelFromCallLog(rng)
+		// Task 39 / F1（Lead 追加裁决）：本出口必须与 `/api/stats?range=` 同一口径 ——
+		// 窗口内 0 成功的模型在两边都要消失，且共用 filterTrendsByOK / modelsWithOKInWindow，
+		// 不许各写一份判据（否则就是「只删 models 漏 trends」的半实现）。
+		//
+		// 注意必须与 trendsByModelWithBuckets **同一份** ts/bidx：所以这里内联
+		// ensureBucketsUpToDate + trendBuckets，而不是调 trendsByModelFromCallLog
+		// 让它自己再取一次 time.Now()（跨整点/午夜会让两边窗口分叉）。
+		ensureBucketsUpToDate()
+		ts, bidx := trendBuckets(rng)
+		keep := modelsWithOKInWindow(ts, bidx)
+		pts := filterTrendsByOK(trendsByModelWithBuckets(ts, bidx), keep)
 		if pts == nil {
 			pts = []ModelTrendPoint{}
 		}
 		json.NewEncoder(w).Encode(pts)
 		return
 	}
+	// ---- 非模型维度分支（面板热力图：GET /api/stats/trends?range=180d）----
+	// 返回的是**日总量**（[]TrendsPoint，没有 model 键），所以 F1 的「0 成功模型
+	// 从展示层消失」在这里无对象可删；**必须逐字节不变** —— 把它按模型筛掉
+	// 等于把那 15 条真实失败从日总量里藏掉，那是藏失败，明令禁止。
 	pts := trendsFromCallLog(rng)
 	if pts == nil {
 		pts = []TrendsPoint{}
