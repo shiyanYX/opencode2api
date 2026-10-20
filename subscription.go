@@ -181,9 +181,38 @@ func (m *subscriptionManager) configure(subs []SubscriptionConfig, webshares []W
 	m.mu.Unlock()
 }
 
+// subApplyNodes / subApplyMihomo 是刷新结果的两个副作用。
+// 抽成变量是为了让单测能断言「结果为空时不得清空节点池」，同时避免单测启动真实 mihomo executor。
+var (
+	subApplyNodes  = func(nodes []*ProxyNode) { proxyPool.setNodes(nodes) }
+	subApplyMihomo = func(nodes []*ProxyNode) error { return mihomoMgr.apply(nodes) }
+)
+
+// refreshOutcome 是一轮刷新的结果概况，供 runtime 区分「真的刷新了」与「本轮没有到期源」。
+type refreshOutcome struct {
+	Nodes   int  // 合并后的节点总数（无到期源时为当前池大小）
+	Due     int  // 本轮到期的源数（订阅 + webshare）
+	Skipped int  // 未到期而跳过的源数
+	Applied bool // 是否真的合并写入节点池
+}
+
 // refreshAll 拉取全部订阅/webshare 源并重新合并节点池。force=true 时忽略更新间隔。
 // 返回合并后的节点总数；订阅全部失败但仍有手填/遗留节点时不算错误。
 func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, error) {
+	out, err := m.refreshAllWithOutcome(ctx, force)
+	return out.Nodes, err
+}
+
+// refreshAllWithOutcome 是 refreshAll 的实现，额外返回本轮有多少源到期/跳过。
+//
+// 关键语义（task-60）：**未到期的源必须原样跳过**，不能当成「成功但 0 节点」：
+//   - 否则会伪造一条 `没有任何可用节点: ` 假错误（ticker 每 10 分钟一条）；
+//   - 否则会把 lastCount 清零（面板订阅计数恒 0）；
+//   - 否则会把 lastUpdated 刷成 now（24h 间隔永远不到期 ⇒ 订阅再也不会自动更新）。
+//
+// len(all)==0 时有三种语义分明的结果：拉取失败（带源名）/ 成功但返回 0 节点 / 本轮无到期源；
+// 三种都**不会**调用 setNodes，绝不因为本轮没拉到就清空现有节点池。
+func (m *subscriptionManager) refreshAllWithOutcome(ctx context.Context, force bool) (refreshOutcome, error) {
 	m.mu.Lock()
 	subs := make([]SubscriptionConfig, len(m.subs))
 	copy(subs, m.subs)
@@ -193,17 +222,15 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 	copy(customs, m.customs)
 	cacheDir := m.cacheDir
 	lastUpdated := make(map[string]time.Time, len(m.lastUpdated))
-	lastError := make(map[string]string, len(m.lastError))
 	for k, v := range m.lastUpdated {
 		lastUpdated[k] = v
-	}
-	for k, v := range m.lastError {
-		lastError[k] = v
 	}
 	m.mu.Unlock()
 
 	var all []*ProxyNode
 	var errs []string
+	var emptySources []string // 到期且「成功」但返回 0 个节点的源（与拉取失败区分）
+	skipped := 0
 
 	// 手填/遗留节点始终并入（不因订阅全部失败而丢失出口）
 	for _, c := range customs {
@@ -215,17 +242,19 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 
 	// 并发拉取订阅源
 	type result struct {
-		sub   SubscriptionConfig
-		nodes []*ProxyNode
-		meta  SubscriptionMeta
-		err   error
+		sub     SubscriptionConfig
+		nodes   []*ProxyNode
+		meta    SubscriptionMeta
+		err     error
+		skipped bool
 	}
 	results := make(chan result, len(subs))
 	now := time.Now()
 	for _, s := range subs {
 		go func(s SubscriptionConfig) {
+			// 未到更新间隔：原样跳过（skipped=true），不贡献节点、错误，也不改状态。
 			if prev, ok := lastUpdated[s.URL]; !force && ok && now.Sub(prev) < s.updateInterval() {
-				results <- result{sub: s}
+				results <- result{sub: s, skipped: true}
 				return
 			}
 			nodes, meta, err := m.fetchOnce(ctx, s.URL, cacheDir)
@@ -234,6 +263,10 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 	}
 	for range subs {
 		r := <-results
+		if r.skipped {
+			skipped++
+			continue
+		}
 		m.mu.Lock()
 		key := r.sub.URL
 		if r.err != nil {
@@ -244,6 +277,9 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 			m.lastCount[key] = len(r.nodes)
 			m.lastMeta[key] = r.meta
 			delete(m.lastError, key)
+			if len(r.nodes) == 0 {
+				emptySources = append(emptySources, fmt.Sprintf("订阅 %s(%s)", r.sub.Name, r.sub.URL))
+			}
 			for _, n := range r.nodes {
 				if r.sub.Name != "" {
 					n.Name = r.sub.Name + "::" + n.Name
@@ -256,15 +292,16 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 
 	// 并发拉取 webshare 代理源
 	type wsResult struct {
-		ws    WebshareConfig
-		nodes []*ProxyNode
-		err   error
+		ws      WebshareConfig
+		nodes   []*ProxyNode
+		err     error
+		skipped bool
 	}
 	wsResults := make(chan wsResult, len(webshares))
 	for _, ws := range webshares {
 		go func(ws WebshareConfig) {
 			if prev, ok := lastUpdated[ws.Key()]; !force && ok && now.Sub(prev) < ws.updateInterval() {
-				wsResults <- wsResult{ws: ws}
+				wsResults <- wsResult{ws: ws, skipped: true}
 				return
 			}
 			nodes, err := fetchWebshare(ctx, ws)
@@ -273,6 +310,10 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 	}
 	for range webshares {
 		r := <-wsResults
+		if r.skipped {
+			skipped++
+			continue
+		}
 		m.mu.Lock()
 		key := r.ws.Key()
 		if r.err != nil {
@@ -282,6 +323,9 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 			m.lastUpdated[key] = time.Now()
 			m.lastCount[key] = len(r.nodes)
 			delete(m.lastError, key)
+			if len(r.nodes) == 0 {
+				emptySources = append(emptySources, fmt.Sprintf("webshare %s", r.ws.Name))
+			}
 			for _, n := range r.nodes {
 				if r.ws.Name != "" {
 					n.Name = r.ws.Name + "::" + n.Name
@@ -292,17 +336,38 @@ func (m *subscriptionManager) refreshAll(ctx context.Context, force bool) (int, 
 		m.mu.Unlock()
 	}
 
-	if len(all) == 0 {
-		return 0, fmt.Errorf("没有任何可用节点: %s", strings.Join(errs, "; "))
+	out := refreshOutcome{
+		Due:     len(subs) + len(webshares) - skipped,
+		Skipped: skipped,
 	}
-	proxyPool.setNodes(all)
-	if err := mihomoMgr.apply(all); err != nil {
+	if len(all) == 0 {
+		switch {
+		case len(errs) > 0:
+			// 有源到期但全部失败：错误文本必须带源名（否则排障只看到「没有任何可用节点: 」）。
+			parts := append([]string{}, errs...)
+			for _, es := range emptySources {
+				parts = append(parts, es+" 返回 0 个节点")
+			}
+			return out, fmt.Errorf("订阅源拉取失败: %s", strings.Join(parts, "; "))
+		case len(emptySources) > 0:
+			// 有源到期且拉取成功，但一个节点都没解析出来：单独措辞，别和「拉取失败」混。
+			return out, fmt.Errorf("订阅源返回 0 个节点: %s", strings.Join(emptySources, "; "))
+		default:
+			// 没有源到期（或根本没配源）：本轮无事可做 ⇒ 成功跳过。
+			// ★ 绝不 setNodes(nil/[])：不能因为本轮没拉到就清空现有节点池。
+			out.Nodes = proxyPool.nodeCount()
+			return out, nil
+		}
+	}
+	subApplyNodes(all)
+	if err := subApplyMihomo(all); err != nil {
 		slog.Error("mihomo 配置重建失败", "error", err)
 	}
 	slog.Info("节点池已刷新", "total", len(all), "subscriptions", len(subs), "webshare", len(webshares), "errors", len(errs))
-	return len(all), nil
+	out.Nodes = len(all)
+	out.Applied = true
+	return out, nil
 }
-
 func (s SubscriptionConfig) Key() string { return s.URL }
 
 // fetchOnce 拉取单个订阅；网络失败回退磁盘缓存。
