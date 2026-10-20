@@ -65,6 +65,32 @@ type CallRecord struct {
 	// （main.go:2701/2871/2995/3162）同源同值 —— 那些值本来就已经算出来了，
 	// 这里只是把它落进 CallRecord，不再只进应用日志。
 	FinalStatus int `json:"final_status,omitempty"`
+
+	// Unmapped 表示「客户端传来的模型名无法映射到本部署可服务的模型」。
+	// 这类请求**不进统计聚合**（不进 hourBuckets ⇒ 不进 models /
+	// total_requests / 成功率分母），但**照常落盘**、照常出现在调用日志页，
+	// 并单独计入 unmappedBuckets 供 /api/stats 的 unmapped_requests 字段。
+	//
+	// 为什么判定要落盘、而不是聚合时现算（三条理由，缺一不可）：
+	//  1. **锁序**：聚合侧持 callLog.mu。现算需要再取 configMu / freeModelDocsMu /
+	//     modelMu，凭空造出 callLog.mu → 其它锁 的锁序；落盘后聚合侧只看一个 bool。
+	//  2. **确定性**：判定依赖 free_models_cache.json（上游文档目录），它会漂移。
+	//     聚合时现算 ⇒ 同一条历史记录在不同日期被算成不同结果，桶内容非确定，
+	//     一旦翻转还会误伤「ΣN == absorbed - unabsorbed」并触发自愈全量重扫。
+	//  3. **成本**：回填一次要过 20 万行，逐行现算 = 40 万次 RLock。
+	//
+	// omitempty 在这里**故意不用**，代价是每行多约 17 字节
+	// （`"unmapped":false,`，20 万行 ≈ 3.4 MB / 109 MB ≈ +3%）。
+	// 换来的是「落盘判定权威」这条语义：
+	//   - 本构建写的行**总是**带该键 ⇒ 读取侧一律采信落盘值，
+	//     目录日后漂移也不会把已经判过「已映射」的记录追认成未映射；
+	//   - 只有**本构建之前**写的行才没有该键 ⇒ 才走重算（见 SawUnmapped）。
+	// 若改成 omitempty，新写的「已映射」行与老行在 JSON 上无法区分，
+	// 于是**每一行**都要在回填时重算；那时 docs 目录一旦漂移，
+	// `big-pickle` 这类「不在 -free 命名约定里、只靠文档表判定」的模型
+	// 就会被追认成未映射，把真实成功记录（生产 4 条）从统计里删掉 ——
+	// 违反本次的硬门禁「排除集里不得出现任何一条 status=ok」。
+	Unmapped bool `json:"unmapped"`
 }
 
 // HasIssue 是否有切换/异常事件（前端“只看失败/切换”过滤）。
@@ -160,6 +186,21 @@ type hourModelKey struct {
 var (
 	// hourBuckets 由 callLog.mu 保护（RWMutex）。查询侧读、写入侧 incr。
 	hourBuckets map[hourModelKey]*hourModelAgg
+	// unmappedBuckets 是**未映射请求**的平行桶表，键与 hourBuckets 同构
+	// （同小时、同原始模型名），同样由 callLog.mu 保护。
+	//
+	// 为什么要单独一张表而不是塞进 hourBuckets 再加个维度：
+	//   - hourBuckets 的每个键都会被 foldModelsInWindow / foldBuckets /
+	//     trendsByModelWithBuckets 无条件折叠进 models / total_requests /
+	//     trends，多一个维度就要改三处折叠内核的签名与语义；
+	//   - 未映射请求**不需要** token / 速度 / 吞吐 —— 它们全都失败了
+	//     （生产实测 661 条 0 成功），只数条数就够。
+	// 所以这里只存 N（用同一个 hourModelAgg 类型省一个类型，只写 N 字段）。
+	//
+	// 与 hourBuckets 的守恒关系是**各自独立**的：
+	//   ΣN(hourBuckets) + ΣN(unmappedBuckets) == absorbedRecords - unabsorbedRecords
+	// 见 bucketNSumLocked / unmappedNSumLocked / checkBucketConservation。
+	unmappedBuckets map[hourModelKey]*hourModelAgg
 	// parsedTo 已吸收到的字节偏移，恒为「最后一个完整换行之后」的偏移。
 	// **不可用 os.Stat 的 size**：短写或崩溃残留的半行会被当成已解析，
 	// 下一条真实记录与它拼成一行 → Unmarshal 失败 → 该记录永久丢失且不报错。
@@ -223,6 +264,60 @@ var (
 	bucketRebuildNotBefore time.Time
 )
 
+// servedModels 是「历史上至少成功过一次的模型名」集合（task-39）。
+//
+// 🔴 这是用户口径「概览只显示有成功的模型」的**判据载体**：
+//
+//	mapped = everServed(name) || 公式B
+//
+// 集合只增不减（单调），由 callLog.mu 保护。
+var servedModels map[string]struct{}
+
+// isServedModel 报告 name 是否在 everServed 里。
+func isServedModel(name string) bool {
+	if name == "" {
+		return false
+	}
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	_, ok := servedModels[name]
+	return ok
+}
+
+// markServedModel 把 name 记进 everServed。只增不减。
+//
+// 调用点在**成功后**（callRecorder.finish）与回填提交段。绝不因为目录刷新、
+// clear 之外的任何事件删除条目 —— 单调性是本判据的核心承诺（见报告 §单调性）。
+func markServedModel(name string) {
+	if name == "" {
+		return
+	}
+	callLog.mu.Lock()
+	if servedModels == nil {
+		servedModels = make(map[string]struct{}, 16)
+	}
+	servedModels[name] = struct{}{}
+	callLog.mu.Unlock()
+}
+
+// servedModelsSnapshot 返回 everServed ∪ staged 的副本。
+//
+// 回填用：老日志行（无 unmapped 键）的最终裁决要等整轮扫完、stagedServed 收齐，
+// 再拿这张并集去判 —— 否则结果依赖行序（日志 38.6% 乱序）。
+// 只读、不修改全局，故取读锁即可（调用方在锁外）。
+func servedModelsSnapshot(staged map[string]struct{}) map[string]struct{} {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	out := make(map[string]struct{}, len(servedModels)+len(staged))
+	for m := range servedModels {
+		out[m] = struct{}{}
+	}
+	for m := range staged {
+		out[m] = struct{}{}
+	}
+	return out
+}
+
 // bucketNSumLocked 返回 Σ N over hourBuckets。
 // 调用方必须持有 callLog.mu（读或写锁皆可）。
 //
@@ -237,6 +332,16 @@ func bucketNSumLocked() int64 {
 	return n
 }
 
+// unmappedNSumLocked 返回 Σ N over unmappedBuckets。
+// 调用方必须持有 callLog.mu（读或写锁皆可）。遍历必须在锁内，理由同 bucketNSumLocked。
+func unmappedNSumLocked() int64 {
+	var n int64
+	for _, a := range unmappedBuckets {
+		n += a.N
+	}
+	return n
+}
+
 // checkBucketConservation 是守恒检查本体：返回 (Σ N, absorbed, unabsorbed, 是否守恒)。
 //
 // 它在**自己的读锁内**完成遍历与取数，不要求调用方持锁 —— 调用方（查询路径）
@@ -244,8 +349,12 @@ func bucketNSumLocked() int64 {
 //
 // 判据 `Σ N == absorbedRecords - unabsorbedRecords`：
 //   - absorbedRecords 数「从文件里消费掉的完整行」，是**消费侧**的账；
-//   - Σ N 是「桶里说的条数」，是**计数侧**的账；
-//   - unabsorbedRecords 数其中「消费了但没进桶」的（坏行 / ts 解析失败），
+//   - Σ N 是「桶里说的条数」，是**计数侧**的账。这里 Σ N 是
+//     hourBuckets 与 unmappedBuckets **两张表之和** —— 未映射记录同样被
+//     「消费」了（parsedTo 照样推进、absorbedRecords 照样自增），只是没进
+//     hourBuckets。若只数 hourBuckets，每有一条未映射记录就会让判据差 1，
+//     进而**每次查询都误判不守恒并触发自愈全量重扫**（真实数据 ~350ms）。
+//   - unabsorbedRecords 数其中「消费了但两张表都没进」的（坏行 / ts 解析失败），
 //     它把**合法的不等**从判据里扣掉。
 //
 // unabsorbed <= absorbed 由构造保证（每个 skip 必有一个 consume），
@@ -265,7 +374,7 @@ func bucketNSumLocked() int64 {
 func checkBucketConservation() (sum, absorbed, unabsorbed int64, ok bool) {
 	callLog.mu.RLock()
 	defer callLog.mu.RUnlock()
-	sum = bucketNSumLocked()
+	sum = bucketNSumLocked() + unmappedNSumLocked()
 	return sum, absorbedRecords, unabsorbedRecords,
 		unabsorbedRecords <= absorbedRecords && sum == absorbedRecords-unabsorbedRecords
 }
@@ -392,6 +501,7 @@ func markBucketsSeededIfFullyAbsorbed(p string) {
 // append 会退回「只写文件不 incr」，统计还要再晚一轮才对。
 func resetAbsorbedStateLocked() {
 	hourBuckets = nil
+	unmappedBuckets = nil
 	parsedTo = 0
 	absorbedRecords = 0
 	unabsorbedRecords = 0
@@ -463,7 +573,7 @@ func rebuildBucketsIfDue() bool {
 	// 复核：checkBucketConservation 的读锁与此刻之间可能落进一个 clear()，
 	// 它把状态清成自洽的 0/0。此时重建纯属自伤 —— 白吃一次全量重扫，
 	// 还把 bucketsSeeded 打回 false，让 append 退回「只写文件不 incr」。
-	if n := bucketNSumLocked(); n != absorbedRecords-unabsorbedRecords {
+	if n := bucketNSumLocked() + unmappedNSumLocked(); n != absorbedRecords-unabsorbedRecords {
 		if time.Now().Before(bucketRebuildNotBefore) {
 			return false
 		}
@@ -536,6 +646,14 @@ func callLogFilePath() string {
 	return callLog.path
 }
 
+// pendingServedRec 是一条「公式 B 判未映射」的老日志行（没有落盘 unmapped 键），
+// 它进哪张表要等整轮扫完、stagedServed 收齐后按 everServed 裁决。
+// 必须先记下 hourKeyFor 的结果：延后裁决时不该再解析一次 ts（时区归一很贵且容易写错）。
+type pendingServedRec struct {
+	k hourModelKey
+	r slimRec
+}
+
 // absorbOnce 是 ensureBucketsUpToDate 的吸收本体（不含 single-flight 与守恒检查）。
 // 调用方**必须持有 absorbMu**。
 func absorbOnce() {
@@ -605,11 +723,36 @@ func absorbOnce() {
 	buf = buf[:got]
 
 	staged := make(map[hourModelKey]*hourModelAgg, 512)
+	// stagedUnmapped 与 staged 同构，装未映射记录。分开暂存是为了让锁内合并段
+	// 能一次判 gen / 一次提交 parsedTo，而两张表各自 += 到目标全局。
+	stagedUnmapped := make(map[hourModelKey]*hourModelAgg, 16)
+	// stagedServed 装本轮扫描中「出现过 status=ok」的模型名（Task 39 的 everServed）。
+	// 它与两条桶表**同一次提交**：合并段里并进全局 servedModels。
+	stagedServed := make(map[string]struct{}, 32)
+	// pendingServed 暂存「按公式 B 判未映射」的老日志行（没有 unmapped 键的那些），
+	// 等整轮扫完、stagedServed 收齐之后，再用 everServed 一次性裁决它们进哪张表。
+	//
+	// 🔴 为什么必须延后而不是边扫边判：everServed 是**全局**属性，而生产日志
+	// 38.6% 的记录是乱序的 —— 同一条失败记录既可能排在它自己那条成功记录之前，
+	// 也可能排在之后。边扫边判 ⇒ 同一份文件换个行序就得出不同的桶，
+	// 而桶是守恒判据「ΣN == absorbed - unabsorbed」的一端，非确定会误触发自愈重建。
+	// 所以判定被拆成两半：**公式 B（只依赖当前目录，可按模型名记忆化）** +
+	// **everServed（必须等全局收齐）**。
+	pendingServed := make([]pendingServedRec, 0, 64)
 	consumed := from
 	// lines 记本轮真正被消费的**完整行数**，skipped 记其中「消费了却没进桶」的条数。
 	// 两者都只在本轮成功提交时才并进全局（见下方提交段）。
 	lines := int64(0)
 	skipped := int64(0)
+	// unmappedMemo 缓存「模型名 → 是否未映射」。
+	//
+	// 存在的理由是成本：全量回填要过 ~20 万行，而 `isUnmappedModel` 每次要取
+	// configMu/freeModelDocsMu/modelMu 三把读锁并遍历别名表。生产日志里不同
+	// 模型名只有 ~18 个，所以记忆化把 20 万次调用压到 18 次。
+	// 记忆化**不改变结果**：本函数在单次回填内是纯函数（目录在解析段不会被
+	// 改写 —— 唯一的写者是 refreshFreeModelsDocs，它替换整张 map 而不是原地改，
+	// 且这里只要求「同输入同输出」，取哪一代快照都自洽）。
+	unmappedMemo := map[string]bool{}
 	for pos := 0; pos < len(buf); {
 		rel := bytes.IndexByte(buf[pos:], '\n')
 		if rel < 0 {
@@ -639,12 +782,81 @@ func absorbOnce() {
 			skipped++
 			continue
 		}
-		b := staged[k]
+		// ---- everServed 收集（Task 39）----
+		//
+		// 「历史上有过一条 status=ok」就足以把这个名字钉成**我们的模型**，
+		// 与它今天还在不在目录里无关。注意收集与「这一行进哪张表」是两件事：
+		// 一条成功记录自己也会被下面判成 mapped 并进 staged（见 SawUnmapped 分支的翻转）。
+		if r.Status == "ok" && r.Model != "" {
+			stagedServed[r.Model] = struct{}{}
+		}
+		// ---- 未映射判定（Task 21 冻结值 + Task 39 everServed 判据）----
+		//
+		// 两种来源，必须区别对待：
+		//  1. `SawUnmapped` 为真：本构建写的行，落盘值就是**请求发生那一刻**
+		//     的判定，一律采信。绝不用当前目录重算 —— 目录会漂移，重算会把
+		//     「当时确实已映射、只是后来被上游摘掉目录」的模型
+		//     （deepseek-v4-flash-free 4,437 次成功 / x-preview-f-free
+		//     1,265 次成功）从统计里删掉。
+		//     唯一例外：标了未映射但实际 status=ok ⇒ 按已映射算。成功即证明
+		//     这个名字可服务，与实时路径 finish 的翻转是同一条规则；本构建
+		//     写不出这种行（finish 会先翻转），这里只对异常/过渡期数据兜底。
+		//  2. `SawUnmapped` 为假：本构建**之前**写的行，没有该字段，只能重算。
+		//     重算分两半：先问**公式 B**（只依赖当前目录，可记忆化），
+		//     公式 B 判未映射的**不立即定性**，先塞进 pendingServed 等整轮扫完
+		//     再用 everServed 裁决 —— 见 stagedServed 上方那段注释。
+		unmapped := r.Unmapped
+		if r.SawUnmapped {
+			if r.Status == "ok" {
+				unmapped = false
+			}
+		} else {
+			v, hit := unmappedMemo[r.Model]
+			if !hit {
+				v = isUnmappedByFormula(r.Model)
+				unmappedMemo[r.Model] = v
+			}
+			if v {
+				pendingServed = append(pendingServed, pendingServedRec{k: k, r: r})
+				continue
+			}
+			unmapped = false
+		}
+		// 注意：**未映射不走 skipped**。skipped 的语义是「消费了但两张表都没进」
+		// （坏行 / ts 解析失败），守恒判据要把它们扣掉；未映射进了
+		// stagedUnmapped，属于「进了表」，从判据看与进了 staged 完全等价。
+		target := staged
+		if unmapped {
+			target = stagedUnmapped
+		}
+		b := target[k]
 		if b == nil {
 			b = &hourModelAgg{}
-			staged[k] = b
+			target[k] = b
 		}
 		b.add(&r)
+	}
+
+	// ---- 老日志行的最终裁决：等 stagedServed 收齐后再判（与行序无关）----
+	//
+	// 判据就是用户 2026-10-20 的口径：**曾经成功过 ⇒ 算我们的模型**。
+	// 注意这里查的是「everServed ∪ 本轮 staged」，而不是全局 servedModels ——
+	// 全局那份此刻还没合并（合并要等锁内提交），直接查会漏掉本轮才发现的成功名。
+	if len(pendingServed) > 0 {
+		ever := servedModelsSnapshot(stagedServed)
+		for i := range pendingServed {
+			p := &pendingServed[i]
+			target := stagedUnmapped
+			if _, served := ever[p.r.Model]; served {
+				target = staged
+			}
+			b := target[p.k]
+			if b == nil {
+				b = &hourModelAgg{}
+				target[p.k] = b
+			}
+			b.add(&p.r)
+		}
 	}
 
 	backfillAfterStat() // 测试注入点，见上方注释
@@ -691,6 +903,32 @@ func absorbOnce() {
 	}
 	if hourBuckets == nil {
 		hourBuckets = make(map[hourModelKey]*hourModelAgg, len(staged))
+	}
+	// everServed 与两条桶表在**同一个临界区**里提交：这样「集合说它是我们的模型」
+	// 与「它的记录进了概览桶」永远不可能被看到一个已经生效、另一个还没生效的中间态。
+	// 只增不减，故直接合并、不需要 mergeAggTo 那种 += 语义。
+	if len(stagedServed) > 0 {
+		if servedModels == nil {
+			servedModels = make(map[string]struct{}, len(stagedServed))
+		}
+		for m := range stagedServed {
+			servedModels[m] = struct{}{}
+		}
+	}
+	// 未映射暂存区并进平行表。合并规则与 staged 完全一致（必须 +=，不能覆盖），
+	// 且**在同一临界区内**完成 —— 与 parsedTo 的提交同锁，不存在半合并可见窗口。
+	if len(stagedUnmapped) > 0 {
+		if unmappedBuckets == nil {
+			unmappedBuckets = make(map[hourModelKey]*hourModelAgg, len(stagedUnmapped))
+		}
+		for k, v := range stagedUnmapped {
+			b := unmappedBuckets[k]
+			if b == nil {
+				unmappedBuckets[k] = v
+				continue
+			}
+			mergeAggTo(b, v)
+		}
 	}
 	for k, v := range staged {
 		b := hourBuckets[k]
@@ -943,6 +1181,126 @@ func foldModelsInWindow(ts []string, bidx func(time.Time) int) ([]string, map[st
 	return names, aggs
 }
 
+// modelsWithOKInWindow 返回窗口内**至少有一条 status=ok** 的模型名集合（Task 39 / F1）。
+//
+// 用途：`/api/stats?range=` 的**展示层**只输出这些模型键（`models` 与
+// `trends_by_model`）。判据是用户口径「概览的图表啥的只显示有成功的模型」。
+//
+// 🔴 它**只服务于展示层**，绝不允许被拿去算分母：
+// 窗口内 0 成功的模型那几条失败是**真实免费模型的真实失败**（生产实测 6 个模型 /
+// 15 条），必须留在 total_requests 与成功率分母里。把它们从分母拿掉就是藏失败。
+//
+// 🔴 判据直接读 hourBuckets 的 OK 字段 —— 桶里现成的，不新增采集逻辑、不改桶结构。
+func modelsWithOKInWindow(ts []string, bidx func(time.Time) int) map[string]struct{} {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	out := make(map[string]struct{}, 16)
+	for k, a := range hourBuckets {
+		if a.OK == 0 {
+			continue
+		}
+		if bucketIndexOf(k.Hour, len(ts), bidx) < 0 {
+			continue
+		}
+		out[k.Model] = struct{}{}
+	}
+	return out
+}
+
+// filterTrendsByOK 从 ModelTrendPoint 行里删掉「窗口内 0 成功」的模型行（Task 39 / F1）。
+//
+// 🔴 两个出口共用本函数，别各写一份：`/api/stats?range=` 的 trends_by_model 与
+// `/api/stats/trends?group=model` 必须同一口径。只改一个出口就是半实现
+// （面板的模型维度图表与 /api/stats 会对不上，且独立验收有专门的变异用例打这个）。
+func filterTrendsByOK(pts []ModelTrendPoint, keep map[string]struct{}) []ModelTrendPoint {
+	if len(pts) == 0 {
+		return pts
+	}
+	out := pts[:0]
+	for _, p := range pts {
+		if _, ok := keep[p.Model]; ok {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// unmappedTopN 是 /api/stats 的 unmapped_requests.by_model 里单个模型的最大条数。
+// 其余归并进 "__other__"。定 10 的理由：生产实测这类模型只有 5 个
+// （mimo-v2.5 / x-preview-f / claude-opus-4-5 / hy3 / gpt-4o-mini），
+// 10 足够覆盖真实长尾；再多只是把一次恶意刷模型名的噪声铺满整个响应体。
+const unmappedTopN = 10
+
+// unmappedOtherKey 是 by_model 里「其余模型合并」的保留键。
+// 用双下划线包裹是为了**不可能与真实模型名冲突** —— 模型名里不会出现下划线开头
+// 的双下划线（我们的命名约定是 `<name>-free`，客户端传来的野名字也不会有），
+// 且双下划线让它在面板上明显不像一个模型。
+const unmappedOtherKey = "__other__"
+
+// unmappedStatsInWindow 折叠出窗口内的未映射请求统计：总数 + Top N 与其余合并。
+//
+// 返回**非 nil** 的 map（即使一条都没有），理由与 modelStatsFromCallLog 相同：
+// 返回 nil 会序列化成 "by_model":null，前端 `.count` / `.by_model` 取值直接炸。
+//
+// 窗口口径与 models / total_requests 完全一致 —— 同一个 ts/bidx（由调用方
+// statsRangeResponseFor 只取一次窗口后传进来），否则「合计」与「分项」会在
+// 跨整点/午夜时互相矛盾（那个坑在 statsRangeResponseFor 的注释里已经踩过一次）。
+func unmappedStatsInWindow(ts []string, bidx func(time.Time) int) (count int64, byModel map[string]int64) {
+	byModel = map[string]int64{}
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	for k, a := range unmappedBuckets {
+		if bucketIndexOf(k.Hour, len(ts), bidx) < 0 {
+			continue
+		}
+		count = satAdd(count, a.N)
+		byModel[k.Model] = satAdd(byModel[k.Model], a.N)
+	}
+	return count, byModel
+}
+
+// topUnmappedModels 把 byModel 压成「Top N + __other__」。
+//
+// 排序必须是**全序**：先按条数降序，条数相同再按模型名升序。
+// 只按条数排序时，并列的模型在不同 map 遍历顺序下会得到不同的 Top N 边界，
+// 于是**同一次查询连发两次**可能得到两个不同的 by_model —— 面板上的数字会
+// 莫名其妙地跳。模型名兜底让结果唯一。
+func topUnmappedModels(byModel map[string]int64, n int) map[string]int64 {
+	out := make(map[string]int64, n+1)
+	if len(byModel) <= n {
+		for k, v := range byModel {
+			out[k] = v
+		}
+		return out
+	}
+	type kv struct {
+		name string
+		cnt  int64
+	}
+	all := make([]kv, 0, len(byModel))
+	for k, v := range byModel {
+		all = append(all, kv{k, v})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].cnt != all[j].cnt {
+			return all[i].cnt > all[j].cnt
+		}
+		return all[i].name < all[j].name
+	})
+	var other int64
+	for i, e := range all {
+		if i < n {
+			out[e.name] = e.cnt
+			continue
+		}
+		other = satAdd(other, e.cnt)
+	}
+	if other > 0 {
+		out[unmappedOtherKey] = other
+	}
+	return out
+}
+
 // ---- 全局环形缓冲 + JSONL 落盘 ----
 
 type callLogStore struct {
@@ -1079,6 +1437,23 @@ func loadCallLogFromFile() {
 	}
 	callLog.mu.Lock()
 	callLog.records = records
+	// 顺手从尾部记录里播种 everServed（Task 39）。
+	//
+	// 为什么要在启动时就播种、而不是等第一次 stats 查询触发回填：
+	// 回填是**惰性**的（只有 /api/stats 等查询路径会调 ensureBucketsUpToDate），
+	// 而判定发生在请求路径上（beginCallLog）。若中间隔了很久没人开面板，
+	// 这段时间里「历史上成功过、但今天不在目录里」的模型会被按公式 B 判成未映射，
+	// 重启后的判定就和重启前不一致（违反单调性）。尾部记录是**已经在内存里**的
+	// 现成数据，零额外 IO，覆盖「最近有流量」的全部模型名 —— 这是最划算的一层保险。
+	// 更久远的历史由首次回填补齐（同一份日志、同一套判据）。
+	if servedModels == nil {
+		servedModels = make(map[string]struct{}, 32)
+	}
+	for _, rec := range records {
+		if rec.Status == "ok" && rec.Model != "" {
+			servedModels[rec.Model] = struct{}{}
+		}
+	}
 	callLog.mu.Unlock()
 }
 
@@ -1245,21 +1620,44 @@ func (s *callLogStore) append(rec CallRecord) {
 	// 详见 bucketsSeeded 的注释。
 	if bucketsSeeded {
 		if k, ok := hourKeyFor(rec.TS, rec.Model); ok {
-			if hourBuckets == nil {
-				hourBuckets = make(map[hourModelKey]*hourModelAgg)
-			}
-			agg := hourBuckets[k]
-			if agg == nil {
-				agg = &hourModelAgg{}
-				hourBuckets[k] = agg
-			}
-			agg.add(&slimRec{
+			slim := &slimRec{
 				TS: rec.TS, Model: rec.Model, Status: rec.Status,
 				PromptTokens: rec.PromptTokens, CompletionTokens: rec.CompletionTokens,
 				CacheCreation: rec.CacheCreation, CacheRead: rec.CacheRead,
 				TTFTMs: rec.TTFTMs, OutputSpeed: rec.OutputSpeed,
-				DurationMS: rec.DurationMS,
-			})
+				DurationMS: rec.DurationMS, Unmapped: rec.Unmapped,
+			}
+			// 未映射请求进**平行表**，不进 hourBuckets。
+			//
+			// 🔴 关键：它仍必须走下面「推进 parsedTo + absorbedRecords」那一段。
+			// 未映射只改变「进哪张表」，**不改变「字节被消费了」这个事实**。
+			// 漏掉推进 ⇒ 下次 backfill 会把这条再扫一遍（重复计数、单调发散）；
+			// 漏掉 absorbedRecords ⇒ 守恒判据差 1 ⇒ 每次查询触发一次全量重扫。
+			// 守恒式两表之和见 checkBucketConservation。
+			if rec.Unmapped {
+				if unmappedBuckets == nil {
+					unmappedBuckets = make(map[hourModelKey]*hourModelAgg)
+				}
+				uagg := unmappedBuckets[k]
+				if uagg == nil {
+					uagg = &hourModelAgg{}
+					unmappedBuckets[k] = uagg
+				}
+				// 只累计 N（unmapped 请求全是失败，token/速度/吞吐都无意义，
+				// 且它们**不得**进任何展示成功率的分母）。用 add 是为了复用
+				// 同一个类型，OK/Fail 也如实记下来，便于诊断。
+				uagg.add(slim)
+			} else {
+				if hourBuckets == nil {
+					hourBuckets = make(map[hourModelKey]*hourModelAgg)
+				}
+				agg := hourBuckets[k]
+				if agg == nil {
+					agg = &hourModelAgg{}
+					hourBuckets[k] = agg
+				}
+				agg.add(slim)
+			}
 			// 🔴 **必须同时推进 parsedTo**。
 			// append 已经把这条计进桶了；若 parsedTo 不跟着走，
 			// 下次 backfill 会从 [parsedTo, size) 把刚写的字节**再扫一遍**，
@@ -1312,6 +1710,12 @@ func (s *callLogStore) clear() {
 	//  用 O_CREATE 把文件重建出来，那条幽灵记录会被下次 backfill 吸回。）
 	bucketsSeeded = true
 	statsGen++
+	// everServed 也必须一起清（Task 39）：它是「这份日志历史里成功过的模型名」，
+	// 日志被用户显式清空 = 历史归零 ⇒ 集合也得归零，否则重启后新日志里
+	// 一个从没成功过的名字会因为上一轮的历史被当成「我们的模型」而计入概览。
+	// 注意这与「单调性」不冲突：单调性说的是「同一份历史内只增不减」，
+	// 而 clear 是用户显式要求丢弃整段历史。
+	servedModels = nil
 	// os.Remove 必须在同一临界区内。若放在锁外，其后若有查询进来，
 	// 会从 parsedTo=0 开始把刚被删掉的整个文件重新吸进桶，
 	// 被清空的趋势图立刻复活（幽灵统计）。
@@ -1337,7 +1741,57 @@ type callRecorder struct {
 	cacheRead     int64
 }
 
+// unmappedWarnInterval 是「未映射模型」WARN 的**每模型**最小间隔。
+const unmappedWarnInterval = 5 * time.Minute
+
+// unmappedWarnMaxModels 是限流表的条目上限。客户端可以随意编模型名，
+// 不设上限的话这张 map 会被野名字撑成内存泄漏。
+const unmappedWarnMaxModels = 64
+
+var (
+	unmappedWarnMu   sync.Mutex
+	unmappedWarnLast = map[string]time.Time{}
+)
+
+// warnUnmappedModel 对「模型名无法映射」发一条 WARN，**按模型限流**。
+//
+// 为什么必须打这条日志：这类请求被排除出统计聚合后，就只剩 call_log.jsonl
+// 里一个 `"unmapped":true` 字段可见。运维若不主动去翻日志，会以为请求凭空
+// 消失了。任务书要求「不静默丢弃」，日志是这条要求的落点之一。
+//
+// 为什么限流：未映射是**客户端输入**决定的，一个写错模型名的客户端会把它
+// 变成每请求一条 WARN。按模型 5 分钟一条，既能让人看见，又不会淹掉日志。
+//
+// 为什么在锁外：调用点 beginCallLog 不持有任何锁。绝不能在 callLog.mu 内
+// 做同步 I/O —— 那会连带阻塞所有在途 append 与面板查询。
+func warnUnmappedModel(model string) {
+	unmappedWarnMu.Lock()
+	if unmappedWarnLast == nil {
+		unmappedWarnLast = map[string]time.Time{}
+	}
+	if last, ok := unmappedWarnLast[model]; ok && time.Since(last) < unmappedWarnInterval {
+		unmappedWarnMu.Unlock()
+		return
+	}
+	if len(unmappedWarnLast) >= unmappedWarnMaxModels {
+		// 简单粗暴地整体清空：限流表只是「别刷屏」，丢掉历史不影响正确性，
+		// 而逐个淘汰需要维护 LRU，不值得。
+		unmappedWarnLast = map[string]time.Time{}
+	}
+	unmappedWarnLast[model] = time.Now()
+	unmappedWarnMu.Unlock()
+
+	slog.Warn("calllog: request model cannot be mapped to a served model; "+
+		"excluded from stats aggregation but still written to call_log",
+		"model", model)
+}
+
 // beginCallLog 创建本次请求的调用记录并挂到 ctx；返回新 ctx。
+//
+// 未映射判定在这里做（**请求发生那一刻**），不是聚合时现算：聚合侧持
+// callLog.mu，现算要再取 configMu/freeModelDocsMu/modelMu，凭空造出一条
+// callLog.mu → 其它锁 的锁序；而且目录会漂移，现算会让同一条历史记录在不同
+// 日期得到不同结论，桶内容非确定、还会误伤守恒判据。详见 CallRecord.Unmapped。
 func beginCallLog(ctx context.Context, path, model string, stream bool, routeMode string) context.Context {
 	rec := CallRecord{
 		ReqID:     getReqID(ctx),
@@ -1347,9 +1801,14 @@ func beginCallLog(ctx context.Context, path, model string, stream bool, routeMod
 		Stream:    stream,
 		RouteMode: routeMode,
 		Status:    "fail",
+		Unmapped:  isUnmappedModel(model),
 	}
 	if rec.ReqID == "" {
 		rec.ReqID = "req_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	if rec.Unmapped {
+		// 锁外、且**先于**返回：日志不能拖慢请求路径，但也不能丢。
+		warnUnmappedModel(model)
 	}
 	cr := &callRecorder{rec: rec, start: time.Now(), seenNodes: map[string]bool{}}
 	return context.WithValue(ctx, callRecKey{}, cr)
@@ -1404,6 +1863,10 @@ func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionT
 	}
 	if status >= 200 && status < 300 {
 		cr.rec.Status = "ok"
+		// Task 39：成功即证明这个名字**可服务**。若请求开始时它还「从未成功过」
+		// 而被判成未映射，必须在落盘与进桶之前翻转 —— 否则一条真实成功记录
+		// 会被排除在概览之外，违反用户口径「概览显示有成功的模型」。
+		cr.rec.Unmapped = false
 	} else {
 		cr.rec.Status = "fail"
 	}
@@ -1451,6 +1914,14 @@ func (cr *callRecorder) finish(status int, errMsg string, promptTok, completionT
 	}
 	rec := cr.rec
 	cr.mu.Unlock()
+	// Task 39：成功过的模型名进 everServed（只增不减）。
+	//
+	// 为什么在 append 之前记账：记账与落盘之间若崩掉，重放日志的回填也能补上；
+	// 反过来先落盘后记账，则下一条同名请求会重新被判「从未成功过」⇒ 未映射，
+	// 那一刻的判定就被冻结进日志，概览会少算它。所以宁可早记。
+	if rec.Status == "ok" {
+		markServedModel(rec.Model)
+	}
 	callLog.append(rec)
 }
 

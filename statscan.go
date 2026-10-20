@@ -27,6 +27,27 @@ type slimRec struct {
 	TTFTMs           int64
 	OutputSpeed      float64
 	DurationMS       int64
+
+	// Unmapped 表示这条记录来自「模型名无法映射到本部署可服务的模型」的请求。
+	// 这类请求**不进 hourBuckets**（故不进 models / total_requests / 成功率分母），
+	// 但仍照常落盘，并单独计入 unmappedBuckets 供 /api/stats 的
+	// unmapped_requests 字段使用。判定在请求发生那一刻冻结（见 CallRecord.Unmapped）。
+	//
+	// 老日志行没有这个键 ⇒ 解析为 false ⇒ 按现状计入统计（不追溯剔除历史）。
+	Unmapped bool
+	// SawUnmapped 记录这一行**是否出现过** unmapped 键。
+	//
+	// 存在的唯一理由：把「本构建写的、判定为已映射」与「本构建之前写的、
+	// 根本没有该字段」区分开。前者要尊重落盘时的判定（那一刻的目录快照），
+	// 后者只能按当前目录**重算**（见 isUnmappedModel 与回填段的注释）。
+	// 不区分的话，重算会把「当时确实已映射、只是后来被上游摘掉目录」的模型
+	// （生产实例：deepseek-v4-flash-free 4,437 次成功、x-preview-f-free
+	// 1,265 次成功）追认为未映射，把真实成功记录从统计里删掉。
+	//
+	// 这也是为什么 Unmapped 的 JSON tag 必须**不带 omitempty** 的对称面：
+	// CallRecord 侧用 omitempty 省字节，代价是无法从 JSON 区分 false 与缺失，
+	// 于是在扫描器里补一个「见到过该键」的位来恢复这个区分。
+	SawUnmapped bool
 }
 
 // parseStatsLine 把一行 JSON 解析进 slimRec。
@@ -132,6 +153,17 @@ func parseStatsLine(line []byte, r *slimRec) bool {
 			r.DurationMS = jsonInt(tok)
 		case "output_speed":
 			r.OutputSpeed = jsonFloat(tok)
+		case "unmapped":
+			// JSON 字面量 true/false。写入侧**总是**序列化该键
+			// （CallRecord.Unmapped 不带 omitempty，见那里的注释），
+			// 所以 "false" 是正常且必须识别的值 —— 它表示「本构建判过：已映射」，
+			// 与「老构建压根没这个键」是两种不同的语义，靠 SawUnmapped 区分。
+			//
+			// 宽容处理：只有精确的 "true" 才算未映射；其它任何值
+			// （"false" / 空 / 脏值）都按「已映射」算，与 encoding/json
+			// 对脏布尔的既定行为一致（不因为一个坏布尔就丢掉整条统计）。
+			r.Unmapped = string(tok) == "true"
+			r.SawUnmapped = true
 		}
 		i = e
 	}
