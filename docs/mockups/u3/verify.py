@@ -143,6 +143,56 @@ STATES = {
         "select3": ([('#dirs button[data-d="3"]', None), ("#c3 .ncard .chk", None)], None),
         "select3Dark": ([("#themeBtn", None), ('#dirs button[data-d="3"]', None), ("#c3 .ncard .chk", None)], None),
     },
+    "settings-v4.html": {
+        # task-58：节点来源整组 + 日志级别已搬走。本页只剩 5 个可编辑控件 + 只读诊断 + 危险区。
+        # 每态断言：3 方案可切且只显示 1 个；控件集合恰好是这 5 个；被搬走的控件/整组 0 命中；
+        # 只读 6 条都标「改请改配置文件」且内部无控件；危险区 4 按钮；danger/undo 态专属检查。
+        "light": ([("#themeBtn", None)], None),
+        "d2": ([("#dirs button[data-d=\"2\"]", None)], None),
+        "d2light": ([("#dirs button[data-d=\"2\"]", None), ("#themeBtn", None)], None),
+        "d3": ([("#dirs button[data-d=\"3\"]", None)], None),
+        "d3light": ([("#dirs button[data-d=\"3\"]", None), ("#themeBtn", None)], None),
+        "d3g3": ([("#dirs button[data-d=\"3\"]", None),
+                  ("js:window.__setPreview.group(3)", None)], None),
+        "ro": ([("js:document.getElementById('roDetails').open = true", None)], None),
+        "undo": ([("js:window.__setPreview.edit('cooldown_exhausted', 3)", None)], None),
+        "danger": ([("js:document.querySelector('.dgr button').click()", None)], None),
+    },
+    "logs-v3.html": {
+        # task-58：分析页按 freellm Analytics 骨架（PageHeader→Stat 网格→6 个平级 Panel）；
+        # 明细两方案 A/B；日志级别控件在本页。
+        "light": ([("#themeBtn", None)], None),
+        "dt": ([("#subsw button[data-sub=\"dt\"]", None)], None),
+        "dtlight": ([("#subsw button[data-sub=\"dt\"]", None), ("#themeBtn", None)], None),
+        "expand": ([("#subsw button[data-sub=\"dt\"]", None),
+                    ("js:window.__l3.expandFirst()", None)], None),
+        "schemeB": ([("#subsw button[data-sub=\"dt\"]", None),
+                     ("js:window.__l3.scheme('b')", None)], None),
+        "drawer": ([("#subsw button[data-sub=\"dt\"]", None),
+                    ("js:window.__l3.openFirst()", None)], None),
+        "debug": ([("#subsw button[data-sub=\"dt\"]", None),
+                   ("js:window.__l3.level('debug')", None),
+                   ("js:window.__l3.expandFirst()", None)], None),
+        "distNode": ([("js:window.__l3.dist('node')", None)], None),
+        "distErr": ([("js:window.__l3.dist('err')", None)], None),
+        "granDay": ([("js:window.__l3.gran('day')", None)], None),
+        "sortRate": ([("js:window.__l3.sortModel('rate')", None)], None),
+        "sortNode": ([("js:window.__l3.sortNode('rate')", None)], None),
+        "jump": ([("js:window.__l3.jump('model','mimo-v2.5-free')", None)], None),
+    },
+    "nodes-v3.html": {
+        # task-58：节点健康 3 方向 + 「节点来源」子视图（5 个源真实贡献数）+ 失败态/空态。
+        "light": ([("#themeBtn", None)], None),
+        "dir2": ([("#dirs button[data-d=\"2\"]", None)], None),
+        "dir3": ([("#dirs button[data-d=\"3\"]", None)], None),
+        "dir2light": ([("#dirs button[data-d=\"2\"]", None), ("#themeBtn", None)], None),
+        "src": ([("#viewSeg button[data-v=\"src\"]", None)], None),
+        "srclight": ([("#viewSeg button[data-v=\"src\"]", None), ("#themeBtn", None)], None),
+        "onefail": ([("#viewSeg button[data-v=\"src\"]", None),
+                     ("js:window.__n3.srcState('onefail')", None)], None),
+        "empty": ([("#viewSeg button[data-v=\"src\"]", None),
+                   ("js:window.__n3.srcState('empty')", None)], None),
+    },
     "overview-v2.html": {
         "dark": ([("#themeBtn", None)], None),
         "dark+nodes": ([("#themeBtn", None), ('.nav .item[data-go="nodes"]', None)], None),
@@ -222,6 +272,52 @@ SHOTS = {
         ("light", "320x568", "settings-v3-d1-320-light.png"),
         ("d2light", "320x568", "settings-v3-d2-320-light.png"),
         ("d3light", "320x568", "settings-v3-d3-320-light.png"),
+    ],
+    "settings-v4.html": [
+        ("default", "1440x900", "settings-v4-d1-1440-dark.png"),
+        ("light", "1440x900", "settings-v4-d1-1440-light.png"),
+        ("d2", "1440x900", "settings-v4-d2-1440-dark.png"),
+        ("d2light", "1440x900", "settings-v4-d2-1440-light.png"),
+        ("d3", "1440x900", "settings-v4-d3-1440-dark.png"),
+        ("d3light", "1440x900", "settings-v4-d3-1440-light.png"),
+        ("ro", "1440x900", "settings-v4-ro-1440-dark.png"),
+        ("undo", "1440x900", "settings-v4-undo-1440-dark.png"),
+        ("danger", "1440x900", "settings-v4-danger-1440-dark.png"),
+        ("default", "390x844", "settings-v4-d1-390-light.png"),
+        ("d2", "390x844", "settings-v4-d2-390-light.png"),
+        ("d3", "390x844", "settings-v4-d3-390-light.png"),
+        ("default", "320x568", "settings-v4-d1-320-light.png"),
+        ("d2", "320x568", "settings-v4-d2-320-light.png"),
+        ("d3", "320x568", "settings-v4-d3-320-light.png"),
+    ],
+    "logs-v3.html": [
+        ("default", "1440x900", "logs-v3-an-1440-dark.png"),
+        ("light", "1440x900", "logs-v3-an-1440-light.png"),
+        ("dt", "1440x900", "logs-v3-dt-a-1440-dark.png"),
+        ("dtlight", "1440x900", "logs-v3-dt-a-1440-light.png"),
+        ("schemeB", "1440x900", "logs-v3-dt-b-1440-dark.png"),
+        ("drawer", "1440x900", "logs-v3-drawer-1440-dark.png"),
+        ("debug", "1440x900", "logs-v3-debug-1440-dark.png"),
+        ("distErr", "1440x900", "logs-v3-dist-err-1440-dark.png"),
+        ("jump", "1440x900", "logs-v3-jump-1440-dark.png"),
+        ("default", "390x844", "logs-v3-an-390-light.png"),
+        ("dt", "390x844", "logs-v3-dt-390-light.png"),
+        ("default", "320x568", "logs-v3-an-320-light.png"),
+        ("dt", "320x568", "logs-v3-dt-320-light.png"),
+    ],
+    "nodes-v3.html": [
+        ("default", "1440x900", "nodes-v3-status-d1-1440-dark.png"),
+        ("light", "1440x900", "nodes-v3-status-d1-1440-light.png"),
+        ("dir2", "1440x900", "nodes-v3-status-d2-1440-dark.png"),
+        ("dir3", "1440x900", "nodes-v3-status-d3-1440-dark.png"),
+        ("src", "1440x900", "nodes-v3-src-1440-dark.png"),
+        ("srclight", "1440x900", "nodes-v3-src-1440-light.png"),
+        ("onefail", "1440x900", "nodes-v3-src-onefail-1440-dark.png"),
+        ("empty", "1440x900", "nodes-v3-src-empty-1440-dark.png"),
+        ("src", "390x844", "nodes-v3-src-390-light.png"),
+        ("default", "390x844", "nodes-v3-status-390-light.png"),
+        ("src", "320x568", "nodes-v3-src-320-light.png"),
+        ("default", "320x568", "nodes-v3-status-320-light.png"),
     ],
     "overview-v2.html": [
         ("light", "1440x900", "overview-v2-1440-light.png"),
@@ -496,6 +592,149 @@ def probe(page, w, h):
               };
             }
             // ---------- 设置页 v3（task-54）专项 ----------
+
+            // ---------- 设置页 v4（task-58 搬迁后）专项 ----------
+            function v4Probe(){
+              if (document.body.getAttribute('data-page') !== 'settings-v4') return null;
+              const bar = document.getElementById('dirs');
+              if (!bar) return null;
+              const dv = [1, 2, 3].map(function(i){
+                const e = document.getElementById('d' + i);
+                if (!e || e.hidden) return false;
+                const r = e.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+              });
+              const ctls = [...document.querySelectorAll('[data-ctl]')]
+                .map(function(e){ return e.getAttribute('data-ctl'); });
+              const uniq = ctls.filter(function(v, i){ return ctls.indexOf(v) === i; }).sort();
+              // 被搬走的控件/整组：不许再出现（用控件身份判定，页面里提到"已搬到节点页"的文字不算）
+              const moved = {
+                subscriptions: document.querySelectorAll('[data-ctl="subscriptions"]').length,
+                webshare: document.querySelectorAll('[data-ctl="webshare"]').length,
+                log_level: document.querySelectorAll('[data-ctl="log_level"], #log_level, #seg_log_level').length,
+                sourceTables: document.querySelectorAll('#subRows, #wsRows, .subcol').length,
+                sourceBtns: [...document.querySelectorAll('button')].filter(function(b){
+                  return /添加订阅源|保存并重建节点池|添加 Webshare 源|手动添加节点/.test(b.textContent);
+                }).length
+              };
+              const activeSec = [...document.querySelectorAll('section[id^="d"]')].filter(function(e){
+                if (e.hidden) return false;
+                const r = e.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+              })[0] || document.body;
+              const ro = [...activeSec.querySelectorAll('.ro:not(.badge)')];
+              return {
+                dirs: bar.querySelectorAll('button[data-d]').length,
+                dirs_visible: dv,
+                one_dir: dv.filter(Boolean).length === 1,
+                ctl_unique: uniq,
+                ctl_count: uniq.length,
+                moved_hits: moved,
+                moved_total: Object.keys(moved).reduce(function(a, k){ return a + moved[k]; }, 0),
+                ro_rows: ro.length,
+                active_sec: activeSec.id || 'body',
+                ro_all_labeled: ro.length >= 4 && ro.every(function(e){ return /改请改配置文件/.test(e.textContent); }),
+                ro_has_input: activeSec.querySelectorAll('.ro input, .ro select, .ro textarea').length,
+                danger_btns: activeSec.querySelectorAll('.dgr button').length,
+                modal_on: document.getElementById('modal').classList.contains('on'),
+                undo_on: document.getElementById('undo').classList.contains('on'),
+                moved_note: [...document.querySelectorAll('.moved')].length,
+              };
+            }
+            // ---------- 日志 + 分析 v3（freellm Analytics 骨架）专项 ----------
+            function l3Probe(){
+              if (document.body.getAttribute('data-page') !== 'logs-v3') return null;
+              const an = document.getElementById('viewAn');
+              if (!an) return null;
+              const subSel = document.querySelector('#subsw button[aria-selected="true"]');
+              const schemeSel = document.querySelector('#schSeg button[aria-pressed="true"]');
+              const lvSel = document.querySelector('#lvSeg button[aria-pressed="true"]');
+              const dtRows = [...document.querySelectorAll('#dtBody tr[data-id]')];
+              const tbody = document.getElementById('dtBody');
+              const modelRows = [...document.querySelectorAll('#modelTbl tbody tr')];
+              const nodeRows = [...document.querySelectorAll('#nodeTbl tbody tr')];
+              return {
+                sub: subSel ? subSel.getAttribute('data-sub') : null,
+                sub_tabs: document.querySelectorAll('#subsw button[data-sub]').length,
+                an_visible: !an.hidden,
+                dt_visible: !document.getElementById('viewDt').hidden,
+                panels: an.querySelectorAll('.panel').length,
+                stats: an.querySelectorAll('.stat').length,
+                stat_cols: (function(){
+                  const g = getComputedStyle(document.getElementById('stats')).gridTemplateColumns;
+                  return g.split(' ').length;
+                })(),
+                hour_bars: an.querySelectorAll('.hcol').length,
+                chart_paths: an.querySelectorAll('svg.chart path.ln').length,
+                pct_pills: an.querySelectorAll('#pctPills .pill').length,
+                dist_row_count: document.querySelectorAll('#distTbl tbody tr').length,
+                dist_seg: document.querySelectorAll('#distSeg button').length,
+                retry_rows: document.querySelectorAll('#retryHost > div').length,
+                seg_parts: document.querySelectorAll('#segHost i').length,
+                model_rows: modelRows.length,
+                node_rows: nodeRows.length,
+                node_note: /按节点名称聚合/.test(document.getElementById('p6').textContent),
+                lv_tabs: document.querySelectorAll('#lvSeg button').length,
+                lv: lvSel ? lvSel.getAttribute('data-lv') : null,
+                lv_warn_text: /日志量约涨 5–10 倍/.test(document.getElementById('lvbar').textContent),
+                scheme: schemeSel ? schemeSel.getAttribute('data-s') : null,
+                scheme_tabs: document.querySelectorAll('#schSeg button').length,
+                det_rows: dtRows.length,
+                det_open: document.querySelectorAll('#dtBody tr.det').length,
+                debug_only: document.querySelectorAll('[data-debug-only]').length,
+                drawer_on: document.getElementById('drawer').classList.contains('on'),
+                link_on: document.getElementById('linkChip').classList.contains('on'),
+                link_txt: document.getElementById('linkTxt').textContent,
+                sort_ar: document.querySelectorAll('#modelTbl th .ar, #nodeTbl th .ar').length,
+                first_model: modelRows.length ? modelRows[0].getAttribute('data-v') : null,
+                first_node: nodeRows.length ? nodeRows[0].getAttribute('data-v') : null,
+                count_txt: document.getElementById('dtCount').textContent,
+                theme_live: getComputedStyle(document.body).backgroundColor !== 'rgba(0, 0, 0, 0)',
+              };
+            }
+            // ---------- 节点页 v3（健康 + 来源）专项 ----------
+            function n3Probe(){
+              if (document.body.getAttribute('data-page') !== 'nodes-v3') return null;
+              const seg = document.getElementById('viewSeg');
+              if (!seg) return null;
+              const view = document.querySelector('#viewSeg button[aria-pressed="true"]');
+              const dirs = [1, 2, 3].map(function(i){
+                const e = document.getElementById('d' + i);
+                if (!e || e.hidden) return false;
+                const r = e.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+              });
+              const srcs = [...document.querySelectorAll('.src')];
+              // 只检查状态徽章：.bg.plain 是来源类型标签（订阅 / Webshare），不是状态，不参与编码断言
+              const badges = [...document.querySelectorAll('#viewSrc .bg:not(.plain), #nodeTable .bg:not(.plain), #d2 .bg:not(.plain), #d3 .bg:not(.plain)')];
+              return {
+                view: view ? view.getAttribute('data-v') : null,
+                view_tabs: seg.querySelectorAll('button[data-v]').length,
+                status_visible: !document.getElementById('viewStatus').hidden,
+                src_visible: !document.getElementById('viewSrc').hidden,
+                dir_tabs: document.querySelectorAll('#dirs button[data-d]').length,
+                dirs_visible: dirs,
+                one_dir: document.getElementById('viewStatus').hidden ? true : dirs.filter(Boolean).length === 1,
+                nstats: document.querySelectorAll('#nstats .stat').length,
+                table_rows: document.querySelectorAll('#nodeTable tbody tr').length,
+                groups: document.querySelectorAll('#d2 .grp').length,
+                cards: document.querySelectorAll('#nodeCards .nodecard').length,
+                src_cards: srcs.length,
+                src_sums: document.getElementById('srcSum').textContent,
+                src_stats: document.querySelectorAll('#sstats .stat').length,
+                src_fail_cards: document.querySelectorAll('.src.is-fail').length,
+                src_zero_cards: document.querySelectorAll('.src.is-zero').length,
+                src_err_text: [...document.querySelectorAll('.src')].some(function(e){ return /最近错误/.test(e.textContent); }),
+                src_stale_label: [...document.querySelectorAll('.src')].some(function(e){ return /上次成功的结果/.test(e.textContent); }),
+                src_toggle_btns: document.querySelectorAll('.src .srow button').length,
+                masks: document.querySelectorAll('.maskval').length,
+                empty_blocks: document.querySelectorAll('.empty').length,
+                badge_kinds: badges.filter(function(b, i, a){ return a.indexOf(b) === i; })
+                  .map(function(b){ return b.textContent.replace(/\s+/g, ' ').trim(); }).slice(0, 8),
+                redundant: badges.every(function(b){ return /[✓✕●○◐!]/.test(b.textContent) && /[\u4e00-\u9fa5]/.test(b.textContent); }),
+                srcbar_hidden: document.getElementById('srcbar').hidden,
+              };
+            }
             function sv3Probe(){
               // 只认设置页（日志页也有 #dirs 方向切换条，靠 data-page 区分）
               if (document.body.getAttribute('data-page') !== 'settings-v3') return null;
@@ -640,6 +879,9 @@ def probe(page, w, h):
                 cfg: cfgProbe(),
                 sv3: sv3Probe(),
                 logs: logsProbe(),
+                v4: v4Probe(),
+                l3: l3Probe(),
+                n3: n3Probe(),
                 nv2: nv2Probe(),
                 page_h: de.scrollHeight,
                 screens: Math.round(de.scrollHeight / window.innerHeight * 100) / 100,
@@ -687,7 +929,7 @@ def measure(browser, path, w, h, actions, sname=""):
                         auto_menu += 1
                 except Exception:
                     pass
-            page.click(sel, timeout=2500)
+            page.click(sel, timeout=6000)  # 全量套件连跑 260 态时机器负载会把 2.5s 卡成超时，不代表选择器有问题
             page.wait_for_timeout(140)
         except Exception as e:  # 选择器不存在 → 明确记录，不静默
             pageerrors.append("CLICK_FAILED %s: %s" % (sel, str(e)[:120]))
@@ -779,6 +1021,115 @@ def measure(browser, path, w, h, actions, sname=""):
             # 联动硬断言：落到明细 + 显示来源 + 条数变少
             logs_ok = logs_ok and logs["sub"] == "dt" and logs["link_on"] \
                 and 0 < logs["counts"]["visible"] < logs["counts"]["total"]
+    v4 = pr.get("v4")
+    # task-58 设置页门禁：只剩 5 个可编辑控件；被搬走的「节点来源」整组与「日志级别」0 命中；
+    # 只读诊断 6 条都标「改请改配置文件」且内部无控件；危险区 4 按钮；3 方案只显示 1 个。
+    V4_CTLS = ["api_key", "cooldown_dead", "cooldown_exhausted", "health_interval", "max_switches"]
+    v4_ok = True if v4 is None else bool(
+        v4["dirs"] == 3
+        and v4["one_dir"]
+        and v4["ctl_unique"] == V4_CTLS
+        and v4["moved_total"] == 0
+        and v4["ro_rows"] >= 4
+        and v4["ro_all_labeled"]
+        and v4["ro_has_input"] == 0
+        and v4["danger_btns"] == 4
+        and v4["moved_note"] >= 1
+    )
+    if v4 is not None:
+        if sname == "danger":
+            v4_ok = v4_ok and v4["modal_on"]
+        else:
+            v4_ok = v4_ok and (not v4["modal_on"])
+        if sname == "undo":
+            v4_ok = v4_ok and v4["undo_on"]
+        else:
+            v4_ok = v4_ok and (not v4["undo_on"])
+
+    l3 = pr.get("l3")
+    # task-58 日志页门禁：分析 = freellm 骨架（Stat 网格 ≤4 列 + 6 个平级 Panel + 6 个 Panel 都要有内容）；
+    # 明细两方案可切；日志级别 3 档且带"日志量"提示；debug 档必须真的多出请求体摘要；点分析 → 明细被筛选。
+    l3_ok = True if l3 is None else bool(
+        l3["sub_tabs"] == 2
+        and l3["panels"] == 6
+        and l3["stats"] >= 6
+        and 2 <= l3["stat_cols"] <= 4
+        and l3["hour_bars"] >= 8
+        and l3["chart_paths"] == 2
+        and l3["pct_pills"] == 5
+        and l3["dist_seg"] == 3
+        and l3["dist_row_count"] >= 6
+        and l3["retry_rows"] == 4
+        and l3["seg_parts"] >= 3
+        and l3["model_rows"] >= 6
+        and l3["node_rows"] >= 6
+        and l3["node_note"]
+        and l3["lv_tabs"] == 3
+        and l3["lv_warn_text"]
+        and l3["scheme_tabs"] == 2
+        and l3["sort_ar"] >= 1
+    )
+    if l3 is not None:
+        if l3["sub"] == "an":
+            l3_ok = l3_ok and l3["an_visible"] and not l3["dt_visible"] and not l3["link_on"] \
+                and l3["hour_bars"] in (24, 8)
+            if sname in ("distNode", "distErr"):
+                l3_ok = l3_ok and l3["dist_row_count"] >= 6
+        else:
+            # jump 态是"被筛选后"的明细，条数本来就会变少（24 → 4），不能要求 ≥5
+            l3_ok = l3_ok and l3["dt_visible"] and not l3["an_visible"] \
+                and l3["det_rows"] >= (1 if sname == "jump" else 5)
+        if sname == "expand":
+            l3_ok = l3_ok and l3["det_open"] == 1 and l3["debug_only"] == 0
+        if sname == "debug":
+            l3_ok = l3_ok and l3["lv"] == "debug" and l3["debug_only"] >= 1 and l3["det_open"] == 1
+        if sname == "schemeB":
+            # 只切方案：表格还在页内，抽屉不该被打开
+            l3_ok = l3_ok and l3["scheme"] == "b" and not l3["drawer_on"]
+        if sname == "drawer":
+            l3_ok = l3_ok and l3["scheme"] == "b" and l3["drawer_on"]
+        if sname == "drawer":
+            l3_ok = l3_ok and l3["debug_only"] == 0
+        if sname == "jump":
+            l3_ok = l3_ok and l3["sub"] == "dt" and l3["link_on"] and "共 4 条" in l3["count_txt"]
+        if sname == "granDay":
+            l3_ok = l3_ok and l3["hour_bars"] == 8
+        if sname == "sortRate":
+            # 按成功率降序：最高的是 deepseek-v4.1-flash-free（97.7%）
+            l3_ok = l3_ok and l3["first_model"] == "deepseek-v4.1-flash-free"
+        if sname == "sortNode":
+            # 按成功率降序：最高的是 1::ES-109.196.161.251:6699（98.9%）
+            l3_ok = l3_ok and l3["first_node"] == "1::ES-109.196.161.251:6699"
+
+    n3 = pr.get("n3")
+    # task-58 节点页门禁：状态/来源两个子视图；3 方向只显示 1 个；来源 5 张卡 + 合计 217；
+    # 失败态必须 1 张卡标红并写出「最近错误」+「仍在使用上次结果」；空态每张卡都变 0；状态全冗余编码。
+    n3_ok = True if n3 is None else bool(
+        n3["view_tabs"] == 2
+        and n3["dir_tabs"] == 3
+        and n3["one_dir"]
+        and n3["nstats"] == 4
+        and n3["redundant"]
+    )
+    if n3 is not None:
+        if n3["view"] == "src":
+            n3_ok = n3_ok and n3["src_visible"] and not n3["status_visible"] and n3["src_cards"] == 5 \
+                and n3["src_stats"] == 4 and n3["masks"] >= 5 and n3["src_toggle_btns"] == 15
+            if sname == "onefail":
+                n3_ok = n3_ok and n3["src_fail_cards"] == 1 and n3["src_err_text"] and n3["src_stale_label"] \
+                    and "217" in n3["src_sums"]
+            elif sname == "empty":
+                n3_ok = n3_ok and n3["src_zero_cards"] == 5 and " 0 个节点" in n3["src_sums"]
+            else:
+                n3_ok = n3_ok and n3["src_fail_cards"] == 0 and "217" in n3["src_sums"]
+        else:
+            n3_ok = n3_ok and n3["status_visible"] and not n3["src_visible"] \
+                and n3["table_rows"] >= 10 and n3["cards"] >= 10 and n3["groups"] == 3
+        if sname == "dir2":
+            n3_ok = n3_ok and n3["dirs_visible"] == [False, True, False]
+        if sname == "dir3":
+            n3_ok = n3_ok and n3["dirs_visible"] == [False, False, True]
+
     sv3 = pr.get("sv3")
     # task-54 门禁：3 方案可切、每次只显示 1 个；8 个可编辑控件；
     # 只读项 ≥4 且每条都标「改请改配置文件」、内部无控件；出口组/被删字段 0 命中；
@@ -850,6 +1201,9 @@ def measure(browser, path, w, h, actions, sname=""):
         pr["ok"]
         and sv3_ok
         and logs_ok
+        and v4_ok
+        and l3_ok
+        and n3_ok
         and pr["css_live"]
         and not pr["overflow_x_hidden"]
         and not pageerrors
@@ -915,6 +1269,6 @@ if __name__ == "__main__":
         # 拿本脚本去量它们的通过率没有意义（也不该往他们的验收里混数）。
         mine = ["theme-blue.html", "overview-blue.html", "shell-blue.html",
                 "overview-v2.html", "settings-v2.html", "settings-v3.html", "logs-v2.html",
-                "nodes-v2.html"]
+                "settings-v4.html", "logs-v3.html", "nodes-v3.html"]
         args = [f for f in mine if (HERE / f).exists()]
     print(json.dumps(run(args, do_shot), ensure_ascii=False, indent=2))

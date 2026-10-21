@@ -1,0 +1,986 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark" class="theme-a">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>日志 + 分析 v3 · freellm Analytics 骨架（task-51 续）</title>
+<!--
+  效果预览，不是正在运行的面板。单文件、file:// 双击即开、零外部请求。
+  骨架依据 docs/research/U2b-freellm-style-recipe.md：P2（PageHeader→Stat 网格→平级 Panel，无卡套卡）、
+  P3（Stat 2 列→4 列）、P4（单数字用卡/多行用表/序列用卡+图）、P5（卡头 46px、12px 16px、卡体 p-4）、
+  V1（层级靠边框+间距+字号，不靠阴影）。
+  分析数据全部来自生产 /data/call_log.jsonl 实测 233,452 条（08-13~10-20），没有一个是编的。
+  明细为 24 条样例记录（按生产画像配比），用于演示两种列表方案。
+-->
+<script>
+(function () {
+  try {
+    var t = localStorage.getItem('u3sv2.theme');
+    if (t !== 'dark' && t !== 'light') {
+      t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+    }
+    document.documentElement.setAttribute('data-theme', t);
+  } catch (e) {
+    document.documentElement.setAttribute('data-theme', 'dark');
+  }
+})();
+</script>
+<style>
+.theme-a{
+  --bg:#0a0e15; --surface:#111722; --surface-2:#1a2230;
+  --border:#243044; --border-strong:#31405a;
+  --text:#eaf0fb; --text-sec:#a3b3cb; --text-ter:#7286a1;
+  --brand:#5b9dff; --brand-strong:#2b66d6; --brand-weak:#16233a;
+  --ok:#34d399; --ok-weak:#163133;
+  --warn:#fbbf24; --warn-weak:#322f22; --warn-ink:#fcd34d;
+  --danger:#f87171; --danger-weak:#31242d;
+  --ring:rgba(91,157,255,.45);
+}
+.theme-b{
+  --bg:#f1f5fa; --surface:#ffffff; --surface-2:#e9eff8;
+  --border:#dce4f0; --border-strong:#c3d0e4;
+  --text:#0f172a; --text-sec:#54637b; --text-ter:#7c8a9e;
+  --brand:#2563eb; --brand-strong:#1d4ed8; --brand-weak:#eff4ff;
+  --ok:#047857; --ok-weak:#e6f2ee;
+  --warn:#b45309; --warn-weak:#f8eee6; --warn-ink:#92400e;
+  --danger:#b91c1c; --danger-weak:#f8e8e8;
+  --ring:rgba(37,99,235,.40);
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased;padding-bottom:36px}
+.mono,code,.tnum{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+[hidden]{display:none!important}
+button{font:inherit;color:inherit}
+code{overflow-wrap:anywhere}
+/* 预览横幅 */
+.banner{display:flex;align-items:center;gap:8px;flex-wrap:wrap;background:var(--warn-weak);color:var(--warn-ink);font-size:12.5px;padding:7px 16px;border-bottom:1px solid var(--border)}
+.banner .dot{width:7px;height:7px;border-radius:50%;background:var(--warn);flex:none}
+.banner .muted{color:var(--text-ter)}
+/* 内容列宽上限 1152px（freellm P2） */
+.wrap{max-width:1184px;margin:0 auto;padding:0 16px}
+/* PageHeader */
+.ph{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap;padding:20px 0 4px}
+.ph h1{margin:0;font-size:22px;line-height:1.3;letter-spacing:.1px}
+.ph .sub{margin:5px 0 0;color:var(--text-sec);font-size:12.5px;line-height:1.6;max-width:720px}
+.ph .right{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.tbtn{height:32px;padding:0 12px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text-sec);cursor:pointer;font-size:12.5px;display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.tbtn:hover{border-color:var(--border-strong);color:var(--text)}
+.seg{display:inline-flex;gap:2px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:2px}
+.seg button{border:none;background:none;padding:5px 11px;border-radius:6px;font-size:12px;color:var(--text-sec);cursor:pointer;white-space:nowrap}
+.seg button[aria-selected="true"],.seg button[aria-pressed="true"]{background:var(--surface);color:var(--text);font-weight:650;box-shadow:0 0 0 1px var(--border-strong)}
+/* 日志级别条（显示与排障） */
+.lvbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 0;padding:8px 12px;border:1px solid var(--border);border-radius:9px;background:var(--surface)}
+.lvbar .ttl{font-size:12px;font-weight:650;color:var(--text-sec);display:inline-flex;align-items:center;gap:6px}
+.lvbar .hint{font-size:11.5px;color:var(--text-ter);line-height:1.5;flex:1;min-width:180px}
+.lvbar .hint b{color:var(--warn-ink)}
+.lvbar .sp{flex:1}
+/* 子视图切换 */
+.subbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:14px 0 0;border-bottom:1px solid var(--border);padding-bottom:0}
+.subbar .sw{display:inline-flex;gap:2px}
+.subbar .sw button{background:none;border:none;border-bottom:2px solid transparent;padding:9px 12px;font-size:13.5px;color:var(--text-ter);cursor:pointer;white-space:nowrap}
+.subbar .sw button[aria-selected="true"]{color:var(--text);border-bottom-color:var(--brand);font-weight:650}
+.subbar .sw button .n{font-size:11px;color:var(--text-ter);margin-left:5px}
+#linkChip{display:none;align-items:center;gap:7px;font-size:11.5px;padding:3px 9px;border-radius:999px;background:var(--brand-weak);color:var(--brand);border:1px solid var(--brand)}
+#linkChip.on{display:inline-flex}
+#linkChip button{border:none;background:none;color:var(--brand);cursor:pointer;font-size:11.5px;padding:0;text-decoration:underline}
+.subbar .note{margin-left:auto;font-size:11.5px;color:var(--text-ter)}
+/* Stat 网格：窄 2 列 → 宽 4 列，绝不超过 4 列（P3） */
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;margin:16px 0 0}
+@media (min-width:760px){.stats{grid-template-columns:repeat(4,1fr)}}
+.stat{border:1px solid var(--border);border-radius:10px;background:var(--surface);padding:12px 14px;min-width:0}
+.stat .k{font-size:11.5px;color:var(--text-ter);display:flex;align-items:center;gap:5px}
+.stat .v{font-size:22px;font-weight:700;margin-top:3px;font-variant-numeric:tabular-nums;letter-spacing:-.2px}
+.stat .s{font-size:11px;color:var(--text-ter);margin-top:2px}
+.stat.hot .v{color:var(--warn-ink)}
+.stat.bad .v{color:var(--danger)}
+.stat.ok .v{color:var(--ok)}
+/* 平级 Panel：全页只有这一层容器，不卡片套卡片（P2） */
+.panels{display:flex;flex-direction:column;gap:24px;margin:24px 0 0}
+.panel{border:1px solid var(--border);border-radius:12px;background:var(--surface);min-width:0}
+.panel-hd{display:flex;align-items:center;gap:8px;min-height:46px;padding:12px 16px;flex-wrap:wrap;border-bottom:1px solid var(--border)}
+.panel-hd .ico{width:16px;height:16px;flex:none;color:var(--text-ter)}
+.panel-hd h2{margin:0;font-size:13.5px;font-weight:650}
+.panel-hd .sp{flex:1}
+.panel-hd .meta{font-size:11.5px;color:var(--text-ter)}
+.panel-bd{padding:16px}
+/* 时间分布：堆叠柱 */
+.hbars{display:flex;align-items:flex-end;gap:4px;height:132px}
+.hcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;gap:1px;min-width:0;cursor:pointer;border:none;background:none;padding:0}
+.hcol:hover{filter:brightness(1.2)}
+.hcol .fail{background:var(--danger);border-radius:2px 2px 0 0;min-height:0}
+.hcol .okb{background:var(--ok);border-radius:2px 2px 0 0;min-height:0}
+.hx{display:flex;gap:4px;margin-top:6px}
+.hx span{flex:1;text-align:center;font-size:9.5px;color:var(--text-ter)}
+.lgd{display:flex;gap:12px;flex-wrap:wrap;font-size:11.5px;color:var(--text-ter)}
+.lgd i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+/* 折线图 */
+.two{display:grid;grid-template-columns:1fr;gap:16px}
+@media (min-width:860px){.two{grid-template-columns:1fr 1fr}}
+.chart{width:100%;height:120px;display:block;overflow:visible}
+.chart .grid{stroke:var(--border);stroke-width:1}
+.chart .ln{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.chart .dot{stroke:var(--surface);stroke-width:1.5}
+.chart text{font-size:9.5px;fill:var(--text-ter)}
+.pills{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.pill{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:8px;padding:5px 10px;font-size:11.5px;color:var(--text-sec);background:var(--surface-2)}
+.pill b{font-size:13px;color:var(--text);font-variant-numeric:tabular-nums}
+/* 表格：表自己只画横线，不额外加外框（P4） */
+.tblwrap{overflow-x:auto}
+table.tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+table.tbl th,table.tbl td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+table.tbl th{font-size:11px;color:var(--text-ter);font-weight:600;background:none}
+table.tbl th.sortable{cursor:pointer;user-select:none}
+table.tbl th.sortable:hover{color:var(--text-sec)}
+table.tbl th .ar{font-size:9px;margin-left:3px;color:var(--brand)}
+table.tbl td.num,table.tbl th.num{text-align:right;font-variant-numeric:tabular-nums}
+table.tbl tr.click{cursor:pointer}
+table.tbl tr.click:hover td{background:var(--surface-2)}
+table.tbl tr.det td{background:var(--surface-2);white-space:normal}
+/* 状态徽章：形状 + 符号 + 文字（不只靠颜色） */
+.bg{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 7px;border-radius:999px;border:1px solid var(--border-strong);color:var(--text-sec);white-space:nowrap;background:var(--surface-2)}
+.bg .sym{font-weight:700}
+.bg.ok{color:var(--ok);border-color:var(--ok);background:var(--ok-weak)}
+.bg.fail{color:var(--danger);border-color:var(--danger);background:var(--danger-weak)}
+.bg.warn{color:var(--warn-ink);border-color:var(--warn);background:var(--warn-weak)}
+.bg.info{color:var(--brand);border-color:var(--brand);background:var(--brand-weak)}
+.bar{display:inline-block;height:6px;border-radius:3px;background:var(--brand);vertical-align:middle}
+.bar.okc{background:var(--ok)}
+.bar.badc{background:var(--danger)}
+/* 明细工具栏 */
+.detbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:14px 0 0}
+.detbar input[type="search"],.detbar input[type="text"]{height:32px;padding:0 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:12.5px;min-width:0}
+.chip{font-size:11.5px;padding:5px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:var(--text-sec);cursor:pointer;white-space:nowrap}
+.chip[aria-pressed="true"]{border-color:var(--brand);background:var(--brand-weak);color:var(--brand);font-weight:650}
+/* 抽屉 */
+.scrim{position:fixed;inset:0;background:rgba(4,8,14,.5);opacity:0;pointer-events:none;transition:opacity .15s;z-index:40}
+.scrim.on{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;height:100%;width:min(520px,92vw);background:var(--surface);border-left:1px solid var(--border-strong);transform:translateX(101%);transition:transform .18s;z-index:41;display:flex;flex-direction:column;visibility:hidden}
+.drawer.on{transform:translateX(0);visibility:visible}
+.drawer .dh{display:flex;align-items:center;gap:8px;padding:12px 16px;border-bottom:1px solid var(--border)}
+.drawer .dh h3{margin:0;font-size:13.5px}
+.drawer .dh .sp{flex:1}
+.drawer .db{padding:14px 16px;overflow:auto}
+/* toast / foot */
+#toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);background:var(--surface-2);border:1px solid var(--border-strong);color:var(--text);padding:9px 14px;border-radius:9px;font-size:12.5px;opacity:0;pointer-events:none;transition:.18s;z-index:50;max-width:92vw}
+#toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+.foot{margin:28px 0 0;padding:14px 0 0;border-top:1px solid var(--border);font-size:11.5px;color:var(--text-ter);line-height:1.75;overflow-wrap:anywhere}
+.foot b{color:var(--text-sec)}
+.tiny{font-size:11.5px;color:var(--text-ter)}
+.muted{color:var(--text-sec)}
+.mono-s{font-family:ui-monospace,Menlo,monospace;font-size:11.5px}
+.trylist{display:flex;flex-direction:column;gap:6px;margin:8px 0 0}
+.trylist .t{display:flex;align-items:center;gap:8px;font-size:12px;flex-wrap:wrap}
+.trylist .n{width:20px;height:20px;border-radius:50%;border:1px solid var(--border-strong);display:inline-flex;align-items:center;justify-content:center;font-size:10.5px;color:var(--text-ter);flex:none}
+.trylist .e{color:var(--danger);font-family:ui-monospace,Menlo,monospace;font-size:11px}
+.kv{display:grid;grid-template-columns:88px 1fr;gap:4px 10px;font-size:12px;margin:6px 0 0}
+.kv .k{color:var(--text-ter)}
+@media (max-width:640px){
+  .ph h1{font-size:19px}
+  .hbars{height:104px;gap:3px}
+  .panel-bd{padding:12px}
+  .stat .v{font-size:19px}
+  .subbar .note{display:none}
+}
+</style>
+</head>
+<body data-page="logs-v3">
+<div class="banner"><span class="dot"></span>效果预览，不是正在运行的面板<span class="muted">· 分析数据为生产实测（233,452 条）· 明细为 24 条样例 · 单文件零外部请求</span></div>
+
+<div class="wrap">
+  <!-- PageHeader：标题 + 描述 + 右侧时间窗（freellm P2） -->
+  <div class="ph">
+    <div>
+      <h1>日志</h1>
+      <p class="sub">分析看分布，明细看单条 —— 同一份数据两个视角。<b>全部请求都在这里</b>（含未映射、失败、以及概览口径剔除的）。</p>
+    </div>
+    <div class="right">
+      <div class="seg" id="rangeSeg" role="group" aria-label="时间窗">
+        <button type="button" data-r="1h" aria-pressed="false">近 1 小时</button>
+        <button type="button" data-r="today" aria-pressed="false">今天</button>
+        <button type="button" data-r="7d" aria-pressed="true">近 7 天</button>
+        <button type="button" data-r="all" aria-pressed="false">全部</button>
+      </div>
+      <button class="tbtn" id="themeBtn" aria-pressed="false"><span id="themeLab">夜航</span></button>
+    </div>
+  </div>
+
+  <!-- 日志级别：设置性区域，薄条不抢主视图 -->
+  <div class="lvbar" id="lvbar">
+    <span class="ttl">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 13h12M4 10V6M8 10V3M12 10v-2"/></svg>
+      显示与排障
+    </span>
+    <div class="seg" id="lvSeg" role="group" aria-label="日志级别">
+      <button type="button" data-lv="debug" aria-pressed="false">debug</button>
+      <button type="button" data-lv="info" aria-pressed="true">info</button>
+      <button type="button" data-lv="warn" aria-pressed="false">warn</button>
+    </div>
+    <span class="badge-slot"><span class="bg info" id="lvNow"><span class="sym">●</span>当前 info</span></span>
+    <span class="hint">调 <b>debug</b> 能在明细里看到请求体摘要（4KB），但<b>日志量约涨 5–10 倍</b>，查完记得调回 info。</span>
+    <span class="sp"></span>
+    <button class="chip" type="button" id="lvWhy" onclick="toast('debug 还会记录每次尝试的请求/响应头；排障完请调回 info。')">什么时候该开？</button>
+  </div>
+
+  <!-- 子视图：分析 / 明细 -->
+  <div class="subbar">
+    <div class="sw" id="subsw" role="tablist" aria-label="子视图">
+      <button type="button" role="tab" data-sub="an" aria-selected="true">分析<span class="n">聚合</span></button>
+      <button type="button" role="tab" data-sub="dt" aria-selected="false">明细<span class="n">逐条</span></button>
+    </div>
+    <span id="linkChip"><span id="linkTxt">来自分析</span><button type="button" onclick="clearLink()">清除</button></span>
+    <span class="note">点分析里的柱子/行 → 明细自动带上筛选</span>
+  </div>
+
+  <!-- ==================== 分析 ==================== -->
+  <section id="viewAn" aria-label="分析">
+    <div class="stats" id="stats"></div>
+    <div class="panels">
+      <section class="panel" id="p1">
+        <div class="panel-hd">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 13h12M4 13V7M8 13V3M12 13V9"/></svg>
+          <h2>请求量时间分布</h2>
+          <span class="sp"></span>
+          <div class="seg" id="granSeg" role="group" aria-label="粒度">
+            <button type="button" data-g="hour" aria-pressed="true">按小时</button>
+            <button type="button" data-g="day" aria-pressed="false">按天</button>
+          </div>
+        </div>
+        <div class="panel-bd">
+          <div id="barsHost"></div>
+          <div class="lgd" style="margin-top:10px">
+            <span><i style="background:var(--ok)"></i>成功</span>
+            <span><i style="background:var(--danger)"></i>失败</span>
+            <span class="tiny" id="barsNote"></span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="p2">
+        <div class="panel-hd">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 12l4-5 3 3 5-7"/></svg>
+          <h2>成功率与延迟</h2>
+          <span class="sp"></span>
+          <span class="meta">近 8 天 · 每天一格</span>
+        </div>
+        <div class="panel-bd">
+          <div class="two">
+            <div>
+              <div class="tiny">成功率（%）</div>
+              <svg class="chart" id="chRate" viewBox="0 0 320 120" preserveAspectRatio="none" aria-label="成功率趋势"></svg>
+            </div>
+            <div>
+              <div class="tiny">p95 延迟（秒）</div>
+              <svg class="chart" id="chLat" viewBox="0 0 320 120" preserveAspectRatio="none" aria-label="p95 延迟趋势"></svg>
+            </div>
+          </div>
+          <div class="pills" id="pctPills"></div>
+        </div>
+      </section>
+
+      <section class="panel" id="p3">
+        <div class="panel-hd">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6"/><path d="M8 2v6l4 2"/></svg>
+          <h2>分布</h2>
+          <span class="sp"></span>
+          <div class="seg" id="distSeg" role="group" aria-label="分布维度">
+            <button type="button" data-d="model" aria-pressed="true">按模型</button>
+            <button type="button" data-d="node" aria-pressed="false">按节点</button>
+            <button type="button" data-d="err" aria-pressed="false">按错误类型</button>
+          </div>
+        </div>
+        <div class="panel-bd">
+          <div class="tblwrap"><table class="tbl" id="distTbl"></table></div>
+          <p class="tiny" style="margin:10px 0 0">点任意一行 → 跳到明细并按它筛选。</p>
+        </div>
+      </section>
+
+      <section class="panel" id="p4">
+        <div class="panel-hd">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 2v7l4 2"/><circle cx="8" cy="8" r="6"/></svg>
+          <h2>为什么慢</h2>
+          <span class="sp"></span>
+          <span class="meta">按 233,452 条实测</span>
+        </div>
+        <div class="panel-bd">
+          <div class="two">
+            <div>
+              <div class="tiny" style="margin-bottom:8px">每次请求尝试了几个节点</div>
+              <div id="retryHost"></div>
+            </div>
+            <div>
+              <div class="tiny" style="margin-bottom:8px">平均耗时拆成三段</div>
+              <div id="segHost"></div>
+              <p class="tiny" style="margin:10px 0 0">三段相加 ≠ 总耗时：差额是<b>重试空转 + 排队</b>。p99（281.1s）主要来自 <b>3 个及以上节点</b> 的 7,230 条请求。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="p5">
+        <div class="panel-hd">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6.5h12M6 6.5V13"/></svg>
+          <h2>模型维度</h2>
+          <span class="sp"></span>
+          <span class="meta">点表头排序 · 点行看该模型明细</span>
+        </div>
+        <div class="panel-bd"><div class="tblwrap"><table class="tbl" id="modelTbl"></table></div></div>
+      </section>
+
+      <section class="panel" id="p6">
+        <div class="panel-hd">
+          <svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="4" cy="4" r="2"/><circle cx="12" cy="12" r="2"/><path d="M4 6v6h6"/></svg>
+          <h2>节点维度</h2>
+          <span class="sp"></span>
+          <span class="meta">按节点名称聚合（同 IP 不同端口算不同节点）</span>
+        </div>
+        <div class="panel-bd"><div class="tblwrap"><table class="tbl" id="nodeTbl"></table></div></div>
+      </section>
+    </div>
+  </section>
+
+  <!-- ==================== 明细 ==================== -->
+  <section id="viewDt" hidden aria-label="明细">
+    <div class="detbar">
+      <div class="seg" id="schSeg" role="group" aria-label="列表方案（预览用）">
+        <button type="button" data-s="a" aria-pressed="true">方案 A · 行内展开</button>
+        <button type="button" data-s="b" aria-pressed="false">方案 B · 右侧抽屉</button>
+      </div>
+      <span class="chip" id="rangeChip" aria-pressed="false">全部时间</span>
+      <button class="chip" type="button" data-f="status" data-v="all" aria-pressed="true">全部</button>
+      <button class="chip" type="button" data-f="status" data-v="issue" aria-pressed="false">只要异常</button>
+      <button class="chip" type="button" data-f="status" data-v="fail" aria-pressed="false">只要失败</button>
+      <button class="chip" type="button" data-f="status" data-v="unmapped" aria-pressed="false">只要未映射</button>
+      <input type="search" id="kw" placeholder="搜模型 / 节点 / req_id / 错误" aria-label="搜索">
+      <span class="sp" style="flex:1"></span>
+      <span class="tiny" id="dtCount"></span>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <div class="panel-hd">
+        <h2 id="dtTitle">方案 A · 表格 + 行内展开</h2>
+        <span class="sp"></span>
+        <span class="meta">最新在上 · 点行展开「试了哪几个节点 / 为什么换 / 最后结果」</span>
+      </div>
+      <div class="panel-bd" style="padding:0 16px 12px">
+        <div class="tblwrap"><table class="tbl" id="dtTbl"><thead><tr>
+          <th>时间</th><th>模型</th><th>结果</th><th class="num">耗时</th><th class="num">尝试</th><th>节点 / 错误</th><th></th>
+        </tr></thead><tbody id="dtBody"></tbody></table></div>
+        <p class="tiny" id="dtMore" style="margin:10px 0 0"></p>
+      </div>
+    </div>
+  </section>
+
+  <p class="foot">
+    <b>骨架依据</b>：<code>docs/research/U2b-freellm-style-recipe.md</code> P2/P3/P4/P5/V1（PageHeader → Stat 网格 → 平级 Panel；Stat 最多 4 列；卡头 46px；层级靠边框不靠阴影）。
+    <b>数据</b>：分析为生产 <code>/data/call_log.jsonl</code> 全量 233,452 条实测聚合；明细 24 条样例。
+    <b>本页是效果预览</b>，落地时「方案 A/B 切换」与「粒度/时间窗」只保留后端支持的部分。
+  </p>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="dTitle">
+  <div class="dh"><h3 id="dTitle">请求详情</h3><span class="sp"></span>
+    <button class="tbtn" type="button" id="dClose">关闭</button></div>
+  <div class="db" id="dBody"></div>
+</aside>
+<div id="toast"></div>
+
+<script>
+/* =========================================================================
+   常量：分析全部来自生产 /data/call_log.jsonl（233,452 条，08-13~10-20）实测
+   ========================================================================= */
+var AGG = {
+  n: 233452, ok: 208434, fail: 25018, rate: 89.3,
+  p50: 10245, p90: 69527, p95: 115448, p99: 281139, max: 2832125,
+  days: [
+    { d: '10-13', n: 368,  rate: 83.2, p50: 12404, p95: 42801,  p99: 57456 },
+    { d: '10-14', n: 1304, rate: 89.6, p50: 9608,  p95: 46268,  p99: 84817 },
+    { d: '10-15', n: 4400, rate: 91.4, p50: 17101, p95: 109055, p99: 324066 },
+    { d: '10-16', n: 6531, rate: 98.1, p50: 12813, p95: 46430,  p99: 75959 },
+    { d: '10-17', n: 4687, rate: 62.5, p50: 10319, p95: 82126,  p99: 427059 },
+    { d: '10-18', n: 7636, rate: 40.6, p50: 6750,  p95: 47409,  p99: 100579 },
+    { d: '10-19', n: 3516, rate: 80.7, p50: 14101, p95: 61219,  p99: 143286 },
+    { d: '10-20', n: 802,  rate: 62.5, p50: 6579,  p95: 48584,  p99: 67711 }
+  ],
+  hours: [292,185,36,6,4,2,20,58,226,130,165,237,270,180,163,336,283,144,165,119,181,98,84,132],
+  hourDayRate: 80.7,
+  models: [
+    { m: 'mimo-v2.5-free',          n: 182460, rate: 91.3, p95: 133627, tok: 4023.5 },
+    { m: 'space-bunny-free',        n: 37993,  rate: 82.0, p95: 49932,  tok: 2437.7 },
+    { m: 'deepseek-v4-flash-free',  n: 4566,   rate: 97.2, p95: 69794,  tok: 365.8 },
+    { m: 'mimo-v2.6-flash-free',    n: 3683,   rate: 89.7, p95: 67862,  tok: 37.0 },
+    { m: 'deepseek-v4.1-flash-free',n: 1502,   rate: 97.7, p95: 36230,  tok: 197.1 },
+    { m: 'x-preview-f-free',        n: 1419,   rate: 89.1, p95: 145801, tok: 156.7 },
+    { m: 'space-bunny',             n: 728,    rate: 0.0,  p95: 48348,  tok: 0.0 },
+    { m: 'mimo-v2.5',               n: 624,    rate: 0.0,  p95: 5806,   tok: 0.0 }
+  ],
+  nodes: [
+    { m: '(直连 / 未选节点)',              n: 21899, rate: 67.0, avg: 15000 },
+    { m: '1::AT-45.39.96.13:5426',       n: 7021,  rate: 96.1, avg: 26000 },
+    { m: '红杏::🇨🇳 台湾01',                n: 6743,  rate: 97.1, avg: 18000 },
+    { m: '1::CR-82.23.227.103:7406',     n: 5630,  rate: 88.8, avg: 28000 },
+    { m: '1::CY-45.131.92.24:6635',      n: 5434,  rate: 31.2, avg: 13000 },
+    { m: '1::BR-45.39.2.144:6576',       n: 4918,  rate: 86.4, avg: 25000 },
+    { m: '1::ES-109.196.161.251:6699',   n: 4291,  rate: 98.9, avg: 29000 },
+    { m: '红杏::🇭🇰 香港01',                n: 4113,  rate: 88.3, avg: 17000 }
+  ],
+  errs: [
+    { m: 'upstream http 502', n: 7108 }, { m: 'upstream http 429', n: 6645 },
+    { m: 'upstream http 403', n: 3809 }, { m: 'upstream http 500', n: 3457 },
+    { m: 'upstream http 410', n: 1276 }, { m: 'upstream http 426', n: 1101 },
+    { m: 'upstream http 400', n: 718 },  { m: 'upstream http 401', n: 708 }
+  ],
+  retry: [
+    { k: '1 个节点（一次成/一次败）', n: 210412 },
+    { k: '0 个（闸门拒绝 / 未映射直接拒）', n: 11171 },
+    { k: '2 个节点', n: 4493 },
+    { k: '3 个及以上', n: 7230 }
+  ],
+  phases: { dial: 6, ttft: 9585, rest: 20396 }
+};
+
+var S = { sub: 'an', scheme: 'a', range: '7d', gran: 'hour', dist: 'model', status: 'all',
+          kw: '', lv: 'info', sortM: 'n', sortMdesc: true, sortN: 'n', sortNdesc: true,
+          link: null, openRow: null, drawerRow: null };
+
+function $(s){ return document.querySelector(s); }
+function $$(s){ return Array.prototype.slice.call(document.querySelectorAll(s)); }
+function esc(s){ return String(s === null || s === undefined ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function num(n){ return Number(n).toLocaleString('en-US'); }
+function pad(n){ return n < 10 ? '0' + n : '' + n; }
+function fmtDur(ms){
+  if (ms === null || ms === undefined) return '—';
+  if (ms < 1000) return ms + 'ms';
+  if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+  var m = Math.floor(ms / 60000), s = Math.round((ms % 60000) / 1000);
+  return m + 'm' + (s < 10 ? '0' : '') + s + 's';
+}
+function pct(n, d){ return d ? (n / d * 100).toFixed(1) + '%' : '—'; }
+
+/* =========================================================================
+   样例明细数据（24 条，按生产画像配比）
+   ========================================================================= */
+function att(n, nodeName, ok, ms, err, reason){
+  return { n: n, node: nodeName ? 'fp-' + nodeName : '直连', nodeName: nodeName || '', ok: ok, ms: ms, err: err || '', reason: reason || '' };
+}
+function rec(cfg){
+  var r = {
+    id: cfg.id, ts: cfg.ts, model: cfg.model, modelIn: cfg.modelIn || cfg.model,
+    path: cfg.path || '/v1/chat/completions', stream: cfg.stream !== false,
+    route: cfg.route || 'public', status: cfg.status || 'ok',
+    unmapped: !!cfg.unmapped, blocked: !!cfg.blocked,
+    dur: cfg.dur || 0, ttft: cfg.ttft || 0, dial: cfg.dial || 0,
+    finalStatus: cfg.finalStatus || 200,
+    pt: cfg.pt || 0, ct: cfg.ct || 0, cr: cfg.cr || 0, speed: cfg.speed || 0,
+    err: cfg.err || '', attempts: cfg.attempts || []
+  };
+  var sum = r.attempts.reduce(function(a, x){ return a + (x.ms || 0); }, 0);
+  r.retryWait = Math.max(0, r.dur - sum);
+  r.nodeNames = r.attempts.filter(function(a){ return a.node && a.node !== '直连'; }).map(function(a){ return a.nodeName; });
+  return r;
+}
+var DATA = [
+  rec({ id: 'req_10241', ts: '2026-10-20T19:43:12+08:00', model: 'deepseek-v4.1-flash-free', dur: 12400, ttft: 690, dial: 41,
+        pt: 3180, ct: 412, cr: 0, speed: 33.2, finalStatus: 200,
+        attempts: [att(1, '香港-01', true, 12300, '', '一次成功')] }),
+  rec({ id: 'req_10240', ts: '2026-10-20T19:41:55+08:00', model: 'mimo-v2.6-flash-free', dur: 31200, ttft: 1180, dial: 58,
+        pt: 12641, ct: 812, cr: 9820, speed: 27.1, finalStatus: 200,
+        attempts: [att(1, '香港-01', true, 31100, '', '一次成功')] }),
+  rec({ id: 'req_10239', ts: '2026-10-20T19:39:30+08:00', model: 'gpt-4o-mini', modelIn: 'gpt-4o-mini',
+        status: 'fail', unmapped: true, dur: 84, finalStatus: 401, stream: false,
+        err: '模型名无法映射到本部署可服务的模型 · upstream http 401 unauthorized',
+        attempts: [att(1, '', false, 82, 'http 401 · invalid model', '未映射：直接拒绝，没有发起上游请求')] }),
+  rec({ id: 'req_10238', ts: '2026-10-20T19:38:10+08:00', model: 'mimo-v2.6-flash-free', dur: 61200, ttft: 2100, dial: 63,
+        pt: 8240, ct: 1502, cr: 4100, speed: 24.4, finalStatus: 200,
+        attempts: [att(1, '香港-01', false, 2140, 'http 429 · FreeUsageLimitError · 配额用尽', '401 配额信号 → 标记该节点并换下一个'),
+                   att(2, '德国-05', true, 59000, '', '第二个节点成功')] }),
+  rec({ id: 'req_10237', ts: '2026-10-20T19:36:44+08:00', model: 'x-preview-f-free', dur: 8100, ttft: 540, dial: 35,
+        pt: 2210, ct: 306, cr: 0, speed: 30.1, finalStatus: 200,
+        attempts: [att(1, '新加坡-02', true, 8050, '', '一次成功')] }),
+  rec({ id: 'req_10236', ts: '2026-10-20T19:35:02+08:00', model: 'space-bunny-free', status: 'fail', dur: 12400, finalStatus: 502,
+        err: 'upstream http 502 bad gateway（3 个节点全部失败）',
+        attempts: [att(1, '香港-01', false, 3900, 'http 502 · bad gateway', '上游网关错误，换节点'),
+                   att(2, '日本-01', false, 4100, 'http 502 · bad gateway', '同样的 502，继续换'),
+                   att(3, '德国-05', false, 4200, 'http 502 · bad gateway', '全部候选失败，返回错误')] }),
+  rec({ id: 'req_10235', ts: '2026-10-20T19:33:20+08:00', model: 'mimo-v2.5-free', dur: 19934, ttft: 980, dial: 47,
+        pt: 6640, ct: 967, cr: 1200, speed: 29.0, finalStatus: 200,
+        attempts: [att(1, '香港-01', false, 1840, 'http 429 · quota_signal', '配额信号 → 冷却该节点'),
+                   att(2, '香港-02', true, 17900, '', '第二个节点成功')] }),
+  rec({ id: 'req_10234', ts: '2026-10-20T19:31:07+08:00', model: 'claude-sonnet-4', modelIn: 'claude-sonnet-4',
+        status: 'fail', unmapped: true, dur: 96, finalStatus: 401, stream: false,
+        err: '模型名无法映射到本部署可服务的模型 · upstream http 401 unauthorized',
+        attempts: [att(1, '', false, 94, 'http 401 · invalid model', '未映射：直接拒绝')] }),
+  rec({ id: 'req_10233', ts: '2026-10-20T19:29:41+08:00', model: 'deepseek-v4.1-flash-free', dur: 5200, ttft: 410, dial: 33,
+        pt: 980, ct: 180, cr: 0, speed: 34.6, finalStatus: 200,
+        attempts: [att(1, '香港-01', true, 5150, '', '一次成功')] }),
+  rec({ id: 'req_10232', ts: '2026-10-20T19:28:00+08:00', model: 'mimo-v2.6-flash-free', dur: 44000, ttft: 1420, dial: 52,
+        pt: 18240, ct: 1180, cr: 15600, speed: 26.8, finalStatus: 200,
+        attempts: [att(1, '日本-01', true, 43900, '', '一次成功')] }),
+  rec({ id: 'req_10231', ts: '2026-10-20T19:26:12+08:00', model: 'x-preview-f-free', status: 'fail', blocked: true, dur: 140,
+        finalStatus: 429, err: '免费层配额已耗尽 · 闸门直接拒绝（未发起上游请求）',
+        attempts: [att(1, '', false, 138, 'quota_halt · blocked', '本模型可用节点全部冷却中，闸门拒绝')] }),
+  rec({ id: 'req_10230', ts: '2026-10-20T19:24:33+08:00', model: 'mimo-v2.5-free', dur: 24300, ttft: 880, dial: 44,
+        pt: 5320, ct: 601, cr: 0, speed: 25.5, finalStatus: 200,
+        attempts: [att(1, '香港-02', false, 1520, 'http 429 · quota_signal', '配额信号 → 冷却'),
+                   att(2, '新加坡-02', false, 1680, 'http 429 · quota_signal', '又配额 → 继续换'),
+                   att(3, '日本-01', true, 21000, '', '第三个节点成功')] }),
+  rec({ id: 'req_10229', ts: '2026-10-20T19:22:15+08:00', model: 'space-bunny-free', status: 'fail', dur: 119400, finalStatus: 403,
+        err: 'upstream http 403 forbidden（5 个节点全部失败）· 累计等待 119.4s',
+        attempts: [att(1, '香港-01', false, 28400, 'http 403 · forbidden', '403 无配额签名，不算耗尽 → 换节点'),
+                   att(2, '香港-02', false, 30100, 'http 403 · forbidden', '同样 403'),
+                   att(3, '日本-01', false, 27900, 'http 403 · forbidden', '同样 403'),
+                   att(4, '新加坡-02', false, 19800, 'http 403 · forbidden', '同样 403'),
+                   att(5, '德国-05', false, 13200, 'http 403 · forbidden', '候选全部失败，返回 403')] }),
+  rec({ id: 'req_10228', ts: '2026-10-20T19:20:02+08:00', model: 'deepseek-v4.1-flash-free', dur: 2100, ttft: 330, dial: 28,
+        pt: 640, ct: 90, cr: 0, speed: 41.2, finalStatus: 200,
+        attempts: [att(1, '香港-01', true, 2050, '', '一次成功')] }),
+  rec({ id: 'req_10227', ts: '2026-10-20T19:18:40+08:00', model: 'mimo-v2.6-flash-free', dur: 97300, ttft: 3400, dial: 71,
+        pt: 22140, ct: 2210, cr: 18000, speed: 23.1, finalStatus: 200,
+        err: '', attempts: [att(1, '日本-01', false, 41200, 'stream_interrupt · 流在 41.2s 处中断', '流中断 → 换节点重试'),
+                            att(2, '新加坡-02', true, 56100, '', '第二个节点重新生成成功')] }),
+  rec({ id: 'req_10226', ts: '2026-10-20T19:15:22+08:00', model: 'big-pickle', dur: 7800, ttft: 520, dial: 39,
+        pt: 1980, ct: 240, cr: 0, speed: 33.0, finalStatus: 200,
+        attempts: [att(1, '香港-01', true, 7750, '', '一次成功')] }),
+  rec({ id: 'req_10225', ts: '2026-10-20T19:12:05+08:00', model: 'mimo-v2.5-free', dur: 15300, ttft: 760, dial: 48,
+        pt: 4120, ct: 520, cr: 0, speed: 26.2, finalStatus: 200,
+        attempts: [att(1, '香港-01', true, 15250, '', '一次成功')] }),
+  rec({ id: 'req_10224', ts: '2026-10-20T19:08:41+08:00', model: 'deepseek-v4.1-flash-free', dur: 3900, ttft: 380, dial: 31,
+        pt: 1240, ct: 148, cr: 0, speed: 36.1, finalStatus: 200,
+        attempts: [att(1, '香港-01', true, 3850, '', '一次成功')] }),
+  rec({ id: 'req_10223', ts: '2026-10-20T19:02:19+08:00', model: 'x-preview-f-free', dur: 10500, ttft: 640, dial: 36,
+        pt: 2640, ct: 388, cr: 0, speed: 31.8, finalStatus: 200,
+        attempts: [att(1, '新加坡-02', true, 10450, '', '一次成功')] }),
+  rec({ id: 'req_10222', ts: '2026-10-20T18:58:02+08:00', model: 'mimo-v2.6-flash-free', dur: 28600, ttft: 1020, dial: 55,
+        pt: 9420, ct: 742, cr: 6200, speed: 25.0, finalStatus: 200,
+        attempts: [att(1, '日本-01', true, 28550, '', '一次成功')] }),
+  rec({ id: 'req_10221', ts: '2026-10-20T18:52:33+08:00', model: 'mimo-v2.5-free', status: 'fail', dur: 16800, finalStatus: 502,
+        err: 'upstream http 502 bad gateway（2 个节点全部失败）',
+        attempts: [att(1, '香港-01', false, 8200, 'http 502 · bad gateway', '502 → 换节点'),
+                   att(2, '香港-02', false, 8500, 'http 502 · bad gateway', '全部失败，返回 502')] }),
+  rec({ id: 'req_10220', ts: '2026-10-20T18:48:10+08:00', model: 'deepseek-v4.1-flash-free', dur: 281800, ttft: 790, dial: 44,
+        pt: 4180, ct: 6120, cr: 0, speed: 21.7, finalStatus: 200,
+        attempts: [att(1, '香港-01', true, 281700, '', '一次成功（长生成，p99 级别）')] }),
+  rec({ id: 'req_10118', ts: '2026-10-19T22:14:05+08:00', model: 'mimo-v2.6-flash-free', dur: 18800, ttft: 910, dial: 50,
+        pt: 6640, ct: 560, cr: 0, speed: 27.9, finalStatus: 200,
+        attempts: [att(1, '香港-01', true, 18750, '', '一次成功')] }),
+  rec({ id: 'req_10044', ts: '2026-10-18T09:03:11+08:00', model: 'space-bunny-free', status: 'fail', dur: 9200, finalStatus: 429,
+        err: 'upstream http 429 quota_signal（2 个节点全部失败）',
+        attempts: [att(1, '香港-01', false, 4300, 'http 429 · quota_signal', '配额信号 → 换节点'),
+                   att(2, '香港-02', false, 4800, 'http 429 · quota_signal', '全部配额耗尽，返回 429')] })
+];
+
+var NOW = new Date('2026-10-20T19:45:00+08:00');
+
+function inRange(r){
+  var age = NOW.getTime() - new Date(r.ts).getTime();
+  if (S.range === '1h') return age <= 3600e3;
+  if (S.range === 'today') return r.ts.slice(0, 10) === '2026-10-20';
+  if (S.range === '7d') return age <= 7 * 86400e3;
+  return true;
+}
+function isSlow(r){ return r.dur > 60000; }
+function hasIssue(r){ return r.status !== 'ok' || r.attempts.length > 1 || isSlow(r); }
+function visible(){
+  var kw = S.kw.trim().toLowerCase();
+  return DATA.filter(function(r){
+    if (!inRange(r)) return false;
+    if (S.link && S.link.kind === 'model' && r.model !== S.link.value) return false;
+    if (S.link && S.link.kind === 'node' && r.nodeNames.indexOf(S.link.value) < 0) return false;
+    if (S.link && S.link.kind === 'err' && (r.err || '').indexOf(S.link.value) < 0) return false;
+    if (S.status === 'issue' && !hasIssue(r)) return false;
+    if (S.status === 'fail' && r.status === 'ok') return false;
+    if (S.status === 'unmapped' && !r.unmapped) return false;
+    if (kw) {
+      var hay = [r.model, r.modelIn, r.id, r.path, r.err, r.nodeNames.join(' ')].join(' ').toLowerCase();
+      if (hay.indexOf(kw) < 0) return false;
+    }
+    return true;
+  });
+}
+function badge(r){
+  if (r.unmapped) return '<span class="bg warn"><span class="sym">?</span>未映射</span>';
+  if (r.blocked) return '<span class="bg warn"><span class="sym">⊘</span>闸门拒绝</span>';
+  if (r.status !== 'ok' && isSlow(r)) return '<span class="bg fail"><span class="sym">⏱</span>超时</span>';
+  if (r.status !== 'ok') return '<span class="bg fail"><span class="sym">✕</span>失败</span>';
+  if (r.attempts.length > 1) return '<span class="bg info"><span class="sym">↻</span>重试成功</span>';
+  if (isSlow(r)) return '<span class="bg warn"><span class="sym">⏱</span>超 60s</span>';
+  return '<span class="bg ok"><span class="sym">✓</span>成功</span>';
+}
+function concl(r){
+  if (r.unmapped) return '客户端模型名 <b>' + esc(r.modelIn) + '</b> 不归本部署管，直接拒绝（没发上游请求）';
+  if (r.blocked) return '该模型可用节点全在冷却中，<b>闸门直接拒绝</b>';
+  if (r.status !== 'ok' && r.attempts.length > 1) return '试了 <b>' + r.attempts.length + '</b> 个节点全部失败，共等 <b>' + fmtDur(r.dur) + '</b>';
+  if (r.status !== 'ok') return '在 <b>' + esc(r.attempts[0].nodeName || '直连') + '</b> 失败';
+  if (r.attempts.length > 1) return '换了 <b>' + (r.attempts.length - 1) + '</b> 次，最后在 <b>' + esc(r.nodeNames[r.nodeNames.length - 1]) + '</b> 成功，共 <b>' + fmtDur(r.dur) + '</b>';
+  if (isSlow(r)) return '一次成功但慢（<b>' + fmtDur(r.dur) + '</b>）：上游首字 <b>' + fmtDur(r.ttft) + '</b>';
+  return '一次成功';
+}
+
+/* =========================================================================
+   分析：Stat 网格（2 列 → 4 列，绝不超过 4 列）
+   ========================================================================= */
+function renderStats(){
+  var st = [
+    { k: '全部请求', v: num(AGG.n), s: '含未映射 / 失败 / 被概览剔除' },
+    { k: '成功率', v: AGG.rate + '%', s: '成功 ' + num(AGG.ok) + ' · 失败 ' + num(AGG.fail), c: 'ok' },
+    { k: 'p50 延迟', v: fmtDur(AGG.p50), s: '一半请求比它快' },
+    { k: 'p95 延迟', v: fmtDur(AGG.p95), s: '20 个里 1 个比它慢', c: 'hot' },
+    { k: 'p99 延迟', v: fmtDur(AGG.p99), s: '最长 ' + fmtDur(AGG.max), c: 'hot' },
+    { k: '3+ 个节点的请求', v: num(7230), s: 'p99 主要来自这批', c: 'hot' },
+    { k: '直连 / 未选节点', v: num(21899), s: '成功率仅 67.0%' },
+    { k: '最差节点成功率', v: '31.2%', s: '1::CY-45.131.92.24:6635（5,434 次）', c: 'bad' }
+  ];
+  $('#stats').innerHTML = st.map(function(x){
+    return '<div class="stat ' + (x.c || '') + '"><div class="k">' + esc(x.k) + '</div>'
+      + '<div class="v">' + esc(x.v) + '</div><div class="s">' + esc(x.s) + '</div></div>';
+  }).join('');
+}
+
+/* 面板1：请求量时间分布（按小时/按天的 ok/fail 堆叠柱） */
+function renderBars(){
+  var host = $('#barsHost');
+  var arr, labels = [];
+  if (S.gran === 'hour') {
+    arr = AGG.hours.map(function(h){
+      var ok = Math.round(h * AGG.hourDayRate / 100);
+      return { total: h, ok: ok, fail: h - ok, label: '' };
+    });
+    labels = AGG.hours.map(function(_, i){ return i % 4 === 0 ? pad(i) : ''; });
+    $('#barsNote').textContent = '10-19 全天 3,646 条（按小时真值；成功率按当天 80.7% 折算）';
+  } else {
+    arr = AGG.days.map(function(d){
+      var ok = Math.round(d.n * d.rate / 100);
+      return { total: d.n, ok: ok, fail: d.n - ok, label: d.d };
+    });
+    labels = AGG.days.map(function(d){ return d.d; });
+    $('#barsNote').textContent = '近 8 天 29,244 条（按天真值）';
+  }
+  var max = Math.max.apply(null, arr.map(function(x){ return x.total; }));
+  host.innerHTML = '<div class="hbars">' + arr.map(function(x, i){
+    var kh = Math.max(1, Math.round(x.ok / max * 128)), fh = Math.round(x.fail / max * 128);
+    return '<button class="hcol" type="button" data-i="' + i + '" title="' + (S.gran === 'hour' ? pad(i) + ':00' : labels[i]) + ' · ' + num(x.total) + ' 条（成功 ' + num(x.ok) + ' / 失败 ' + num(x.fail) + '）" onclick="jumpHour(' + i + ')">'
+      + (fh > 0 ? '<span class="fail" style="height:' + fh + 'px"></span>' : '')
+      + '<span class="okb" style="height:' + kh + 'px"></span></button>';
+  }).join('') + '</div><div class="hx">' + labels.map(function(t){ return '<span>' + t + '</span>'; }).join('') + '</div>';
+}
+function jumpHour(i){
+  var hh = pad(i);
+  S.link = { kind: 'hour', value: hh };
+  setSub('dt');
+  renderDetail();
+  showLink('小时 = ' + hh + ':00');
+}
+
+/* 面板2：成功率 / p95 两条折线 + 关键分位 */
+function line(el, pts, color, fmtY){
+  var w = 320, h = 120, pl = 30, pr = 8, pt = 10, pb = 18;
+  var vals = pts.map(function(p){ return p.v; });
+  var mx = Math.max.apply(null, vals), mn = Math.min.apply(null, vals);
+  var span = (mx - mn) || 1;
+  var xs = pts.map(function(_, i){ return pl + i * (w - pl - pr) / (pts.length - 1); });
+  var ys = pts.map(function(p){ return pt + (h - pt - pb) * (1 - (p.v - mn) / span); });
+  var d = xs.map(function(x, i){ return (i ? 'L' : 'M') + x.toFixed(1) + ' ' + ys[i].toFixed(1); }).join(' ');
+  var grid = [0, .25, .5, .75, 1].map(function(t){
+    var y = pt + (h - pt - pb) * t;
+    return '<line class="grid" x1="' + pl + '" x2="' + (w - pr) + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>';
+  }).join('');
+  var lbl = pts.map(function(p, i){
+    return (i % 2 === 0) ? '<text x="' + xs[i].toFixed(1) + '" y="' + (h - 5) + '" text-anchor="middle">' + p.label + '</text>' : '';
+  }).join('');
+  var dots = xs.map(function(x, i){ return '<circle class="dot" cx="' + x.toFixed(1) + '" cy="' + ys[i].toFixed(1) + '" r="2.6" fill="' + color + '"/>'; }).join('');
+  el.innerHTML = '<svg viewBox="0 0 ' + w + ' ' + h + '" width="100%" height="100%" role="img">' + grid
+    + '<path class="ln" stroke="' + color + '" d="' + d + '"/>' + dots + lbl + '</svg>';
+}
+function renderCharts(){
+  line($('#chRate'), AGG.days.map(function(d){ return { label: d.d, v: d.rate }; }), 'var(--brand)');
+  line($('#chLat'), AGG.days.map(function(d){ return { label: d.d, v: d.p95 / 1000 }; }), 'var(--warn)');
+  $('#pctPills').innerHTML = [
+    ['p50', AGG.p50], ['p90', AGG.p90], ['p95', AGG.p95], ['p99', AGG.p99], ['最长', AGG.max]
+  ].map(function(x){ return '<span class="pill">' + x[0] + ' <b>' + fmtDur(x[1]) + '</b></span>'; }).join('');
+}
+
+/* 面板3：分布（模型 / 节点 / 错误） */
+function renderDist(){
+  var t = $('#distTbl');
+  var rows, head, max;
+  if (S.dist === 'model') {
+    rows = AGG.models.map(function(x){ return { k: x.m, n: x.n, rate: x.rate, p95: x.p95 }; });
+    head = '<tr><th>模型</th><th class="num">请求数</th><th class="num">占比</th><th class="num">成功率</th><th class="num">p95</th><th>进明细</th></tr>';
+    max = rows[0].n;
+    t.innerHTML = '<thead>' + head + '</thead><tbody>' + rows.map(function(x){
+      return '<tr class="click" onclick="jumpDist(\'model\', this.getAttribute(\'data-v\'))" data-v="' + esc(x.k) + '">'
+        + '<td>' + esc(x.k) + '</td><td class="num">' + num(x.n) + '</td>'
+        + '<td class="num">' + pct(x.n, AGG.n) + ' <span class="bar" style="width:' + Math.round(x.n / max * 46) + 'px"></span></td>'
+        + '<td class="num">' + x.rate + '%</td><td class="num">' + fmtDur(x.p95) + '</td><td class="tiny">→</td></tr>';
+    }).join('') + '</tbody>';
+  } else if (S.dist === 'node') {
+    rows = AGG.nodes.map(function(x){ return { k: x.m, n: x.n, rate: x.rate, p95: x.avg }; });
+    max = rows[0].n;
+    t.innerHTML = '<thead><tr><th>节点</th><th class="num">请求数</th><th class="num">占比</th><th class="num">成功率</th><th class="num">平均耗时</th><th>进明细</th></tr></thead><tbody>'
+      + rows.map(function(x){
+        return '<tr class="click" onclick="jumpDist(\'node\', this.getAttribute(\'data-v\'))" data-v="' + esc(x.k) + '">'
+          + '<td>' + esc(x.k) + '</td><td class="num">' + num(x.n) + '</td>'
+          + '<td class="num">' + pct(x.n, AGG.n) + ' <span class="bar" style="width:' + Math.round(x.n / max * 46) + 'px"></span></td>'
+          + '<td class="num">' + x.rate + '%</td><td class="num">' + fmtDur(x.p95) + '</td><td class="tiny">→</td></tr>';
+      }).join('') + '</tbody>';
+  } else {
+    rows = AGG.errs;
+    max = rows[0].n;
+    t.innerHTML = '<thead><tr><th>错误类型</th><th class="num">次数</th><th class="num">占失败</th><th>说明</th><th>进明细</th></tr></thead><tbody>'
+      + rows.map(function(x, i){
+        return '<tr class="click" onclick="jumpDist(\'err\', this.getAttribute(\'data-v\'))" data-v="' + esc(x.m) + '">'
+          + '<td class="mono-s">' + esc(x.m) + '</td><td class="num">' + num(x.n) + '</td>'
+          + '<td class="num">' + pct(x.n, AGG.fail) + ' <span class="bar badc" style="width:' + Math.round(x.n / max * 46) + 'px"></span></td>'
+          + '<td class="tiny">' + (i === 0 ? '上游网关错误（多为节点侧 5xx）' : i === 1 ? '频率限制，通常是免费额度' : i === 2 ? '上游拒绝（key/地区/策略）' : '—') + '</td><td class="tiny">→</td></tr>';
+      }).join('') + '</tbody>';
+  }
+}
+function jumpDist(kind, val){
+  var label = { model: '模型', node: '节点', err: '错误' }[kind];
+  S.link = { kind: kind, value: val };
+  S.status = 'all'; S.kw = '';
+  setSub('dt'); renderDetail();
+  showLink(label + ' = ' + val);
+}
+
+/* 面板4：为什么慢（重试分布 + 三段耗时） */
+function renderRetry(){
+  var max = AGG.retry[0].n;
+  $('#retryHost').innerHTML = AGG.retry.map(function(x){
+    var p = Math.round(x.n / max * 100);
+    return '<div style="display:grid;grid-template-columns:1fr 92px;gap:8px;align-items:center;margin-bottom:7px">'
+      + '<div><div class="tiny" style="margin-bottom:3px">' + esc(x.k) + '</div>'
+      + '<div style="height:8px;border-radius:4px;background:var(--surface-2);overflow:hidden">'
+      + '<i style="display:block;height:100%;width:' + p + '%;background:' + (x.k.indexOf('3 个') === 0 ? 'var(--danger)' : 'var(--brand)') + '"></i></div></div>'
+      + '<div class="tiny tnum" style="text-align:right">' + num(x.n) + '<br>' + pct(x.n, AGG.n) + '</div></div>';
+  }).join('');
+  var sum = AGG.phases.dial + AGG.phases.ttft + AGG.phases.rest;
+  var seg = [
+    { k: '建连', v: AGG.phases.dial, c: 'var(--brand)' },
+    { k: '等首字', v: AGG.phases.ttft, c: 'var(--ok)' },
+    { k: '生成 + 重试空转 + 排队', v: AGG.phases.rest, c: 'var(--warn)' }
+  ];
+  $('#segHost').innerHTML = '<div style="display:flex;height:14px;border-radius:7px;overflow:hidden;border:1px solid var(--border)">'
+    + seg.map(function(x){ return '<i style="display:block;height:100%;width:' + (x.v / sum * 100).toFixed(1) + '%;background:' + x.c + '"></i>'; }).join('')
+    + '</div><div class="lgd" style="margin-top:8px">'
+    + seg.map(function(x){ return '<span><i style="background:' + x.c + '"></i>' + x.k + ' <b class="tnum">' + fmtDur(x.v) + '</b></span>'; }).join('')
+    + '</div>';
+}
+
+/* 面板5/6：可排序表 */
+function sortRows(arr, key, desc){
+  return arr.slice().sort(function(a, b){
+    var x = a[key], y = b[key];
+    if (typeof x === 'string') return desc ? (y > x ? 1 : -1) : (x > y ? 1 : -1);
+    return desc ? y - x : x - y;
+  });
+}
+function renderModelTbl(){
+  var rows = sortRows(AGG.models, S.sortM, S.sortMdesc);
+  function th(k, label, cls){
+    return '<th class="' + (cls || 'num') + ' sortable" data-k="' + k + '" onclick="sortModel(\'' + k + '\')">' + label
+      + (S.sortM === k ? '<span class="ar">' + (S.sortMdesc ? '▼' : '▲') + '</span>' : '') + '</th>';
+  }
+  $('#modelTbl').innerHTML = '<thead><tr><th>模型</th>' + th('n', '请求数') + th('rate', '成功率') + th('p95', 'p95 延迟') + th('tok', 'token 消耗')
+    + '<th>进明细</th></tr></thead><tbody>'
+    + rows.map(function(x){
+      return '<tr class="click" onclick="jumpDist(\'model\', this.getAttribute(\'data-v\'))" data-v="' + esc(x.m) + '">'
+        + '<td>' + esc(x.m) + '</td><td class="num">' + num(x.n) + '</td>'
+        + '<td class="num">' + (x.rate >= 90 ? '<span class="bg ok"><span class="sym">✓</span>' + x.rate + '%</span>'
+            : x.rate === 0 ? '<span class="bg fail"><span class="sym">✕</span>0%</span>'
+            : '<span class="bg warn"><span class="sym">!</span>' + x.rate + '%</span>') + '</td>'
+        + '<td class="num">' + fmtDur(x.p95) + '</td><td class="num">' + x.tok.toFixed(1) + 'M</td><td class="tiny">→</td></tr>';
+    }).join('') + '</tbody>';
+}
+function renderNodeTbl(){
+  var rows = sortRows(AGG.nodes, S.sortN, S.sortNdesc);
+  function th(k, label){
+    return '<th class="num sortable" data-k="' + k + '" onclick="sortNode(\'' + k + '\')">' + label
+      + (S.sortN === k ? '<span class="ar">' + (S.sortNdesc ? '▼' : '▲') + '</span>' : '') + '</th>';
+  }
+  $('#nodeTbl').innerHTML = '<thead><tr><th>节点（按名称聚合）</th>' + th('n', '请求数') + th('rate', '成功率') + th('avg', '平均耗时')
+    + '<th>进明细</th></tr></thead><tbody>'
+    + rows.map(function(x){
+      var low = x.rate < 70;
+      return '<tr class="click" onclick="jumpDist(\'node\', this.getAttribute(\'data-v\'))" data-v="' + esc(x.m) + '">'
+        + '<td>' + esc(x.m) + (low ? ' <span class="bg fail"><span class="sym">!</span>偏低</span>' : '') + '</td>'
+        + '<td class="num">' + num(x.n) + '</td>'
+        + '<td class="num">' + x.rate + '%</td><td class="num">' + fmtDur(x.avg) + '</td><td class="tiny">→</td></tr>';
+    }).join('') + '</tbody>';
+}
+function sortModel(k){ if (S.sortM === k) S.sortMdesc = !S.sortMdesc; else { S.sortM = k; S.sortMdesc = true; } renderModelTbl(); }
+function sortNode(k){ if (S.sortN === k) S.sortNdesc = !S.sortNdesc; else { S.sortN = k; S.sortNdesc = true; } renderNodeTbl(); }
+
+/* =========================================================================
+   明细：方案 A（行内展开）/ 方案 B（右侧抽屉）
+   ========================================================================= */
+function detBody(r){
+  var tries = r.attempts.map(function(a){
+    return '<div class="t"><span class="n">' + a.n + '</span>'
+      + (a.ok ? '<span class="bg ok"><span class="sym">✓</span>成功</span>' : '<span class="bg fail"><span class="sym">✕</span>失败</span>')
+      + '<span class="mono-s">' + esc(a.nodeName || '直连') + '</span>'
+      + '<span class="tnum tiny">' + fmtDur(a.ms) + '</span>'
+      + (a.reason ? '<span class="tiny">' + esc(a.reason) + '</span>' : '')
+      + (a.err ? '<span class="e">' + esc(a.err) + '</span>' : '') + '</div>';
+  }).join('');
+  var extra = S.lv === 'debug'
+    ? '<div class="kv" data-debug-only="1"><span class="k">请求体摘要</span><span class="mono-s">{"model":"' + esc(r.model) + '","stream":' + r.stream + ',"messages":[…省略 4.0KB]}</span></div>'
+    : '';
+  return '<p style="margin:6px 0 0;font-size:12.5px">' + concl(r) + '</p>'
+    + '<div class="trylist">' + tries + '</div>'
+    + '<div class="kv"><span class="k">req_id</span><span class="mono-s">' + esc(r.id) + '</span>'
+    + '<span class="k">路径</span><span class="mono-s">' + esc(r.path) + '</span>'
+    + '<span class="k">耗时拆分</span><span class="tiny">建连 ' + fmtDur(r.dial) + ' · 首字 ' + fmtDur(r.ttft) + ' · 重试空转 ' + fmtDur(r.retryWait) + ' · 生成 ' + fmtDur(Math.max(0, r.dur - r.dial - r.ttft - r.retryWait)) + '</span>'
+    + '<span class="k">token</span><span class="tiny">' + num(r.pt) + ' 入 / ' + num(r.ct) + ' 出' + (r.cr ? ' / ' + num(r.cr) + ' 缓存读' : '') + '</span>'
+    + (r.err ? '<span class="k">错误</span><span class="e">' + esc(r.err) + '</span>' : '')
+    + '</div>' + extra;
+}
+function renderDetail(){
+  var list = visible();
+  $('#dtCount').textContent = '共 ' + list.length + ' 条' + (S.link ? ' · 已按' + ({ model: '模型', node: '节点', err: '错误', hour: '小时' }[S.link.kind]) + '筛选' : '');
+  $('#dtTitle').textContent = S.scheme === 'a' ? '方案 A · 表格 + 行内展开' : '方案 B · 表格 + 右侧抽屉';
+  $('#dtBody').innerHTML = list.length ? list.map(function(r, i){
+    var open = S.scheme === 'a' && S.openRow === r.id;
+    return '<tr class="click" data-id="' + esc(r.id) + '" onclick="openRow(\'' + esc(r.id) + '\')">'
+      + '<td class="mono-s">' + r.ts.slice(11, 19) + '</td>'
+      + '<td>' + esc(r.model) + '</td>'
+      + '<td>' + badge(r) + '</td>'
+      + '<td class="num">' + fmtDur(r.dur) + '</td>'
+      + '<td class="num">' + r.attempts.length + '</td>'
+      + '<td class="tiny">' + (r.nodeNames.length ? esc(r.nodeNames.join(' → ')) : (r.err ? esc(r.err) : '直连')) + '</td>'
+      + '<td class="tiny">' + (open ? '▾' : '▸') + '</td></tr>'
+      + (open ? '<tr class="det"><td colspan="7">' + detBody(r) + '</td></tr>' : '');
+  }).join('') : '<tr><td colspan="7" class="tiny" style="padding:20px 10px">这个筛选条件下没有请求 —— 清掉筛选或换时间窗。</td></tr>';
+  $('#dtMore').textContent = list.length ? '预览只放 24 条样例；真实实现按 before 游标继续加载。日志级别 = ' + S.lv + '。' : '';
+}
+function openRow(id){
+  if (S.scheme === 'a') {
+    S.openRow = S.openRow === id ? null : id;
+    renderDetail();
+  } else {
+    S.drawerRow = id;
+    var r = DATA.filter(function(x){ return x.id === id; })[0];
+    if (!r) return;
+    $('#dTitle').textContent = r.ts.slice(11, 19) + ' · ' + r.model;
+    $('#dBody').innerHTML = detBody(r);
+    $('#drawer').classList.add('on'); $('#scrim').classList.add('on');
+  }
+}
+function closeDrawer(){ $('#drawer').classList.remove('on'); $('#scrim').classList.remove('on'); S.drawerRow = null; }
+
+function showLink(txt){ $('#linkTxt').textContent = '来自分析 · ' + txt; $('#linkChip').classList.add('on'); }
+function clearLink(){
+  S.link = null; $('#linkChip').classList.remove('on');
+  renderDetail();
+}
+function setSub(s){
+  S.sub = s;
+  $$('#subsw button').forEach(function(b){ b.setAttribute('aria-selected', b.dataset.sub === s ? 'true' : 'false'); });
+  $('#viewAn').hidden = s !== 'an';
+  $('#viewDt').hidden = s !== 'dt';
+  if (s === 'an') { $('#linkChip').classList.remove('on'); }
+  if (s === 'dt') renderDetail();
+}
+function setScheme(s){
+  S.scheme = s; S.openRow = null;
+  $$('#schSeg button').forEach(function(b){ b.setAttribute('aria-pressed', b.dataset.s === s ? 'true' : 'false'); });
+  renderDetail();
+}
+
+/* =========================================================================
+   初始化 + 钩子
+   ========================================================================= */
+function renderAll(){
+  renderStats(); renderBars(); renderCharts(); renderDist(); renderRetry(); renderModelTbl(); renderNodeTbl();
+  renderDetail();
+}
+function bind(){
+  $('#subsw').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-sub]'); if (b) setSub(b.dataset.sub);
+  });
+  $('#schSeg').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-s]'); if (b) setScheme(b.dataset.s);
+  });
+  $('#rangeSeg').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-r]'); if (!b) return;
+    S.range = b.dataset.r;
+    $$('#rangeSeg button').forEach(function(x){ x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+    renderDetail();
+  });
+  $('#granSeg').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-g]'); if (!b) return;
+    S.gran = b.dataset.g;
+    $$('#granSeg button').forEach(function(x){ x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+    renderBars();
+  });
+  $('#distSeg').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-d]'); if (!b) return;
+    S.dist = b.dataset.d;
+    $$('#distSeg button').forEach(function(x){ x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+    renderDist();
+  });
+  $('#lvSeg').addEventListener('click', function(e){
+    var b = e.target.closest('button[data-lv]'); if (!b) return;
+    S.lv = b.dataset.lv;
+    $$('#lvSeg button').forEach(function(x){ x.setAttribute('aria-pressed', x === b ? 'true' : 'false'); });
+    $('#lvNow').innerHTML = '<span class="sym">●</span>当前 ' + S.lv;
+    renderDetail();
+    toast(S.lv === 'debug' ? '已开 debug：日志量会涨 5–10 倍，查完记得调回 info。' : '日志级别 = ' + S.lv);
+  });
+  $$('.detbar .chip[data-f]').forEach(function(c){
+    c.addEventListener('click', function(){
+      S.status = c.dataset.v;
+      $$('.detbar .chip[data-f]').forEach(function(x){ x.setAttribute('aria-pressed', x === c ? 'true' : 'false'); });
+      renderDetail();
+    });
+  });
+  $('#kw').addEventListener('input', function(e){ S.kw = e.target.value; renderDetail(); });
+  $('#dClose').addEventListener('click', closeDrawer);
+  $('#scrim').addEventListener('click', closeDrawer);
+  document.addEventListener('keydown', function(e){ if (e.key === 'Escape') closeDrawer(); });
+  $('#themeBtn').addEventListener('click', function(){
+    var de = document.documentElement;
+    var light = de.getAttribute('data-theme') === 'light';
+    de.setAttribute('data-theme', light ? 'dark' : 'light');
+    de.classList.toggle('theme-a', light); de.classList.toggle('theme-b', !light);
+    this.setAttribute('aria-pressed', light ? 'false' : 'true');
+    $('#themeLab').textContent = light ? '夜航' : '晨雾';
+    try { localStorage.setItem('u3sv2.theme', light ? 'dark' : 'light'); } catch (e) {}
+  });
+  try {
+    if (localStorage.getItem('u3sv2.theme') === 'light') { $('#themeLab').textContent = '晨雾'; }
+  } catch (e) {}
+}
+var toastT = null;
+function toast(msg){
+  $('#toast').textContent = msg; $('#toast').classList.add('on');
+  clearTimeout(toastT); toastT = setTimeout(function(){ $('#toast').classList.remove('on'); }, 2200);
+}
+
+window.__l3 = {
+  sub: function(s){ setSub(s); },
+  scheme: function(s){ setScheme(s); },
+  level: function(v){ $$('#lvSeg button').forEach(function(b){ if (b.dataset.lv === v) b.click(); }); },
+  range: function(r){ $$('#rangeSeg button').forEach(function(b){ if (b.dataset.r === r) b.click(); }); },
+  gran: function(g){ $$('#granSeg button').forEach(function(b){ if (b.dataset.g === g) b.click(); }); },
+  dist: function(d){ $$('#distSeg button').forEach(function(b){ if (b.dataset.d === d) b.click(); }); },
+  sortModel: sortModel, sortNode: sortNode,
+  jump: function(kind, val){ jumpDist(kind, val); },
+  jumpHour: jumpHour,
+  expandFirst: function(){ var b = $('#dtBody tr[data-id]'); if (b) b.click(); },
+  openFirst: function(){ if (S.scheme !== 'b') setScheme('b'); var b = $('#dtBody tr[data-id]'); if (b) b.click(); },
+  closeDrawer: closeDrawer,
+  counts: function(){ return { visible: visible().length, total: DATA.length }; },
+  state: function(){
+    return { sub: S.sub, scheme: S.scheme, lv: S.lv, range: S.range, gran: S.gran, dist: S.dist,
+             sortM: S.sortM, sortN: S.sortN, link: S.link,
+             drawer: $('#drawer').classList.contains('on') };
+  }
+};
+
+renderAll();
+bind();
+setSub('an');
+</script>
+</body>
+</html>
