@@ -3073,6 +3073,8 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
+			// 真实 2xx 是 probation 的唯一证据：拿到即转 available（其他状态无副作用）。
+			proxyPool.recordNodeSuccess(nodeFp)
 			// 该出口真的拿到 2xx ⇒ 喂给熔断闸门的恢复滞回（连续 2 次 + 间隔 ≥60s）。
 			// 这是本版解闩权的唯一来源：不再靠节点池状态推断该出口是否恢复。
 			quotaHaltGuard.observeSuccess(egResult.EgressKey())
@@ -3583,6 +3585,8 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
+			// 真实 2xx 是 probation 的唯一证据：拿到即转 available（其他状态无副作用）。
+			proxyPool.recordNodeSuccess(nodeFp)
 			// 同上：流式路径也必须喂恢复滞回，否则只有一半流量能积累恢复证据。
 			quotaHaltGuard.observeSuccess(egResult.EgressKey())
 			shapeDriftObserveSuccess(modelID, egResult.EgressKey(), time.Now())
