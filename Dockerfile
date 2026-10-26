@@ -17,6 +17,10 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY *.go ./
+# go:embed 的静态资产（oc_shape_v2.go 嵌入 oc_prompt_v2.txt 与 oc_tools_v2.json；
+# embed 在编译期读文件，缺了它们多架构构建必炸——2026-10-26 Docker 工作流
+# 第七批 merge 即因此失败，且 CI 本机不复现：本地构建上下文含整个工作区）。
+COPY oc_prompt_v2.txt oc_tools_v2.json ./
 COPY static/ static/
 
 RUN set -eux; \
