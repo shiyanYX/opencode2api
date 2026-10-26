@@ -400,6 +400,7 @@ func (p *nodePool) pick(force bool) *ProxyNode {
 	// 1) 不强制且当前仍可用 → 沿用
 	if !force && p.activeID != "" {
 		if cur := p.byID[p.activeID]; cur != nil && p.eligible(cur, now) {
+			p.markUsedLocked(cur, now)
 			return cur
 		}
 	}
@@ -408,6 +409,7 @@ func (p *nodePool) pick(force bool) *ProxyNode {
 		if pref := p.byID[p.manualPick]; pref != nil {
 			if !(force && pref.Fingerprint == p.activeID) && p.eligible(pref, now) {
 				p.activeID = pref.Fingerprint
+				p.markUsedLocked(pref, now)
 				return pref
 			}
 		} else {
@@ -434,7 +436,17 @@ func (p *nodePool) pick(force bool) *ProxyNode {
 	n := candidates[p.rrIndex]
 	p.rrIndex = (p.rrIndex + 1) % len(candidates)
 	p.activeID = n.Fingerprint
+	p.markUsedLocked(n, now)
 	return n
+}
+
+// markUsedLocked 记录节点最近一次被真实调用的时间（task-67：last_used_at 此前从未写入）。
+// 调用方必须持写锁。
+func (p *nodePool) markUsedLocked(n *ProxyNode, now time.Time) {
+	if n == nil {
+		return
+	}
+	n.LastUsedAt = now
 }
 
 // consumeNode 获取当前节点（不换）。等价 pick(false) 但保持返回值语义。
@@ -1102,12 +1114,14 @@ func (p *nodePool) markProbeDead(fp, reason string) {
 	}
 	now := time.Now()
 	if n.State == NodeExhausted {
+		nodeScoring.observeProbeResult(fp, n.Name, false, -1, reason, "exhausted", now)
 		slog.Debug("node health probe failed while exhausted (marker kept)",
 			"node", n.Name, "fp", fp, "error", reason,
 			"until", n.CooldownUntil.Format(time.RFC3339))
 		return
 	}
 	if n.State == NodeDead {
+		nodeScoring.observeProbeResult(fp, n.Name, false, -1, reason, "dead", now)
 		slog.Debug("node still dead (re-probe failed)",
 			"node", n.Name, "fp", fp, "error", reason)
 		return
@@ -1116,6 +1130,7 @@ func (p *nodePool) markProbeDead(fp, reason string) {
 	// （2026-10-19 生产：一轮抖动让 86 个节点同时被判死，其中至少一个 TCP 实际可达）。
 	n.ProbeFailStreak++
 	if n.ProbeFailStreak < probeFailStreakThreshold {
+		nodeScoring.observeProbeResult(fp, n.Name, false, -1, reason, "available", now)
 		slog.Info("node health probe failed (streak, not dead yet)",
 			"node", n.Name, "fp", fp, "streak", n.ProbeFailStreak,
 			"threshold", probeFailStreakThreshold, "error", reason)
@@ -1127,6 +1142,8 @@ func (p *nodePool) markProbeDead(fp, reason string) {
 	n.LastError = reason
 	n.LatencyMs = -1 // 探测失败：无效延迟（前端显示「超时」）
 	n.CooldownUntil = now.Add(p.healthIntervalLocked())
+	// task-67：判死事件进环形缓冲 + dead_marks_7d 计数
+	nodeScoring.observeProbeResult(fp, n.Name, false, -1, reason, "dead", now)
 	if p.activeID == fp {
 		p.activeID = ""
 	}
@@ -1152,6 +1169,8 @@ func (p *nodePool) recordProbeSuccess(fp string, ms int64) {
 	n.LatencyMs = ms
 	n.LastProbeAt = time.Now()
 	n.ProbeFailStreak = 0 // 探测成功即清零，避免历史抖动累积成误判
+	// task-67：探测历史环形缓冲（20 轮，落盘 scoring_state.json）+ 24h/7d 计数
+	nodeScoring.observeProbeResult(fp, n.Name, true, ms, "", n.State.String(), time.Now())
 	if n.State == NodeDead {
 		n.State = NodeAvailable
 		n.MarkedAt = time.Time{}
@@ -1558,6 +1577,7 @@ func (p *nodePool) pickForRegion(force bool, requiredRegion string) *ProxyNode {
 	n := candidates[p.rrIndex]
 	p.rrIndex = (p.rrIndex + 1) % len(candidates)
 	p.activeID = n.Fingerprint
+	p.markUsedLocked(n, now)
 	return n
 }
 
