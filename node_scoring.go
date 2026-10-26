@@ -34,7 +34,7 @@ import (
 
 const (
 	// scoringVersion 是打分模型版本（对外暴露，口径变了必须递增）。
-	scoringVersion = 1
+	scoringVersion = 2
 	// scoringStateVersion 是 scoring_state.json 的格式版本。
 	scoringStateVersion = 1
 	// scoringTrendCapacity 是每节点探测历史环形缓冲的轮数（spec §5.4：20 轮）。
@@ -47,6 +47,18 @@ const (
 	scoringBlipWindowSeconds = 600
 	// scoringStateFileName 落盘文件名（与 config.json/proxy_state.json 同目录）。
 	scoringStateFileName = "scoring_state.json"
+)
+
+// Task-109 纠偏参数（var 而非 const，便于测试/后续调参）。
+var (
+	// scoring403PoolWindow 是形态级 403 的判定窗口：窗口内不同订阅都 403 ⇒ 不归节点。
+	scoring403PoolWindow = 10 * time.Minute
+	// scoring403PoolSubs 是判定形态级 403 所需的最少不同订阅数。
+	scoring403PoolSubs = 2
+	// scoringProbeFailRamp 是探测失败惩罚的恢复斜坡：0.4 → 1.0 用时 2 小时。
+	scoringProbeFailRamp = 2 * time.Hour
+	// scoringProbeCapWindow 是「探测失败封顶 65」的时效窗口；超过后不再封顶。
+	scoringProbeCapWindow = 30 * time.Minute
 )
 
 // scoringParams 是 §0 公式的全部可调参数；默认值与 spec / 回算脚本逐项一致。
@@ -110,6 +122,24 @@ func scoringLatencyComponent(ms int64, p scoringParams) float64 {
 	}
 	v := 1.0 - (float64(ms)-p.LatFull)/(p.LatFloor-p.LatFull)*0.9
 	return math.Round(v*10000) / 10000
+}
+
+// probePenalty 是探测失败后的恢复斜坡（Task-109）：
+// 最后一次探测成功 ⇒ 1.0；否则 0.4 起步，随「最近失败」的时间线性恢复到 1.0。
+// 这样 dead 复探不再把恢复节点锁在 65 分 24 小时。
+func probePenalty(lastProbeAt, lastProbeFailAt, now time.Time) float64 {
+	if lastProbeFailAt.IsZero() || lastProbeAt.After(lastProbeFailAt) {
+		return 1.0
+	}
+	elapsed := now.Sub(lastProbeFailAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	v := 0.4 + 0.6*elapsed.Seconds()/scoringProbeFailRamp.Seconds()
+	if v > 1 {
+		v = 1
+	}
+	return v
 }
 
 // scoringBand 把 0-100 分映射成四档（§3.7）：优≥85 / 良70-84 / 观察50-69 / 停用<50。
@@ -189,10 +219,12 @@ type nodeScoringInput struct {
 	LastSuccessAt time.Time
 	LastTrafficAt time.Time
 	// 探测历史（24h/7d 计数由环形缓冲推导）
-	ProbeFail24h  int
-	DeadMarks7d   int
-	ProbeOKStreak int
-	Trend         []scoreTrendPoint
+	ProbeFail24h    int
+	LastProbeFailAt time.Time
+	DeadMarks7d     int
+	ProbeOKStreak   int
+	Pool403         int
+	Trend           []scoreTrendPoint
 }
 
 // nodeScoreView 是 /api/nodes 每节点的打分字段（字段名是前端契约，不许改）。
@@ -216,10 +248,16 @@ type nodeScoreView struct {
 	DeadMarks7d     int               `json:"dead_marks_7d"`
 	Trend           []scoreTrendPoint `json:"trend"`
 
-	// 内部排查字段：不进接口（裁定 4：不加 p50_ms/p95_ms/auto_eligible/stale 等冗余字段）
+	// Task-109 正交信号：选择器可分别使用可达性/延迟/额度/新鲜度/解锁状态。
+	Reach        float64 `json:"reach"`         // 可达性 0-1（探测分项，含失败恢复斜坡）
+	LatencyScore float64 `json:"latency_score"` // 延迟分项 0-1
+	QuotaState   string  `json:"quota_state"`   // ok|cooling
+	LastOKAgeS   int     `json:"last_ok_age_s"` // 距最近真实成功秒数；无成功 = -1
+	AutoEligible bool    `json:"auto_eligible"` // 是否可接自动流量
+
+	// 内部排查字段：不进接口（裁定 4：不加 p50_ms/p95_ms/stale 等冗余字段）
 	TierLabel        string   `json:"-"`
 	TierCN           string   `json:"-"`
-	AutoEligible     bool     `json:"-"`
 	Probe            float64  `json:"-"`
 	LatencyComponent float64  `json:"-"`
 	RawScore         float64  `json:"-"`
@@ -256,9 +294,9 @@ func scoreNode(in nodeScoringInput, ref, logNow time.Time, p scoringParams) node
 			}
 		}
 		if in.ProbeFail24h > 0 {
-			if probe > 0.4 {
-				probe = 0.4
-			}
+			// Task-109：不再 24h 一刀切压到 0.4，而是按「最近一次探测失败」的时间做恢复斜坡；
+			// 最后一次探测已成功 ⇒ 惩罚立即回到 1.0，节点恢复后能重新进入优/良。
+			probe *= probePenalty(in.LastProbeAt, in.LastProbeFailAt, logNow)
 			probeFlags = append(probeFlags, fmt.Sprintf("probe_fail_24h=%d", in.ProbeFail24h))
 		}
 	}
@@ -271,9 +309,11 @@ func scoreNode(in nodeScoringInput, ref, logNow time.Time, p scoringParams) node
 		score = raw * p.DeadFactor // 封顶 30 且保留序（不是一律 30 分，避免排序并列）
 		caps = append(caps, "dead×0.30")
 	}
-	if in.ProbeFail24h > 0 && in.State != "dead" && score > p.CapProbe24 {
+	if in.ProbeFail24h > 0 && in.State != "dead" && score > p.CapProbe24 &&
+		!in.LastProbeFailAt.IsZero() && logNow.Sub(in.LastProbeFailAt) < scoringProbeCapWindow {
+		// 只有「刚刚探测失败」才封顶；超过 30 分钟由恢复斜坡接管，不再锁死 24h。
 		score = p.CapProbe24
-		caps = append(caps, "probe_24h≤65")
+		caps = append(caps, "probe_fail≤65")
 	}
 	score = math.Round(math.Max(0, math.Min(100, score))*10) / 10
 
@@ -286,7 +326,7 @@ func scoreNode(in nodeScoringInput, ref, logNow time.Time, p scoringParams) node
 
 	tier, tierLabel, tierCN := scoringBand(score)
 	usable := in.State != "dead" && in.State != "exhausted"
-	autoEligible := in.State != "dead" && score >= 70 && in.EffN >= 20
+	autoEligible := in.State != "dead" && in.State != "exhausted" && score >= 70 && in.EffN >= 20
 
 	// ---------- reasons（顺序与 spec §4.2/§5.3 一致，最后按 level 稳定排序） ----------
 	var reasons []scoreReason
@@ -352,6 +392,10 @@ func scoreNode(in nodeScoringInput, ref, logNow time.Time, p scoringParams) node
 		reasons = append(reasons, scoreReason{Code: "env_blip", Level: "info",
 			Text: fmt.Sprintf("有 %d 次失败发生在池级抖动窗口（同窗口失败率≥50%%），已按 20%% 计责", in.BlipFails)})
 	}
+	if in.Pool403 > 0 {
+		reasons = append(reasons, scoreReason{Code: "pool_403", Level: "info",
+			Text: fmt.Sprintf("有 %d 次 403 发生在多订阅同时被拒的窗口（形态级），不计节点质量", in.Pool403)})
+	}
 	if in.QuotaEvents > 0 {
 		reasons = append(reasons, scoreReason{Code: "quota_events", Level: "low",
 			Text: fmt.Sprintf("额度耗尽 %d 次（不计质量分，只说明当前无额度）", in.QuotaEvents)})
@@ -397,6 +441,18 @@ func scoreNode(in nodeScoringInput, ref, logNow time.Time, p scoringParams) node
 		return scoringLevelOrder[reasons[i].Level] < scoringLevelOrder[reasons[j].Level]
 	})
 
+	lastOKAge := -1
+	if !in.LastSuccessAt.IsZero() && in.LastSuccessAt.Year() > 1 {
+		lastOKAge = int(logNow.Sub(in.LastSuccessAt).Seconds())
+		if lastOKAge < 0 {
+			lastOKAge = 0
+		}
+	}
+	quotaState := "ok"
+	if in.State == "exhausted" {
+		quotaState = "cooling"
+	}
+
 	view := nodeScoreView{
 		Score:           score,
 		Tier:            tier,
@@ -407,6 +463,10 @@ func scoreNode(in nodeScoringInput, ref, logNow time.Time, p scoringParams) node
 		EffectiveSample: math.Round(in.EffN*10) / 10,
 		SampleSize:      in.Attempts,
 		LowConfidence:   in.EffN < 20,
+		Reach:           math.Round(probe*1000) / 1000,
+		LatencyScore:    latS,
+		QuotaState:      quotaState,
+		LastOKAgeS:      lastOKAge,
 		AutoEligible:    autoEligible,
 		ScoreReasons:    reasons,
 		Fail: scoringFailCounts{
@@ -473,6 +533,7 @@ type scoringStats struct {
 	Fail        map[string]int `json:"fail,omitempty"`
 	QuotaEvents int            `json:"quota_events,omitempty"`
 	BlipFails   int            `json:"blip_fails,omitempty"`
+	Pool403     int            `json:"pool_403,omitempty"`
 	Excluded    int            `json:"excluded,omitempty"`
 	Unknown     int            `json:"unknown,omitempty"`
 	// 7 天半衰期衰减累加量（EffRef 是衰减参考时刻）
@@ -544,7 +605,9 @@ type nodeScoringStore struct {
 	path    string
 	nodes   map[string]*scoringStats
 	buckets map[int64]*scoringBlipBucket
-	dirty   bool
+	// sub403 记录每个订阅最近一次通用 403 的时间，用于判定形态级（多订阅同时 403）。
+	sub403 map[string]time.Time
+	dirty  bool
 
 	// 轮询游标：已归因到的最后一条 call_log 记录（TS + ReqID）
 	cursorTS    string
@@ -566,6 +629,7 @@ func newNodeScoringStore(path string) *nodeScoringStore {
 		path:    path,
 		nodes:   map[string]*scoringStats{},
 		buckets: map[int64]*scoringBlipBucket{},
+		sub403:  map[string]time.Time{},
 		nowFn:   time.Now,
 	}
 }
@@ -617,11 +681,12 @@ func (s *nodeScoringStore) bucketLocked(bucket int64) *scoringBlipBucket {
 var scoringHTTPCodeRe = regexp.MustCompile(`http\s+(\d{3})`)
 
 type scoringOutcome struct {
-	class  string  // 空 = 不是尝试结果（switch 等）
-	weight float64 // 失败权重：1.0 节点坏 / 0.5 上游抖 / 0 成功
-	counts bool    // 是否计入质量分母
-	quota  bool    // 额度耗尽（不计质量，单独计数）
-	at     time.Time
+	class   string  // 空 = 不是尝试结果（switch 等）
+	weight  float64 // 失败权重：1.0 节点坏 / 0.5 上游抖 / 0 成功
+	counts  bool    // 是否计入质量分母
+	quota   bool    // 额度耗尽（不计质量，单独计数）
+	http403 bool    // 通用 http 403：需要按订阅池做形态级判定
+	at      time.Time
 }
 
 // classifyScoringEvent 与回算脚本 aggregate.py 的 classify_event 一一对应。
@@ -658,7 +723,7 @@ func classifyScoringUpstream(detail string) scoringOutcome {
 	case code == 429 || strings.Contains(d, "quota") || strings.Contains(d, "freetier") || strings.Contains(d, "feusage"):
 		return scoringOutcome{class: "quota", quota: true}
 	case code == 401 || code == 403 || code == 410 || code == 426:
-		return scoringOutcome{class: "cred", weight: 1.0, counts: true}
+		return scoringOutcome{class: "cred", weight: 1.0, counts: true, http403: code == 403}
 	case code >= 500 && code <= 599:
 		return scoringOutcome{class: "http5xx", weight: 0.5, counts: true}
 	case code == 400 || code == 404:
@@ -684,6 +749,14 @@ func parseScoringTS(v string, fallback time.Time) time.Time {
 }
 
 // ---------- 3.2 真实调用归因（§4.2 口径） ----------
+
+// scoringSubOf 取订阅名（节点名 "::" 前缀）；没有前缀时退回节点名。
+func scoringSubOf(name string) string {
+	if i := strings.Index(name, "::"); i >= 0 {
+		return name[:i]
+	}
+	return name
+}
 
 // observeCallRecord 把一条调用日志归因进每节点统计。
 // 口径与回算脚本一致：nodes[] 中每个节点算一次尝试；events 里该节点最后一条
@@ -738,6 +811,49 @@ func (s *nodeScoringStore) observeCallRecordLocked(rec CallRecord, ts time.Time,
 		s.lastSeenTS = ts
 	}
 
+	// Task-109：先看本条记录里所有通用 403 的订阅，再叠加 10 分钟窗口内已见过的订阅。
+	// 窗口内 ≥2 个不同订阅都 403 ⇒ 形态级，本条记录的所有 403 都不计节点质量。
+	nameOf := func(fp string) string {
+		for i, n := range rec.Nodes {
+			if n == fp && i < len(rec.NodeNames) && rec.NodeNames[i] != "" {
+				return rec.NodeNames[i]
+			}
+		}
+		if st, ok := s.nodes[fp]; ok && st.Name != "" {
+			return st.Name
+		}
+		return fp
+	}
+	record403Subs := map[string]bool{}
+	for _, e := range rec.Events {
+		if e.Node == "" {
+			continue
+		}
+		if oc := classifyScoringEvent(e); !oc.http403 {
+			continue
+		}
+		sub := scoringSubOf(nameOf(e.Node))
+		if sub == "" {
+			sub = e.Node
+		}
+		record403Subs[sub] = true
+	}
+	distinct403 := map[string]bool{}
+	for sub, at := range s.sub403 {
+		if ts.Sub(at) > scoring403PoolWindow || at.Sub(ts) > scoring403PoolWindow {
+			delete(s.sub403, sub)
+			continue
+		}
+		distinct403[sub] = true
+	}
+	for sub := range record403Subs {
+		distinct403[sub] = true
+	}
+	pool403Record := len(distinct403) >= scoring403PoolSubs
+	for sub := range record403Subs {
+		s.sub403[sub] = ts
+	}
+
 	for i, fp := range rec.Nodes {
 		if fp == "" {
 			continue
@@ -760,10 +876,25 @@ func (s *nodeScoringStore) observeCallRecordLocked(rec CallRecord, ts time.Time,
 		case has && !oc.counts:
 			st.Excluded++
 			continue
+		case has && oc.http403:
+			// 形态级 403：不计质量、不记失败分类，只留痕给面板解释。
+			if pool403Record {
+				st.Pool403++
+				continue
+			}
+			st.Attempts++
+			st.addFail(oc.class)
+			if blip {
+				// Task-109：抖动窗口内失败只压分母（20%），分子绝不加分。
+				st.EffN += w * scoringBlipFactor
+				st.BlipFails++
+			} else {
+				st.EffN += w
+			}
 		case has:
 			st.Attempts++
-			st.EffN += w
 			if oc.class == "connect_ok" || oc.weight == 0 {
+				st.EffN += w
 				st.Success++
 				st.EffS += w
 				if ts.After(st.LastSuccessAt) {
@@ -772,12 +903,14 @@ func (s *nodeScoringStore) observeCallRecordLocked(rec CallRecord, ts time.Time,
 				continue
 			}
 			st.addFail(oc.class)
-			blame := oc.weight
 			if blip {
-				blame *= scoringBlipFactor
+				// Task-109：blip 失败只压分母（20%），不再折算成 0.8 个成功。
+				st.EffN += w * scoringBlipFactor
 				st.BlipFails++
+			} else {
+				st.EffN += w
+				st.EffS += w * (1.0 - oc.weight) // 非抖动失败按「1 - 权重」折算成功质量
 			}
-			st.EffS += w * (1.0 - blame) // 失败按「1 - 权重」折算成功质量
 		case fp == serving:
 			st.Attempts++
 			st.Success++
@@ -848,6 +981,10 @@ func (s *nodeScoringStore) observeProbe(o probeObservation) {
 			st.LatencyMs = o.LatencyMs
 		}
 		st.LastProbeError = ""
+		if st.ProbeOKStreak >= 2 {
+			// Task-109：连续 2 次探测成功 ⇒ 恢复，清空 24h 失败序列（解除封顶/原因）。
+			st.ProbeFailTimes = nil
+		}
 	} else {
 		st.ProbeOKStreak = 0
 		st.ProbeFailStreak++
@@ -895,24 +1032,37 @@ func (s *nodeScoringStore) currentScoreLocked(st *scoringStats, now time.Time, s
 	cp := *st
 	cp.decayTo(now)
 	in := nodeScoringInput{
-		State:         state,
-		LatencyMs:     cp.LatencyMs,
-		LastProbeAt:   cp.LastProbeAt,
-		LastError:     cp.LastProbeError,
-		Attempts:      cp.Attempts,
-		Success:       cp.Success,
-		Fail:          cp.Fail,
-		QuotaEvents:   cp.QuotaEvents,
-		BlipFails:     cp.BlipFails,
-		EffS:          cp.EffS,
-		EffN:          cp.EffN,
-		LastSuccessAt: cp.LastSuccessAt,
-		LastTrafficAt: cp.LastTrafficAt,
-		ProbeFail24h:  countSince(cp.ProbeFailTimes, now.Add(-24*time.Hour)),
-		DeadMarks7d:   len(cp.DeadMarkTimes),
-		ProbeOKStreak: cp.ProbeOKStreak,
+		State:           state,
+		LatencyMs:       cp.LatencyMs,
+		LastProbeAt:     cp.LastProbeAt,
+		LastError:       cp.LastProbeError,
+		Attempts:        cp.Attempts,
+		Success:         cp.Success,
+		Fail:            cp.Fail,
+		QuotaEvents:     cp.QuotaEvents,
+		BlipFails:       cp.BlipFails,
+		EffS:            cp.EffS,
+		EffN:            cp.EffN,
+		LastSuccessAt:   cp.LastSuccessAt,
+		LastTrafficAt:   cp.LastTrafficAt,
+		ProbeFail24h:    countSince(cp.ProbeFailTimes, now.Add(-24*time.Hour)),
+		LastProbeFailAt: lastTime(cp.ProbeFailTimes),
+		DeadMarks7d:     len(cp.DeadMarkTimes),
+		ProbeOKStreak:   cp.ProbeOKStreak,
+		Pool403:         cp.Pool403,
 	}
 	return scoreNode(in, now, now, defaultScoringParams)
+}
+
+// lastTime 返回列表里最晚的时间戳（空列表 ⇒ 零值）。
+func lastTime(list []time.Time) time.Time {
+	var last time.Time
+	for _, t := range list {
+		if t.After(last) {
+			last = t
+		}
+	}
+	return last
 }
 
 // countSince 统计列表中晚于 cut 的条数。
@@ -983,24 +1133,26 @@ func (s *nodeScoringStore) scoreSnapshot(inputs []nodeScoringSnapshotInput, now 
 		cp.decayTo(now)
 		ni := nodeScoringInput{
 			FP: in.FP, Name: in.Name,
-			State:         in.State,
-			LatencyMs:     in.LatencyMs,
-			LastProbeAt:   in.LastProbeAt,
-			LastError:     in.LastError,
-			CooldownUntil: in.CooldownUntil,
-			Attempts:      cp.Attempts,
-			Success:       cp.Success,
-			Fail:          cp.Fail,
-			QuotaEvents:   cp.QuotaEvents,
-			BlipFails:     cp.BlipFails,
-			EffS:          cp.EffS,
-			EffN:          cp.EffN,
-			LastSuccessAt: cp.LastSuccessAt,
-			LastTrafficAt: cp.LastTrafficAt,
-			ProbeFail24h:  countSince(cp.ProbeFailTimes, now.Add(-24*time.Hour)),
-			DeadMarks7d:   len(cp.DeadMarkTimes),
-			ProbeOKStreak: cp.ProbeOKStreak,
-			Trend:         cp.Trend,
+			State:           in.State,
+			LatencyMs:       in.LatencyMs,
+			LastProbeAt:     in.LastProbeAt,
+			LastError:       in.LastError,
+			CooldownUntil:   in.CooldownUntil,
+			Attempts:        cp.Attempts,
+			Success:         cp.Success,
+			Fail:            cp.Fail,
+			QuotaEvents:     cp.QuotaEvents,
+			BlipFails:       cp.BlipFails,
+			EffS:            cp.EffS,
+			EffN:            cp.EffN,
+			LastSuccessAt:   cp.LastSuccessAt,
+			LastTrafficAt:   cp.LastTrafficAt,
+			ProbeFail24h:    countSince(cp.ProbeFailTimes, now.Add(-24*time.Hour)),
+			LastProbeFailAt: lastTime(cp.ProbeFailTimes),
+			DeadMarks7d:     len(cp.DeadMarkTimes),
+			ProbeOKStreak:   cp.ProbeOKStreak,
+			Pool403:         cp.Pool403,
+			Trend:           cp.Trend,
 		}
 		view := scoreNode(ni, now, now, defaultScoringParams)
 		if view.LastError == nil && in.LastError != "" {
