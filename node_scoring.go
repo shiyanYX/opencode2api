@@ -599,6 +599,18 @@ type scoringBlipBucket struct {
 	Fail int `json:"fail"`
 }
 
+// scoring403Contribution 是窗口内一条已计入质量的通用 403，用于形态级回溯扣除。
+// Weight 是实际加到 EffN 的权重（blip 内为 0.2w）；Historical 表示权重已按证据年龄
+// 折算到回填参考时刻（回填阶段不再随时间衰减）。
+type scoring403Contribution struct {
+	FP         string
+	Sub        string
+	At         time.Time
+	Weight     float64
+	Blip       bool
+	Historical bool
+}
+
 // nodeScoringStore 维护全部节点的打分状态。
 type nodeScoringStore struct {
 	mu      sync.Mutex
@@ -607,7 +619,11 @@ type nodeScoringStore struct {
 	buckets map[int64]*scoringBlipBucket
 	// sub403 记录每个订阅最近一次通用 403 的时间，用于判定形态级（多订阅同时 403）。
 	sub403 map[string]time.Time
-	dirty  bool
+	// contribs403 保留 10 分钟窗口内已计入质量的逐条 403，触发形态级时回溯扣除。
+	contribs403 []scoring403Contribution
+	// pool403ActiveUntil 是「形态级 403 生效中」的窗口终点：期间后续 403 直接不计质量。
+	pool403ActiveUntil time.Time
+	dirty              bool
 
 	// 轮询游标：已归因到的最后一条 call_log 记录（TS + ReqID）
 	cursorTS    string
@@ -773,6 +789,44 @@ func (s *nodeScoringStore) observeCallRecord(rec CallRecord, now time.Time) {
 	s.observeCallRecordLocked(rec, ts, bucket, false, now)
 }
 
+// revertPool403Locked 把 10 分钟窗口内已计入质量的 403 全部回溯扣除：
+// 分子不变（403 本来就是 0 分子），分母/Attempts/Fail.Cred/BlipFails 回退，
+// 并给对应节点记一次 Pool403（面板原因 pool_403）。调用方持锁。
+func (s *nodeScoringStore) revertPool403Locked(ts time.Time) {
+	kept := s.contribs403[:0]
+	for _, c := range s.contribs403 {
+		dt := ts.Sub(c.At)
+		if dt > scoring403PoolWindow || dt < -scoring403PoolWindow {
+			// 窗口外的贡献不再回溯，直接从账本丢弃（已计入的状态保留）。
+			continue
+		}
+		st := s.nodeLocked(c.FP)
+		st.decayTo(ts)
+		factor := 1.0
+		if !c.Historical && dt > 0 {
+			factor = math.Pow(0.5, dt.Hours()/24/scoringHalfLifeDays)
+		}
+		st.EffN -= c.Weight * factor
+		if st.EffN < 0 {
+			st.EffN = 0
+		}
+		if st.Attempts > 0 {
+			st.Attempts--
+		}
+		if st.Fail != nil {
+			st.Fail["cred"]--
+			if st.Fail["cred"] <= 0 {
+				delete(st.Fail, "cred")
+			}
+		}
+		if c.Blip && st.BlipFails > 0 {
+			st.BlipFails--
+		}
+		st.Pool403++
+	}
+	s.contribs403 = kept
+}
+
 // observeCallRecordLocked 是归因实现（调用方持锁）。
 // historical=true 时用「证据年龄」作为衰减权重（回填历史日志）；实时记录权重为 1。
 func (s *nodeScoringStore) observeCallRecordLocked(rec CallRecord, ts time.Time, bucket int64, historical bool, now time.Time) {
@@ -812,7 +866,8 @@ func (s *nodeScoringStore) observeCallRecordLocked(rec CallRecord, ts time.Time,
 	}
 
 	// Task-109：先看本条记录里所有通用 403 的订阅，再叠加 10 分钟窗口内已见过的订阅。
-	// 窗口内 ≥2 个不同订阅都 403 ⇒ 形态级，本条记录的所有 403 都不计节点质量。
+	// 窗口内 ≥2 个不同订阅都 403 ⇒ 形态级；一旦成立，回溯扣除窗口内已计入的 403，
+	// 并在 pool403ActiveUntil 之前把后续 403 都直接视为形态级（不再逐条记账）。
 	nameOf := func(fp string) string {
 		for i, n := range rec.Nodes {
 			if n == fp && i < len(rec.NodeNames) && rec.NodeNames[i] != "" {
@@ -825,6 +880,7 @@ func (s *nodeScoringStore) observeCallRecordLocked(rec CallRecord, ts time.Time,
 		return fp
 	}
 	record403Subs := map[string]bool{}
+	record403NodeSub := map[string]string{}
 	for _, e := range rec.Events {
 		if e.Node == "" {
 			continue
@@ -837,19 +893,37 @@ func (s *nodeScoringStore) observeCallRecordLocked(rec CallRecord, ts time.Time,
 			sub = e.Node
 		}
 		record403Subs[sub] = true
+		record403NodeSub[e.Node] = sub
 	}
-	distinct403 := map[string]bool{}
+	// 丢弃窗口外的订阅记录与逐条贡献（不再参与回溯）。
 	for sub, at := range s.sub403 {
 		if ts.Sub(at) > scoring403PoolWindow || at.Sub(ts) > scoring403PoolWindow {
 			delete(s.sub403, sub)
-			continue
 		}
+	}
+	kept := s.contribs403[:0]
+	for _, c := range s.contribs403 {
+		if d := ts.Sub(c.At); d <= scoring403PoolWindow && d >= -scoring403PoolWindow {
+			kept = append(kept, c)
+		}
+	}
+	s.contribs403 = kept
+
+	distinct403 := map[string]bool{}
+	for sub := range s.sub403 {
 		distinct403[sub] = true
 	}
 	for sub := range record403Subs {
 		distinct403[sub] = true
 	}
-	pool403Record := len(distinct403) >= scoring403PoolSubs
+	pool403Record := len(record403Subs) > 0 &&
+		(len(distinct403) >= scoring403PoolSubs || (!s.pool403ActiveUntil.IsZero() && ts.Before(s.pool403ActiveUntil)))
+	if pool403Record {
+		// 回溯扣除窗口内所有已计入的 403（含更早记录），并保持「生效中」窗口。
+		// 只有携带 403 的记录才续期；普通成功记录不会把生效窗口无限延长。
+		s.revertPool403Locked(ts)
+		s.pool403ActiveUntil = ts.Add(scoring403PoolWindow)
+	}
 	for sub := range record403Subs {
 		s.sub403[sub] = ts
 	}
@@ -884,13 +958,17 @@ func (s *nodeScoringStore) observeCallRecordLocked(rec CallRecord, ts time.Time,
 			}
 			st.Attempts++
 			st.addFail(oc.class)
+			added := w
 			if blip {
 				// Task-109：抖动窗口内失败只压分母（20%），分子绝不加分。
-				st.EffN += w * scoringBlipFactor
+				added = w * scoringBlipFactor
 				st.BlipFails++
-			} else {
-				st.EffN += w
 			}
+			st.EffN += added
+			s.contribs403 = append(s.contribs403, scoring403Contribution{
+				FP: fp, Sub: record403NodeSub[fp], At: ts,
+				Weight: added, Blip: blip, Historical: historical,
+			})
 		case has:
 			st.Attempts++
 			if oc.class == "connect_ok" || oc.weight == 0 {

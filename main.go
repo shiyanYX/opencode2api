@@ -31,14 +31,18 @@ import (
 // 全局超时会误杀正常流（context deadline exceeded while reading body）。
 // 改用 Transport 级超时：DialContext 保护连接阶段，TLSHandshakeTimeout 保护握手阶段，
 // ResponseHeaderTimeout 保护头部阶段，Body 读取阶段不设超时，由上游关闭连接自然结束。
+// directDialer 直连出口的拨号器（T3：建连上限 = connectTimeout，8s）。
+// 抽成包级变量是为了让测试能直接断言它的 Timeout（而不是重跑一次真拨号）。
+var directDialer = &net.Dialer{
+	Timeout:   connectTimeout,
+	KeepAlive: 30 * time.Second,
+}
+
 var httpClient = &http.Client{
 	Transport: &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   10 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           directDialer.DialContext,
 		TLSHandshakeTimeout:   tlsHandshakeTimeout,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: firstByteTimeout,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
@@ -2835,11 +2839,44 @@ func maxAttemptsForUpstreamStatus(status int) int {
 // 流式路径同样只做墙钟检查（body 在函数返回后继续读，由空闲读超时保护）。
 var upstreamLoopBudget = 120 * time.Second
 
+// isFirstByteTimeout 判断这次 attempt 的失败是否发生在「已建连、等响应头 / 首 token」
+// 阶段（Go 原生 Transport 与 BunTransport 的错误串都含 timeout awaiting response headers）。
+//
+// 这类超时不是出口不通：连接其实已经建立，只是首 token 慢（本上游的响应头几乎与首个
+// data: 同时到达）。节点对 ttft 的 ICC=0.0%（05-latency.md §0），换节点救不回来，所以
+// 【不能】把节点判死（T3 评审 F2）。
+func isFirstByteTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "timeout awaiting response headers")
+}
+
+// noteAttemptTransportError 统一一次传输层失败的事件记账与节点记账，两个重试循环共用。
+// 返回 firstByteTimeout：调用方据此决定是否仍需 mark(NodeDead) 以及 switch 事件的 reason。
+func noteAttemptTransportError(ctx context.Context, pool *nodePool, nodeFp string, err error) (firstByteTimeout bool) {
+	firstByteTimeout = isFirstByteTimeout(err)
+	if firstByteTimeout {
+		// 复用既有的 ttft_timeout 事件类型（面板文案「首字超时」、聚合归 timeout），
+		// 不与 connect_error 混用 —— 后者在 node_scoring 里按节点连接失败 1.0 计权。
+		callLogEvent(ctx, "ttft_timeout", nodeFp, err.Error())
+		return true
+	}
+	callLogEvent(ctx, "connect_error", nodeFp, err.Error())
+	// 连接错误（EOF、建连超时等）：标记节点为 dead，避免后续请求继续命中坏节点。
+	// 无论是否还有重试预算都要标记，否则最后一次失败会让坏节点长期留在池中。
+	// 池级 halt 期间不 mark（与 T2「halt 期间不 mark 任何节点」的硬约束一致）。
+	if nodeFp != "" && !pool.poolHalted(time.Now()) {
+		pool.mark(nodeFp, NodeDead, "connect_error:"+err.Error())
+	}
+	return false
+}
+
 func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) ([]byte, int, http.Header, error) {
 	// 配额熔断闸门：节点池无可用节点且直连出口已被上游 429 限流时，
 	// 直接返回 429，不再访问上游（见 quota_halt.go）。
 	if halted, haltBody := quotaHaltGuard.gate(auth); halted {
-		return quotaHaltResponse(ctx, haltBody)
+		return quotaHaltResponse(ctx, modelID, haltBody)
 	}
 	initOCSession()
 
@@ -2890,6 +2927,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	// 免费额度耗尽自动切节点：独立预算（默认 5 个节点），不占用重试闸门；
 	// 循环上限 = 重试上限 + 配额预算，两者各自封顶互不挤占（重试仍由 canRetry 限制）。
 	nodeSwitchPending := false
+	trialSwitchPending := false // 上一次 shape 半开试探放行后，等待本次选到新出口
 	quotaSwitches := 0
 	versionRefreshed := false // 426 时只刷新一次版本，避免无谓循环
 	versionReverted := false  // 403(版本过新) 时只回退一次版本
@@ -2906,7 +2944,13 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	for attempt := 0; attempt < loopBudget; attempt++ {
 		// T2：池级 403 halt 期间不再换节点、不再发新 attempt，fail-fast。
 		if proxyPool.poolHalted(time.Now()) {
-			callLogEvent(ctx, "switch", proxyPool.currentFp(), "reason=pool_halt candidates=0")
+			fp := proxyPool.currentFp()
+			wouldBe := EgressKeyDirect
+			if fp != "" {
+				wouldBe = nodeEgressKey(fp)
+			}
+			callLogSwitchEvent(ctx, fp, "pool_halt", "pool_halt", 0)
+			callLogSuppressedAttempt(ctx, modelID, fp, "pool_halt", wouldBe, nil)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
 		}
 		// 请求级总预算：到点就收手，不再叠加等待（砍掉 135s 的病态尾部）。
@@ -2917,11 +2961,13 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				"elapsed_ms", time.Since(upstreamLoopStart).Milliseconds())
 			break
 		}
-		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		blockedEgress := shapeDriftBlockedEgress(modelID, time.Now())
+		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
 		switchCandidates := proxyPool.lastSwitchCandidates()
 		if proxyPool.poolHalted(time.Now()) {
 			// 另一个请求可能在本次 egress.Get 期间刚触发 halt：不能再直连/发请求。
-			callLogEvent(ctx, "switch", egResult.NodeFP, "reason=pool_halt candidates=0")
+			callLogSwitchEvent(ctx, egResult.NodeFP, "pool_halt", "pool_halt", 0)
+			callLogSuppressedAttempt(ctx, modelID, egResult.NodeFP, "pool_halt", egResult.EgressKey(), nil)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
 		}
 		// 免费层（zen）请求经 BunTransport 发出：TLS 指纹是 v2 gate 的硬前提
@@ -2930,12 +2976,28 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		if !useGoEndpoint {
 			egResult = bunEgressResult(egResult)
 		}
+		if trialSwitchPending {
+			shapeDriftSetTrialEgress(modelID, egResult.EgressKey(), time.Now())
+			trialSwitchPending = false
+		}
+		if auth.tier() == TierFree && proxyPool.nodeCount() > 0 && egResult.Direct &&
+			!proxyPool.hasEligibleNode() {
+			// 节点全部在冷却/判死：本次尝试实际落到了直连，节点侧尝试没有发出。
+			callLogSuppressedAttempt(ctx, modelID, "", "node_cooldown", EgressKeyDirect, nil)
+		}
+		if blockedEgress[egResult.EgressKey()] {
+			// 选路把所有已知 429 出口都排除了；宁可 fail-fast 也不能烧新 IP。
+			egResult.Invalidate()
+			callLogEvent(ctx, "shape_drift", egResult.NodeFP, "all_egress_blocked")
+			callLogSuppressedAttempt(ctx, modelID, egResult.NodeFP, "shape_drift", egResult.EgressKey(), sortedBlockedKeys(blockedEgress))
+			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("shape drift: all egress candidates are in the 429 set")
+		}
 		client, nodeFp := egResult.Client, egResult.NodeFP
 		if nodeFp != "" {
 			proxyPool.noteAttempt(nodeFp, time.Now())
 		}
 		if nodeFp == "" && proxyPool.allSubsQuarantined(time.Now()) {
-			callLogEvent(ctx, "switch", "", "reason=sub_quarantine candidates=0")
+			callLogSwitchEvent(ctx, "", "all_subscriptions_quarantined", "sub_quarantine", 0)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("all subscriptions quarantined after 403")
 		}
 		// I2：本 attempt 实际发出的 UA 版本由本请求自己携带（builder 不再读全局），
@@ -2967,10 +3029,12 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 		// C-5：喂节点层告警样本。口径是【传输层】——拿到任何上游响应（含 403/429）
 		// 都说明这条出口是通的；账号级限流不该记到节点头上。direct 出口不计。
-		nodeAlerts.recordNodeAttempt(nodeFp != "", err == nil)
+		// 首字节超时（error string 含 timeout awaiting response headers）说明连接已建好，
+		// 同样是「出口可达」，不能记成传输失败（T3 复审 N2）。
+		nodeAlerts.recordNodeAttempt(nodeFp != "", err == nil || isFirstByteTimeout(err))
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
-			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
+			firstByteTimeout := noteAttemptTransportError(ctx, proxyPool, nodeFp, err)
 			lastErr = err
 			lastStatus = 0
 			retryReason := "transport_error"
@@ -2989,14 +3053,15 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				"node_name", proxyPool.nameOf(nodeFp),
 				"error", err.Error(),
 			)
-			// 连接错误（EOF 等）：标记节点为 dead，避免后续请求继续命中坏节点。
-			// 无论是否还有重试预算都要标记，否则最后一次失败会让坏节点长期留在池中。
-			if nodeFp != "" {
-				proxyPool.mark(nodeFp, NodeDead, "connect_error:"+err.Error())
-			}
+			// 首字节超时已在 noteAttemptTransportError 里跳过 mark（F2）；这里保持
+			// 原有的重试/换节点行为不变。
 			if canRetry {
 				if nodeFp != "" {
-					callLogEvent(ctx, "switch", nodeFp, "connect_error:"+err.Error()+fmt.Sprintf(" reason=switch_after_fail candidates=%d", switchCandidates))
+					reason := "connect_error"
+					if firstByteTimeout {
+						reason = "ttft_timeout"
+					}
+					callLogSwitchEvent(ctx, nodeFp, reason+":"+err.Error(), "switch_after_fail", switchCandidates)
 				}
 				client.CloseIdleConnections()
 				egResult.Invalidate()
@@ -3011,6 +3076,8 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			// 该出口真的拿到 2xx ⇒ 喂给熔断闸门的恢复滞回（连续 2 次 + 间隔 ≥60s）。
 			// 这是本版解闩权的唯一来源：不再靠节点池状态推断该出口是否恢复。
 			quotaHaltGuard.observeSuccess(egResult.EgressKey())
+			// 429 漂移守卫：任一出口真实 2xx 立即解除该 model 的闩（半开试探成功亦然）。
+			shapeDriftObserveSuccess(modelID, egResult.EgressKey(), time.Now())
 			b, readErr := readAllMarkingFirstData(resp.Body, ctx)
 			resp.Body.Close()
 			if readErr != nil {
@@ -3043,19 +3110,21 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 					callLogEvent(ctx, "freetier_confirm_rejected_version_changed", pendingBadFp,
 						fmt.Sprintf("failed_ver=%s confirm_ver=%s", pendingVer, attemptVer))
 				} else if nodeFp != "" && nodeFp != pendingBadFp {
-					// T2：请求最终成功才把之前的 403 记成「已确认」并喂订阅级熔断。
-					proxyPool.confirmSub403(pendingBadFp, time.Now())
-					if proxyPool.poolHalted(time.Now()) {
-						// T2 硬约束：池级 halt 期间不 mark 任何节点。
-						callLogEvent(ctx, "freetier_confirm_suppressed", pendingBadFp, "suppressed:pool_halt")
-						log.Warn("freetier_confirm_suppressed", "node", proxyPool.nameOf(pendingBadFp), "reason", "pool_halt")
-					} else if ok, why := proxyPool.freeTierMarkAllowed(); ok {
-						proxyPool.markFreeTierRejected(pendingBadFp)
-						callLogEvent(ctx, "freetier_node_confirmed_bad", pendingBadFp,
-							fmt.Sprintf("confirmed_ip_rejected failed_ver=%s confirm_ver=%s switches=%d", pendingVer, attemptVer, freeTierSwitches))
-						log.Warn("freetier_node_confirmed_bad",
-							"bad", proxyPool.nameOf(pendingBadFp), "ok", proxyPool.nameOf(nodeFp),
-							"failed_ver", pendingVer, "confirm_ver", attemptVer)
+					// T2/R2：先判定 halt/shape_latch/pool_floor；被抑制则完全不计订阅 strike。
+					why, allowed := proxyPool.freeTierConfirmAllowed(time.Now())
+					if allowed {
+						if proxyPool.markFreeTierRejected(pendingBadFp) {
+							proxyPool.confirmSub403(pendingBadFp, time.Now())
+							callLogEvent(ctx, "freetier_node_confirmed_bad", pendingBadFp,
+								fmt.Sprintf("confirmed_ip_rejected failed_ver=%s confirm_ver=%s switches=%d", pendingVer, attemptVer, freeTierSwitches))
+							log.Warn("freetier_node_confirmed_bad",
+								"bad", proxyPool.nameOf(pendingBadFp), "ok", proxyPool.nameOf(nodeFp),
+								"failed_ver", pendingVer, "confirm_ver", attemptVer)
+						} else {
+							why = "mark_failed"
+							callLogEvent(ctx, "freetier_confirm_suppressed", pendingBadFp, "suppressed:"+why)
+							log.Warn("freetier_confirm_suppressed", "node", proxyPool.nameOf(pendingBadFp), "reason", why)
+						}
 					} else {
 						callLogEvent(ctx, "freetier_confirm_suppressed", pendingBadFp, "suppressed:"+why)
 						log.Warn("freetier_confirm_suppressed", "node", proxyPool.nameOf(pendingBadFp), "reason", why)
@@ -3074,7 +3143,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 		// T2 硬约束：halt 期间不 mark、不换节点；本请求若在飞行中撞上 halt，也立即失败。
 		if proxyPool.poolHalted(time.Now()) {
-			callLogEvent(ctx, "switch", nodeFp, fmt.Sprintf("reason=pool_halt candidates=%d", switchCandidates))
+			callLogSwitchEvent(ctx, nodeFp, "pool_halt", "pool_halt", switchCandidates)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
 		}
 
@@ -3087,7 +3156,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				"current_version", ocClientVer,
 				"min_required", minFreeTierOCVersion,
 			)
-			callLogEvent(ctx, "switch", nodeFp, "upgrade_required:refresh_version")
+			callLogSwitchEvent(ctx, nodeFp, "upgrade_required:refresh_version", "switch_after_fail", switchCandidates)
 			refreshOCSession()
 			continue
 		}
@@ -3102,7 +3171,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				"model", modelID,
 				"to", pinnedOCVersion,
 			)
-			callLogEvent(ctx, "switch", nodeFp, "freetier:revert_version")
+			callLogSwitchEvent(ctx, nodeFp, "freetier:revert_version", "switch_after_fail", switchCandidates)
 			continue
 		}
 
@@ -3119,7 +3188,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				pendingBadFp = nodeFp
 				pendingVer = attemptVer
 			}
-			callLogEvent(ctx, "switch", nodeFp, "freetier:probe_alt_node"+fmt.Sprintf(" reason=switch_after_fail candidates=%d", switchCandidates))
+			callLogSwitchEvent(ctx, nodeFp, "freetier:probe_alt_node", "switch_after_fail", switchCandidates)
 			log.Warn("freetier_node_switch",
 				"try_model", modelID, "surface", surface,
 				"from", proxyPool.nameOf(nodeFp), "switches_done", freeTierSwitches,
@@ -3196,17 +3265,29 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			// 说明是【网关形态被拒】而不是【出口配额耗尽】——继续切节点只会把
 			// 坏形态请求散布到更多 IP（每 IP 挨 N 次就当日封禁，实测 ~16 次量级）。
 			// 确认漂移后本次请求按原错误返回，不再消耗出口。见 shape_drift.go。
-			haltDrift, driftConfirmed := shapeDriftShouldHalt(egResult.EgressKey(), quotaReason, time.Now())
-			if driftConfirmed {
-				callLogEvent(ctx, "shape_drift", nodeFp, "quota_switches_halted:"+quotaReason)
+			drift := shapeDriftObserve429(modelID, egResult.EgressKey(), quotaReason, time.Now())
+			if drift.Confirmed || drift.Trial {
+				reason := "confirmed"
+				if drift.Trial {
+					reason = "half_open_trial"
+				}
+				lastTrial := "none"
+				if !drift.LastTrial.IsZero() {
+					lastTrial = drift.LastTrial.Format(time.RFC3339)
+				}
+				detail := fmt.Sprintf("model=%s reason=%s armed=%t distinct=%d last_trial=%s",
+					modelID, reason, drift.Armed, drift.Distinct, lastTrial)
+				callLogEvent(ctx, "shape_drift", nodeFp, detail)
 				log.Warn("shape_drift_detected",
 					"try_model", modelID, "surface", surface,
-					"reason", quotaReason, "status", resp.StatusCode,
-					"detail", "FreeUsageLimitError across distinct egress in window; gateway shape may be rejected upstream — quota switching halted",
+					"reason", reason, "quota_reason", quotaReason, "status", resp.StatusCode,
+					"armed", drift.Armed, "distinct", drift.Distinct, "last_trial", lastTrial,
+					"detail", detail,
 				)
 			}
-			if haltDrift {
+			if drift.Halt {
 				// 不切节点、不 mark：漂移期 mark 会把健康出口误标 exhausted。
+				callLogSuppressedAttempt(ctx, modelID, nodeFp, "shape_drift", egResult.EgressKey(), sortedBlockedKeys(drift.Blocked))
 				lastBody = errBody
 				lastStatus = resp.StatusCode
 				lastHeader = resp.Header
@@ -3214,8 +3295,16 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				break
 			}
 			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
-				callLogEvent(ctx, "switch", nodeFp, fmt.Sprintf("quota:%s reason=switch_quota candidates=%d", quotaReason, switchCandidates))
-				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
+				switchReason := "quota:" + quotaReason
+				if drift.Trial {
+					switchReason += ":half_open_trial"
+				}
+				callLogSwitchEvent(ctx, nodeFp, switchReason, "switch_quota", switchCandidates)
+				if !drift.Trial {
+					proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
+				} else {
+					trialSwitchPending = true
+				}
 				quotaSwitches++
 				client.CloseIdleConnections()
 				nodeSwitchPending = true
@@ -3304,7 +3393,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	// 配额熔断闸门：节点池无可用节点且直连出口已被上游 429 限流时，
 	// 直接返回 429，不再访问上游（见 quota_halt.go）。
 	if halted, haltBody := quotaHaltGuard.gate(auth); halted {
-		body, status, header, err := quotaHaltResponse(ctx, haltBody)
+		body, status, header, err := quotaHaltResponse(ctx, modelID, haltBody)
 		if err != nil {
 			return nil, status, header, err
 		}
@@ -3356,6 +3445,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	// 免费额度耗尽自动切节点（流式：仅头部非 2xx 时可切；已吐字节不可重试）：
 	// 独立预算（默认 5 个节点），不占用重试闸门；循环上限 = 重试上限 + 配额预算。
 	nodeSwitchPending := false
+	trialSwitchPending := false // 上一次 shape 半开试探放行后，等待本次选到新出口
 	quotaSwitches := 0
 	versionRefreshed := false // 426 时只刷新一次版本，避免无谓循环
 	versionReverted := false  // 403(版本过新) 时只回退一次版本
@@ -3372,7 +3462,13 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	for attempt := 0; attempt < loopBudget; attempt++ {
 		// T2：池级 403 halt 期间不再换节点、不再发新 attempt，fail-fast。
 		if proxyPool.poolHalted(time.Now()) {
-			callLogEvent(ctx, "switch", proxyPool.currentFp(), "reason=pool_halt candidates=0")
+			fp := proxyPool.currentFp()
+			wouldBe := EgressKeyDirect
+			if fp != "" {
+				wouldBe = nodeEgressKey(fp)
+			}
+			callLogSwitchEvent(ctx, fp, "pool_halt", "pool_halt", 0)
+			callLogSuppressedAttempt(ctx, modelID, fp, "pool_halt", wouldBe, nil)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
 		}
 		// 请求级总预算：到点就收手，不再叠加等待（砍掉 135s 的病态尾部）。
@@ -3383,23 +3479,41 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				"elapsed_ms", time.Since(upstreamLoopStart).Milliseconds())
 			break
 		}
-		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		blockedEgress := shapeDriftBlockedEgress(modelID, time.Now())
+		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
 		switchCandidates := proxyPool.lastSwitchCandidates()
 		if proxyPool.poolHalted(time.Now()) {
 			// 另一个请求可能在本次 egress.Get 期间刚触发 halt：不能再直连/发请求。
-			callLogEvent(ctx, "switch", egResult.NodeFP, "reason=pool_halt candidates=0")
+			callLogSwitchEvent(ctx, egResult.NodeFP, "pool_halt", "pool_halt", 0)
+			callLogSuppressedAttempt(ctx, modelID, egResult.NodeFP, "pool_halt", egResult.EgressKey(), nil)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
 		}
 		// 免费层（zen）请求经 BunTransport 发出（同非流式，见上方注释）。
 		if !useGoEndpoint {
 			egResult = bunEgressResult(egResult)
 		}
+		if trialSwitchPending {
+			shapeDriftSetTrialEgress(modelID, egResult.EgressKey(), time.Now())
+			trialSwitchPending = false
+		}
+		if auth.tier() == TierFree && proxyPool.nodeCount() > 0 && egResult.Direct &&
+			!proxyPool.hasEligibleNode() {
+			// 节点全部在冷却/判死：本次尝试实际落到了直连，节点侧尝试没有发出。
+			callLogSuppressedAttempt(ctx, modelID, "", "node_cooldown", EgressKeyDirect, nil)
+		}
+		if blockedEgress[egResult.EgressKey()] {
+			// 选路把所有已知 429 出口都排除了；宁可 fail-fast 也不能烧新 IP。
+			egResult.Invalidate()
+			callLogEvent(ctx, "shape_drift", egResult.NodeFP, "all_egress_blocked")
+			callLogSuppressedAttempt(ctx, modelID, egResult.NodeFP, "shape_drift", egResult.EgressKey(), sortedBlockedKeys(blockedEgress))
+			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("shape drift: all egress candidates are in the 429 set")
+		}
 		client, nodeFp := egResult.Client, egResult.NodeFP
 		if nodeFp != "" {
 			proxyPool.noteAttempt(nodeFp, time.Now())
 		}
 		if nodeFp == "" && proxyPool.allSubsQuarantined(time.Now()) {
-			callLogEvent(ctx, "switch", "", "reason=sub_quarantine candidates=0")
+			callLogSwitchEvent(ctx, "", "all_subscriptions_quarantined", "sub_quarantine", 0)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("all subscriptions quarantined after 403")
 		}
 		// I2：同非流式——版本由本请求携带，见上方注释。
@@ -3427,10 +3541,12 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 		// C-5：喂节点层告警样本。口径是【传输层】——拿到任何上游响应（含 403/429）
 		// 都说明这条出口是通的；账号级限流不该记到节点头上。direct 出口不计。
-		nodeAlerts.recordNodeAttempt(nodeFp != "", err == nil)
+		// 首字节超时（error string 含 timeout awaiting response headers）说明连接已建好，
+		// 同样是「出口可达」，不能记成传输失败（T3 复审 N2）。
+		nodeAlerts.recordNodeAttempt(nodeFp != "", err == nil || isFirstByteTimeout(err))
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
-			callLogEvent(ctx, "connect_error", nodeFp, err.Error())
+			firstByteTimeout := noteAttemptTransportError(ctx, proxyPool, nodeFp, err)
 			retryReason := "transport_error"
 			canRetry := attempt+1 < maxUpstreamRetries
 			if !canRetry {
@@ -3447,14 +3563,15 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				"node_name", proxyPool.nameOf(nodeFp),
 				"error", err.Error(),
 			)
-			// 连接错误（EOF 等）：标记节点为 dead，避免后续请求继续命中坏节点。
-			// 无论是否还有重试预算都要标记，否则最后一次失败会让坏节点长期留在池中。
-			if nodeFp != "" {
-				proxyPool.mark(nodeFp, NodeDead, "connect_error:"+err.Error())
-			}
+			// 首字节超时已在 noteAttemptTransportError 里跳过 mark（F2）；这里保持
+			// 原有的重试/换节点行为不变。
 			if canRetry {
 				if nodeFp != "" {
-					callLogEvent(ctx, "switch", nodeFp, "connect_error:"+err.Error()+fmt.Sprintf(" reason=switch_after_fail candidates=%d", switchCandidates))
+					reason := "connect_error"
+					if firstByteTimeout {
+						reason = "ttft_timeout"
+					}
+					callLogSwitchEvent(ctx, nodeFp, reason+":"+err.Error(), "switch_after_fail", switchCandidates)
 				}
 				client.CloseIdleConnections()
 				egResult.Invalidate()
@@ -3468,6 +3585,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
 			// 同上：流式路径也必须喂恢复滞回，否则只有一半流量能积累恢复证据。
 			quotaHaltGuard.observeSuccess(egResult.EgressKey())
+			shapeDriftObserveSuccess(modelID, egResult.EgressKey(), time.Now())
 			log.Info("upstream_attempt",
 				"try_model", modelID,
 				"surface", surface,
@@ -3488,19 +3606,21 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 					callLogEvent(ctx, "freetier_confirm_rejected_version_changed", pendingBadFp,
 						fmt.Sprintf("failed_ver=%s confirm_ver=%s", pendingVer, attemptVer))
 				} else if nodeFp != "" && nodeFp != pendingBadFp {
-					// T2：请求最终成功才把之前的 403 记成「已确认」并喂订阅级熔断。
-					proxyPool.confirmSub403(pendingBadFp, time.Now())
-					if proxyPool.poolHalted(time.Now()) {
-						// T2 硬约束：池级 halt 期间不 mark 任何节点。
-						callLogEvent(ctx, "freetier_confirm_suppressed", pendingBadFp, "suppressed:pool_halt")
-						log.Warn("freetier_confirm_suppressed", "node", proxyPool.nameOf(pendingBadFp), "reason", "pool_halt")
-					} else if ok, why := proxyPool.freeTierMarkAllowed(); ok {
-						proxyPool.markFreeTierRejected(pendingBadFp)
-						callLogEvent(ctx, "freetier_node_confirmed_bad", pendingBadFp,
-							fmt.Sprintf("confirmed_ip_rejected failed_ver=%s confirm_ver=%s switches=%d", pendingVer, attemptVer, freeTierSwitches))
-						log.Warn("freetier_node_confirmed_bad",
-							"bad", proxyPool.nameOf(pendingBadFp), "ok", proxyPool.nameOf(nodeFp),
-							"failed_ver", pendingVer, "confirm_ver", attemptVer)
+					// T2/R2：先判定 halt/shape_latch/pool_floor；被抑制则完全不计订阅 strike。
+					why, allowed := proxyPool.freeTierConfirmAllowed(time.Now())
+					if allowed {
+						if proxyPool.markFreeTierRejected(pendingBadFp) {
+							proxyPool.confirmSub403(pendingBadFp, time.Now())
+							callLogEvent(ctx, "freetier_node_confirmed_bad", pendingBadFp,
+								fmt.Sprintf("confirmed_ip_rejected failed_ver=%s confirm_ver=%s switches=%d", pendingVer, attemptVer, freeTierSwitches))
+							log.Warn("freetier_node_confirmed_bad",
+								"bad", proxyPool.nameOf(pendingBadFp), "ok", proxyPool.nameOf(nodeFp),
+								"failed_ver", pendingVer, "confirm_ver", attemptVer)
+						} else {
+							why = "mark_failed"
+							callLogEvent(ctx, "freetier_confirm_suppressed", pendingBadFp, "suppressed:"+why)
+							log.Warn("freetier_confirm_suppressed", "node", proxyPool.nameOf(pendingBadFp), "reason", why)
+						}
 					} else {
 						callLogEvent(ctx, "freetier_confirm_suppressed", pendingBadFp, "suppressed:"+why)
 						log.Warn("freetier_confirm_suppressed", "node", proxyPool.nameOf(pendingBadFp), "reason", why)
@@ -3519,7 +3639,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 		// T2 硬约束：halt 期间不 mark、不换节点；本请求若在飞行中撞上 halt，也立即失败。
 		if proxyPool.poolHalted(time.Now()) {
-			callLogEvent(ctx, "switch", nodeFp, fmt.Sprintf("reason=pool_halt candidates=%d", switchCandidates))
+			callLogSwitchEvent(ctx, nodeFp, "pool_halt", "pool_halt", switchCandidates)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
 		}
 
@@ -3532,7 +3652,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				"current_version", ocClientVer,
 				"min_required", minFreeTierOCVersion,
 			)
-			callLogEvent(ctx, "switch", nodeFp, "upgrade_required:refresh_version")
+			callLogSwitchEvent(ctx, nodeFp, "upgrade_required:refresh_version", "switch_after_fail", switchCandidates)
 			refreshOCSession()
 			continue
 		}
@@ -3547,7 +3667,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				"model", modelID,
 				"to", pinnedOCVersion,
 			)
-			callLogEvent(ctx, "switch", nodeFp, "freetier:revert_version")
+			callLogSwitchEvent(ctx, nodeFp, "freetier:revert_version", "switch_after_fail", switchCandidates)
 			continue
 		}
 
@@ -3564,7 +3684,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				pendingBadFp = nodeFp
 				pendingVer = attemptVer
 			}
-			callLogEvent(ctx, "switch", nodeFp, "freetier:probe_alt_node"+fmt.Sprintf(" reason=switch_after_fail candidates=%d", switchCandidates))
+			callLogSwitchEvent(ctx, nodeFp, "freetier:probe_alt_node", "switch_after_fail", switchCandidates)
 			log.Warn("freetier_node_switch",
 				"try_model", modelID, "surface", surface,
 				"from", proxyPool.nameOf(nodeFp), "switches_done", freeTierSwitches,
@@ -3639,24 +3759,45 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d quota_signal", resp.StatusCode))
 			// 形态漂移守卫（同非流式，见 shape_drift.go）：多出口同窗 429
 			// 一致出现 → 停配额切换，按原错误返回，不烧更多出口。
-			haltDrift, driftConfirmed := shapeDriftShouldHalt(egResult.EgressKey(), quotaReason, time.Now())
-			if driftConfirmed {
-				callLogEvent(ctx, "shape_drift", nodeFp, "quota_switches_halted:"+quotaReason)
+			drift := shapeDriftObserve429(modelID, egResult.EgressKey(), quotaReason, time.Now())
+			if drift.Confirmed || drift.Trial {
+				reason := "confirmed"
+				if drift.Trial {
+					reason = "half_open_trial"
+				}
+				lastTrial := "none"
+				if !drift.LastTrial.IsZero() {
+					lastTrial = drift.LastTrial.Format(time.RFC3339)
+				}
+				detail := fmt.Sprintf("model=%s reason=%s armed=%t distinct=%d last_trial=%s",
+					modelID, reason, drift.Armed, drift.Distinct, lastTrial)
+				callLogEvent(ctx, "shape_drift", nodeFp, detail)
 				log.Warn("shape_drift_detected",
 					"try_model", modelID, "surface", surface,
-					"reason", quotaReason, "status", resp.StatusCode,
-					"detail", "FreeUsageLimitError across distinct egress in window; gateway shape may be rejected upstream — quota switching halted",
+					"reason", reason, "quota_reason", quotaReason, "status", resp.StatusCode,
+					"armed", drift.Armed, "distinct", drift.Distinct, "last_trial", lastTrial,
+					"detail", detail,
 				)
 			}
-			if haltDrift {
+			if drift.Halt {
+				// 不切节点、不 mark：漂移期 mark 会把健康出口误标 exhausted。
+				callLogSuppressedAttempt(ctx, modelID, nodeFp, "shape_drift", egResult.EgressKey(), sortedBlockedKeys(drift.Blocked))
 				lastBody = errBody
 				lastStatus = resp.StatusCode
 				lastHeader = resp.Header
 				break
 			}
 			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
-				callLogEvent(ctx, "switch", nodeFp, fmt.Sprintf("quota:%s reason=switch_quota candidates=%d", quotaReason, switchCandidates))
-				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
+				switchReason := "quota:" + quotaReason
+				if drift.Trial {
+					switchReason += ":half_open_trial"
+				}
+				callLogSwitchEvent(ctx, nodeFp, switchReason, "switch_quota", switchCandidates)
+				if !drift.Trial {
+					proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
+				} else {
+					trialSwitchPending = true
+				}
 				quotaSwitches++
 				client.CloseIdleConnections()
 				nodeSwitchPending = true

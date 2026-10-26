@@ -37,7 +37,6 @@
 **5. 表格 / 日志页**
 - default `LogsTable.js`：筛选器在**表格上方的 `Form` 内**，不是页面级 header；字段包括 token 名、模型名、时间范围、渠道 ID、用户名，再叠一个关键词搜索。筛选按钮触发查询，没有「自动应用」。
 - 列密度高但无列显隐/列宽拖拽；分页是传统页码；行内没有展开，靠跳转编辑页。
-- 移动端没有卡片降级，表格横向滚动。
 
 **6. 图表用法**
 - default：Recharts；X 轴 `interval: 0` 强制显示所有日期标签、`minTickGap: 5`、左右 padding 30；**Y 轴 `hide`**；网格只保留水平线、`opacity 0.1`；折线 `dot: false`、`activeDot r=4`。Tooltip 是白底、无边框、4px 圆角 + 阴影，内容为「日期 + 值 + 指标名」。
@@ -72,7 +71,7 @@
 - 关键文件：
   - 布局：`web/src/components/layout/components/app-sidebar.tsx`、`app-header.tsx`、`authenticated-layout.tsx`
   - 导航数据：`web/src/hooks/use-sidebar-data.ts`、`web/src/lib/nav-modules.ts`
-  - 总览：`web/src/features/dashboard/index.tsx`、`components/overview/overview-dashboard.tsx`、`summary-cards.tsx`、`log-stat-cards.tsx`
+  - 总览：`web/src/features/dashboard/index.tsx`、`components/overview/overview-dashboard.tsx`、`summary-cards.tsx`、`components/models/log-stat-cards.tsx`
   - 日志：`web/src/features/usage-logs/components/common-logs-filter-bar.tsx`、`usage-logs-table.tsx`、`common-logs-stats.tsx`
   - 表格基座：`web/src/components/data-table/layout/data-table-page.tsx`
   - 主题：`web/src/styles/theme.css`、`theme-presets.css`
@@ -109,7 +108,7 @@
 **5. 表格 / 日志页**
 - 筛选器在**页面内容区顶部**的 `CommonLogsFilterBar` / `LogsFilterToolbar`，不是表格卡片内部；含时间范围（`CompactDateTimeRangePicker`）、类型 tab、模型、渠道、分组、用户名、Token、请求 ID、上游请求 ID，以及仅管理员可见的字段。
 - 筛选状态写入 URL `search`（TanStack Router），刷新/分享可还原；顶部还有 3 个紧凑统计徽章 `Usage / RPM / TPM`（`CommonLogsStats`）。
-- 常用日志列 11 个：时间、渠道、用户、Token、模型、流式、Tokens、费用、耗时、详情（`common-logs-columns.tsx` 的 header/accessorKey）。
+- 常用日志列 10 个：时间、渠道、用户、Token、模型、流式、Tokens、费用、耗时、详情（`common-logs-columns.tsx` 的 header/accessorKey）。
 - 分页服务端化；支持列显隐并持久化到 localStorage（`columnVisibilityStorageKey`）；桌面表格 + 移动端卡片列表双渲染（`data-table-page.tsx`、`common-log-mobile-card.tsx`）。
 - 行内没有展开，详情走对话框/详情页。
 
@@ -119,12 +118,11 @@
   - 堆叠 bar/area：`seriesField: 'Model'`，`stack: true`，`legends.selectMode: 'single'`；空数据时 `outerRadius: 0`、显示「No data available」。
   - 排行 bar：`xField: 'Model'`、`yField: 'Count'`、图例单选。
 - 没有显式设置坐标轴刻度数，交给 VChart 默认密度；图例在左上/左侧，不放下方。
-- 图表高度由 `chart-box`（210px）/`chart-box-lg`（280px）控制。
 
 **7. 主题与设计令牌**
 - `html.dark` + CSS 变量 + `@theme inline`；`--radius: 1rem`，再由 `--radius-sm/md/lg/xl/2xl/3xl/4xl` 派生，整体偏大圆角。
 - 字体：`--font-ui-sans`（默认 `sans-serif`），另有 `--font-public-sans`、`--font-serif`（Lora + 中文宋体栈）；`--font-body` 由主题字体轴切换。
-- 有 3 套主题预设（`theme-presets.css`），包括字体轴、圆角、图表色；`--chart-1..5` 语义化。
+- `theme-presets.css` 提供 10 套配色预设（`data-theme-preset`，如 underground / rose-garden / ocean-breeze / anthropic），每套同时声明亮/暗值，并可独立调圆角与密度；`--chart-1..5` 语义化。
 - 暗色不是简单反色：chart / sidebar / overview-accent 都有独立 token。
 
 **8. 可抄 / 不要抄**
@@ -134,7 +132,7 @@
   3. 筛选状态进 URL；列显隐持久化；桌面表格/移动卡片双渲染。
   4. 日志页顶部「统计徽章条」（Usage/RPM/TPM）紧贴筛选器，先给上下文再给表。
 - 不要抄：
-  1. **两个 Dashboard**（Overview 与 Models）导致指标与入口重复；4 页面板应只有一个「总览」。
+  1. **两个 Dashboard**（Overview 与 Models）导致指标与入口重复；单文件面板应只有一个「总览」。
   2. 主题预设/字体轴过多（Lora/Public Sans/多套预设），管理后台不需要「换字体」这种内容型站点能力，维护成本高。
   3. 总览塞入 FAQ/公告/上手文档，容易把运行状态挤出首屏。
 
@@ -153,7 +151,7 @@
   - 导航：`src/components/leftnav.tsx`、`src/components/navbar.tsx`、`src/components/DashboardHeader.tsx`
   - 首页：`src/app/(dashboard)/home/page.tsx`、`home/_components/HomePage.tsx`
   - Usage：`src/app/(dashboard)/usage/page.tsx`、`_components/components/UsagePageView.tsx`、`overview/UsageStatStrip.tsx`
-  - Logs：`src/app/(dashboard)/logs/page.tsx`、`src/components/logs/request/RequestLogsPanel.tsx`、`LogsTableToolbar.tsx`
+  - Logs：`src/app/(dashboard)/logs/page.tsx`、`src/components/logs/request/RequestLogsPanel.tsx`、`src/components/logs/request/LogsTableToolbar.tsx`
   - 图表：`src/components/shared/charts/`
   - 主题：`src/app/globals.css`
 
@@ -175,7 +173,7 @@
 **4. 总览页**
 - Home 是「使用量 + 动态 + 排行榜」：
   - PageHeader + 主 CTA「Create New Virtual Key」
-  - `UsageStatStrip`：**4 格**，每格一条 56×16 级 sparkline：
+  - `UsageStatStrip`：**4 格**，每格一条高度 56px（`h-14`）的 sparkline：
     1. Spend（含预算提示）
     2. Total Requests（成功/失败拆开）
     3. Total Tokens（含 cache read 提示 + 「View token breakdown」Popover，解释 input/cache read/cache write/output）
@@ -212,7 +210,7 @@
   2. 日志页「页面级 tabs + 顶部 toolbar + Live Tail 开关 + 抽屉详情 + URL 深链」整套模式。
   3. KPI 里把成功/失败、预算、success rate 作为**副行**而不是再加卡片，控制卡片数量。
 - 不要抄：
-  1. 5 组 Sidebar + 多层嵌套 + 大量 beta/upgrade 入口；4 页面板会被撑成 20+ 项。
+  1. 5 组 Sidebar + 多层嵌套 + 大量 beta/upgrade 入口；单文件面板会被撑成 20+ 项。
   2. Home 混入博客/更新流，管理后台不需要内容运营位。
   3. 「Old Usage」「Experimental」等历史入口并存，说明 IA 缺清理；重构时不要保留兼容菜单。
 
@@ -265,8 +263,8 @@
 - Requests 的筛选在**页面级 Header**：`Header` 左槽放 `ThemedTimeFilter` + `FilterASTButton`，右槽放 LivePill、导出等。
 - Header 是 `h-16`、`border-b`、`bg-slate-100 dark:bg-slate-900`，与内容区固定分离。
 - 表格：列可拖拽排序、可调整宽度、可显隐；默认 page size 25（`page_size` query，默认 25）；传统分页，不是无限滚动。
-- 筛选是 AST（可嵌套 AND/OR），支持保存筛选；复杂度高，但表达力强。
-- 行详情：请求行组件 + 侧栏/抽屉（由 table row 承载）。
+- 筛选是 AST（可嵌套 AND/OR）；复杂度高，但表达力强。
+- 行详情由请求行组件承载；具体是抽屉还是侧栏，本次未逐项核对。
 
 **6. 图表用法**
 - Recharts `AreaChart`：success/error 两条面积，`linearGradient` 从 0.8 透明度到 0.1；X 轴时间，Y 轴数值；tooltip 自定义。
@@ -287,7 +285,7 @@
   3. 日志页把时间筛选和 AST 筛选放在**页面 header**，与表格解耦；Live 状态单独一个 pill。
   4. 列拖拽/列宽/列显隐三件套，适合请求日志这种列多且角色差异大的表。
 - 不要抄：
-  1. **14+ 面板一次铺满**：首屏信息过载，4 页面板应默认只显示 4–6 个面板，其余折叠/可选。
+  1. **14+ 面板一次铺满**：首屏信息过载，单文件面板应默认只显示 4–6 个面板，其余折叠/可选。
   2. HQL/Segments 这类高级查询入口对中小网关过重；会把「日志」变成 SQL IDE。
   3. 传统页码 + 固定 25 条，在长日志场景不如 cursor/虚拟滚动。
 
@@ -324,7 +322,7 @@
   - 评估：Scores、Evaluators、Human Annotation
   - 数据：Datasets、Experiments
   - 其他：Update、Cloud Status、V4 Preview、Upgrade、Settings、Support
-- 典型「产品矩阵」IA，一级项 20+；适合可观测平台，不适合 4 页网关。
+- 典型「产品矩阵」IA，一级项 20+；适合可观测平台，不适合当前这种单文件小型管理面板。
 
 **4. 总览页**
 - Project Home 不是硬编码页面，而是渲染一个 **DashboardDefinition**：
@@ -364,7 +362,7 @@
   3. 表格「页面 header 控制 + 左侧筛选栏 + 保存视图 + peek 抽屉」。
   4. 字号/字重强约束（400/600 两档）与语义色裁剪，适合暗/亮双主题长期维护。
 - 不要抄：
-  1. 20+ 一级导航和 Dashboard 编辑器；4 页面板没有这么多对象。
+  1. 20+ 一级导航和 Dashboard 编辑器；单文件面板没有这么多对象。
   2. 自研整套 D3 图表库的成本极高；opencode2api 已有 ECharts，不应重写。
 
 **9. 截图**
@@ -400,7 +398,7 @@
 - **6 个 KPI**：Total Tokens、Input、Output、Messages、Chats、Users；每个有 `label / value / exact`（hover 显示完整值）。
 - 主图上方：指标切换 Tokens/Messages、视图切换 Volume/Activity、对比上一周期开关、粒度选择（10m/hourly/daily）、模型筛选。
 - 主图下方：模型/用户两个 tab 的排行榜，含 Messages / Users / Chats 列 + 占比条（`style:width = value / metricTotal`）。
-- 没有日历热力图，但 `Activity` 视图是**按时间 × 模型的行级活跃度/热力条**（`activityRowHeight` 28px 级别）。
+- 没有日历热力图；`Activity` 视图按模型逐行渲染活跃度（`activityRowHeight` 28px 级），不是日历型热力图。
 - 文字量低：标题 + 控件 + 数字；没有解释段落。
 
 **5. 表格 / 日志页**
@@ -411,10 +409,10 @@
 **6. 图表用法**
 - `UsageChart.svelte` 手写 SVG：
   - X 轴标签数量按宽度动态：`chartWidth >= 480 ? [0, mid, last] : [0, last]`，即 **3 或 2 个标签**。
-  - Y 轴不画刻度文字（由图形高度 + hover 表达），降低噪音。
+  - 没有显式 Y 轴刻度文案，主要由图形高度 + hover 表达数值，降低噪音。
   - Hover：按列命中，显示 tooltip 行（模型 + 值），并高亮当前列/点。
-  - 对比模式：当前周期实线 + 上一周期虚线；`comparisonChange` 显示百分比变化。
-  - 图例限制可见系列数（2 行），其余归入「其他」/可滚动。
+  - 对比模式：叠加 `previousSeries` 的上一周期序列；`comparisonChange` 显示百分比变化。
+  - 图例按 `visibleIds` 渲染可见系列，超出部分可切换/隐藏。
 - 颜色用 `modelColor()` 按模型名稳定映射，不随排序变化。
 
 **7. 主题与设计令牌**
@@ -458,7 +456,7 @@
 - 依赖见 `ui/package.json`。
 
 **3. 信息架构**
-- 左侧 Sidebar（可折叠为图标）+ 内容区，No 顶栏大导航。
+- 左侧 Sidebar（可折叠为图标）+ 内容区，没有顶栏大导航。
 - Sidebar 分组：
   - Home
   - Observability：Dashboard、LLM Logs、MCP Logs、Agent Logs、Connectors、Logs Settings
@@ -499,7 +497,7 @@
   3. **左侧筛选栏 + URL 状态**，适合筛选维度多的请求日志。
   4. 详情用 Sheet，支持 fallback chain 子行和 session 维度。
 - 不要抄：
-  1. 30+ 一级/二级菜单（Models/MCP/Agents/Governance/RBAC…），对 4 页面板是灾难。
+  1. 30+ 一级/二级菜单（Models/MCP/Agents/Governance/RBAC…），对单文件面板是灾难。
   2. 筛选维度一次全暴露（20+），应先给 4–6 个常用筛选，其余进「更多筛选」。
   3. 每个图都可切 bar/line 会增加认知负担；只对趋势图提供切换即可。
 
@@ -548,7 +546,7 @@
   2. 日志详情侧面板 + 唯一 URL 可分享 + 从日志跳到 Config/Prompt。
   3. Analytics 按 Users / Errors / Cache / Feedback 分 tab，避免一个总览承载所有问题。
 - 不要抄：
-  1. 产品面铺得过大（Guardrails / Prompt Library / Integrations）；4 页面板不应复制。
+  1. 产品面铺得过大（Guardrails / Prompt Library / Integrations）；单文件面板不应复制。
   2. 具体 UI 细节未知，不能照搬截图里的视觉；只能借鉴信息结构。
 
 **9. 截图**
@@ -564,7 +562,7 @@
 
 **1. 仓库与前端路径**
 - 产品：Cloudflare AI Gateway，控制台内嵌在 Cloudflare Dashboard；**不开源**。
-- 文档源码：`cloudflare/cloudflare-docs` 的 `src/content/docs/ai-gateway/`（例如 `observability/analytics.mdx`、`observability/logging/index.md`）。
+- 文档源码：`cloudflare/cloudflare-docs` 的 `src/content/docs/ai-gateway/`（例如 `observability/analytics.mdx`、`observability/logging/index.mdx`、`observability/costs.mdx`）。
 - 文档地址：https://developers.cloudflare.com/ai-gateway/
 
 **2. 技术栈**
@@ -618,7 +616,7 @@
 - **未获取到**（前端闭源）。
 
 **3. 信息架构**
-- 公开站点顶部导航：Models / Chat / Rankings / Docs 等；登录后 dashboard 侧有 **Activity、Logs、Keys、Credits、Settings**（文档链接可验证 `/activity`、`/logs`）。
+- 公开站点顶部导航：Models / Chat / Rankings / Docs 等；登录后 dashboard 有 **Activity、Logs、Settings** 等页面（`/activity`、`/logs` 可由文档链接验证；Keys/Credits 未逐一核对）。
 - Activity 与 Logs 是两个一级页面：前者聚合，后者逐请求。
 - Activity tabs：Overview / Trends / Explore / Guardrails；Logs tabs：Generations / Upstream Requests / Sessions / Videos / Batches。
 - 所有 tab 共享同一日期范围与筛选状态，且**状态存在 URL**。
@@ -652,7 +650,7 @@
   3. 详情 sheet 的分段：Overview / Provider Responses 瀑布 / Usage 成本拆分 / Prompt / Raw JSON；对网关排障非常实用。
   4. 5 个 headline 指标里包含 **cache hit rate** 与 **blended $/M tokens**，比单纯请求数更能反映代理质量。
 - 不要抄：
-  1. Explore 这种「自助 BI 构建器」对 4 页面板过重；固定 2–3 个图即可。
+  1. Explore 这种「自助 BI 构建器」对单文件面板过重；固定 2–3 个图即可。
   2. 5 个 Logs tab（Videos/Batches）是 OpenRouter 多业务决定的，不应照搬。
 
 **9. 截图**
@@ -676,7 +674,7 @@
 | Bifrost | React 19 + TanStack Router/Table + Tailwind 4 + Recharts | 左侧可折叠栏，Observability 分组 | Recharts 3.8 + 56×16 sparkline | tabs + MetricStrip + 每图 bar/line + 总量 chip | 左侧筛选栏 + header + 直方图 | 日志三段式（MetricStrip→Volume→表）；Sheet 详情 |
 | Portkey（闭源） | 未获取到 | 文档归纳：Analytics/Logs/Virtual Keys/Configs/... | 未获取到 | Analytics tabs Overview/Users/Errors/Cache/Feedback/Summary | 文档未写 | Status 列显式化 cache/retry/fallback/loadbalance；日志侧栏 + 可分享 URL |
 | Cloudflare AI Gateway（闭源） | 未获取到 | Cloudflare Dashboard → AI Gateway → 单 gateway → Analytics/Logs/Settings | 未获取到 | 5 指标（请求/Token/成本/错误/缓存命中率），布局未获取 | 文档未写 | 日志默认记录 + 逐请求 opt-out + payload 单独关闭；成本标注估算 |
-| OpenRouter（闭源） | 未获取到 | 顶部站点导航 + dashboard 侧栏（Activity/Logs/Keys/Credits/Settings） | 未获取到 | 5 headline 指标 + ranked cards + 4 类图；tabs Overview/Trends/Explore/Guardrails | 表格上方筛选条 + 请求直方图 | Activity/Logs 分离但共享 URL 筛选；表格上方直方图；详情 sheet 分段 |
+| OpenRouter（闭源） | 未获取到 | 顶部站点导航 + dashboard 侧栏（Activity/Logs/Settings 等） | 未获取到 | 5 headline 指标 + ranked cards + 4 类图；tabs Overview/Trends/Explore/Guardrails | 表格上方筛选条 + 请求直方图 | Activity/Logs 分离但共享 URL 筛选；表格上方直方图；详情 sheet 分段 |
 
 ---
 

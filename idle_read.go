@@ -18,6 +18,10 @@ import (
 //   - 失败请求最长 39.7 分钟；
 //   - C-1 已给 TLS 握手加上界，但 body 读取阶段此前没有任何上界。
 //
+// T3（2026-10-26）明确不动这里的语义：首字节 deadline 只约束「建连后等响应头」
+// 这一段（由各 Transport 的 ResponseHeaderTimeout 实现）；一旦首字节到达，后续
+// 仍按「连续多久没有新字节」判定卡死，绝不用总时长上限去误杀长生成。
+//
 // 做成 var 便于测试注入更短的值。
 var idleReadTimeout = 120 * time.Second
 

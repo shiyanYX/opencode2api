@@ -33,6 +33,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 )
@@ -251,17 +252,32 @@ func (h *quotaHalt) gate(auth UpstreamAuth) (blocked bool, body []byte) {
 //	429 会被客户端与中间层误解为不可重试。配套必须带 Retry-After ——
 //	只改状态码而不带重试时刻会立刻引发重试风暴。
 //	两者必须【同时】上，这是本条不可拆分的原因。
-func quotaHaltResponse(ctx context.Context, body []byte) ([]byte, int, http.Header, error) {
+func quotaHaltResponse(ctx context.Context, model string, body []byte) ([]byte, int, http.Header, error) {
 	if len(body) == 0 {
 		body = quotaHaltFallbackBody
 	}
 	callLogEvent(ctx, "quota_halt", "", "blocked: 无可用节点且直连出口 429，等待出口恢复")
+	callLogSuppressedAttempt(ctx, model, "", "quota_halt", "none_available", quotaHaltGuard.haltedKeys())
 	h := make(http.Header)
 	h.Set("Retry-After", "30")
 	return body, http.StatusServiceUnavailable, h, nil
 }
 
 // snapshot 导出各出口桶的状态（测试与面板可观测）。
+// haltedKeys 返回当前所有 halted 出口键（稳定排序，供 suppressed 事件）。
+func (h *quotaHalt) haltedKeys() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]string, 0, len(h.states))
+	for k, s := range h.states {
+		if s.halted {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (h *quotaHalt) snapshot() map[string]haltBucketView {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

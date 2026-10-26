@@ -25,6 +25,9 @@ type EgressRequest struct {
 	ForceSwitch    bool
 	BodyMap        map[string]any // sticky key 推导用
 	RequiredRegion string         // "" = 无区域限制
+	// ExcludeEgress 是本次选路必须排除的出口键（EgressKey，如 node:<fp>/direct）。
+	// 429 漂移守卫按 model 传入已 429 的出口集合，避免换节点又撞回同一批出口。
+	ExcludeEgress map[string]bool
 }
 
 // EgressResult 持有选中的客户端和失效上下文。
@@ -51,11 +54,13 @@ const EgressKeyDirect = "direct"
 //	（NodeFP 为空但 Direct 为 false 是静态 socks5 —— 它也有自己的 IP，
 //	按理也该单独一个桶，但当前熔断只在 Direct 时触发，先与直连合并，
 //	避免在没有实例的场景下造出永远不会被解除的假桶。）
+func nodeEgressKey(fp string) string { return "node:" + fp }
+
 func (r EgressResult) EgressKey() string {
 	if r.Direct || r.NodeFP == "" {
 		return EgressKeyDirect
 	}
-	return "node:" + r.NodeFP
+	return nodeEgressKey(r.NodeFP)
 }
 
 // Invalidate 解除 sticky 绑定，下次同一会话换出口。
@@ -128,7 +133,7 @@ func (eg *EgressClient) Get(r EgressRequest) EgressResult {
 
 	// 节点池活跃 → 从池中选取
 	if proxyPool.nodeCount() > 0 {
-		n := proxyPool.pickForRegion(r.ForceSwitch, r.RequiredRegion)
+		n := proxyPool.pickForRegionExcluding(r.ForceSwitch, r.RequiredRegion, r.ExcludeEgress)
 		if n != nil {
 			return EgressResult{
 				Client: proxyPool.getClient(n.Fingerprint),

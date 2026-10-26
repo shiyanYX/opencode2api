@@ -51,10 +51,18 @@ func bunClientFor(base *http.Client) *http.Client {
 			return d.DialContext(ctx, network, addr)
 		}
 	}
+	// T3：BunTransport 的 dialer.ConnectTimeout 对注入的 DialContext 不生效
+	// （bun_transport.go 的 dial 直接调 dialContext），所以这里显式给建连阶段
+	// 套 ctx 上限；ConnectTimeout 仍照传，供未来切换到内部 dialer 时保持语义。
+	dialCap := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dctx, cancel := context.WithTimeout(ctx, dialTimeout)
+		defer cancel()
+		return dial(dctx, network, addr)
+	}
 	bt, err := NewBunTransport(BunOptions{
-		DialContext:           dial,
+		DialContext:           dialCap,
 		ConnectTimeout:        dialTimeout,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: firstByteTimeout,
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConnsPerHost:   20,
 	})

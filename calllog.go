@@ -34,6 +34,18 @@ type CallEvent struct {
 	NodeName string `json:"node_name,omitempty"` // 节点显示名（快速定位）
 	Detail   string `json:"detail,omitempty"`
 	At       string `json:"at,omitempty"`
+
+	// switch 事件结构化元数据（R4）。与 Detail 分离，面板/审计可直接解析；
+	// 非 switch 事件保持零值，omitempty 不落盘。
+	SwitchReason     string `json:"switch_reason,omitempty"`
+	SwitchCandidates int    `json:"switch_candidates,omitempty"`
+
+	// suppressed 事件结构化元数据（T6）：记录「本应发出但因闩/熔断/冷却没发出」
+	// 的尝试，供离线回放区分「未尝试」与「尝试失败」。不得塞进 Detail。
+	Model                string   `json:"model,omitempty"`
+	SuppressedBy         string   `json:"suppressed_by,omitempty"`
+	WouldBeEgress        string   `json:"would_be_egress,omitempty"`
+	SuppressedCandidates []string `json:"suppressed_candidates,omitempty"`
 }
 
 type CallRecord struct {
@@ -2507,6 +2519,15 @@ func callRecorderFrom(ctx context.Context) *callRecorder {
 }
 
 func (cr *callRecorder) event(typ, node, detail string) {
+	cr.eventWithSwitch(typ, node, detail, "", 0)
+}
+
+// switchEvent 追加 type=switch 的结构化事件（R4）。
+func (cr *callRecorder) switchEvent(node, detail, reason string, candidates int) {
+	cr.eventWithSwitch("switch", node, detail, reason, candidates)
+}
+
+func (cr *callRecorder) eventWithSwitch(typ, node, detail, reason string, candidates int) {
 	if cr == nil {
 		return
 	}
@@ -2519,11 +2540,13 @@ func (cr *callRecorder) event(typ, node, detail string) {
 		cr.rec.NodeNames = append(cr.rec.NodeNames, name)
 	}
 	cr.rec.Events = append(cr.rec.Events, CallEvent{
-		Type:     typ,
-		Node:     node,
-		NodeName: name,
-		Detail:   detail,
-		At:       time.Now().Format("2006-01-02T15:04:05.000Z07:00"),
+		Type:             typ,
+		Node:             node,
+		NodeName:         name,
+		Detail:           detail,
+		At:               time.Now().Format("2006-01-02T15:04:05.000Z07:00"),
+		SwitchReason:     reason,
+		SwitchCandidates: candidates,
 	})
 	cr.mu.Unlock()
 }
@@ -2630,6 +2653,43 @@ func (cr *callRecorder) observeDialMs(ms int64) {
 
 func callLogEvent(ctx context.Context, typ, node, detail string) {
 	callRecorderFrom(ctx).event(typ, node, detail)
+}
+
+// callLogSwitchEvent 写 type=switch，reason/candidates 作为独立 JSON 字段。
+func callLogSwitchEvent(ctx context.Context, node, detail, reason string, candidates int) {
+	callRecorderFrom(ctx).switchEvent(node, detail, reason, candidates)
+}
+
+// callLogSuppressedAttempt 写 type=suppressed 的结构化「未发出尝试」事件。
+// suppressedBy 取 shape_drift|pool_halt|quota_halt|node_cooldown；wouldBe 是
+// 本应尝试的出口键；candidates 是候选出口（节点指纹或 EgressKey），最多 32 个。
+func callLogSuppressedAttempt(ctx context.Context, model, node, suppressedBy, wouldBe string, candidates []string) {
+	cr := callRecorderFrom(ctx)
+	if cr == nil {
+		return
+	}
+	if len(candidates) > 32 {
+		candidates = candidates[:32]
+	}
+	cp := append([]string(nil), candidates...)
+	cr.mu.Lock()
+	name := proxyPool.nameOf(node)
+	if node != "" && !cr.seenNodes[node] {
+		cr.seenNodes[node] = true
+		cr.rec.Nodes = append(cr.rec.Nodes, node)
+		cr.rec.NodeNames = append(cr.rec.NodeNames, name)
+	}
+	cr.rec.Events = append(cr.rec.Events, CallEvent{
+		Type:                 "suppressed",
+		Node:                 node,
+		NodeName:             name,
+		Model:                model,
+		SuppressedBy:         suppressedBy,
+		WouldBeEgress:        wouldBe,
+		SuppressedCandidates: cp,
+		At:                   time.Now().Format("2006-01-02T15:04:05.000Z07:00"),
+	})
+	cr.mu.Unlock()
 }
 
 func callLogFirstToken(ctx context.Context) {

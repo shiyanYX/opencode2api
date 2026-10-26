@@ -28,6 +28,9 @@ const (
 	NodeAvailable NodeState = iota
 	NodeExhausted
 	NodeDead
+	// NodeProbation 是 exhausted 冷却到期后的「试探态」：只放行一次证据请求，
+	// 成功才转 available，失败重新冷却。见 I3「恢复必须有证据」。
+	NodeProbation
 )
 
 func (s NodeState) String() string {
@@ -36,6 +39,8 @@ func (s NodeState) String() string {
 		return "exhausted"
 	case NodeDead:
 		return "dead"
+	case NodeProbation:
+		return "probation"
 	default:
 		return "available"
 	}
@@ -47,6 +52,8 @@ func nodeStateFromString(s string) NodeState {
 		return NodeExhausted
 	case "dead":
 		return NodeDead
+	case "probation":
+		return NodeProbation
 	default:
 		return NodeAvailable
 	}
@@ -249,9 +256,11 @@ const (
 	sub403Threshold   = 3
 	sub403BaseBackoff = 10 * time.Minute
 	sub403MaxBackoff  = 30 * time.Minute
+	sub403Silence     = 30 * time.Minute // 30min 无新 confirmed 403 ⇒ escalations 归零
 
 	pool403Window = 10 * time.Minute
-	pool403Min    = 10
+	pool403Min    = 8
+	pool403Max    = 24
 	poolHaltFor   = 10 * time.Minute
 )
 
@@ -260,6 +269,7 @@ type sub403State struct {
 	windowStart time.Time
 	until       time.Time
 	escalations int
+	last403     time.Time
 }
 
 type switchRank struct {
@@ -301,36 +311,48 @@ const (
 	probeTimeout          = 20 * time.Second
 )
 
-// defaultDialTimeout 节点池【建连】阶段的上限。
+// T3 超时分层（2026-10-26）：节点池【建连】阶段的硬上限，替代旧值 60s。
 //
-// ★ 为什么要设：节点池 Transport 的 DialContext 原本是裸闭包，没有任何建连超时，
+// 旧值 60s（legacyDialTimeout）把失败侧的病态等待留在原地：单个建连可等 135s
+// （SYN 重传耗尽），单次失败最差 171s（04-prior-art 生产记录；本仓库 call_log 快照
+// 里单请求上限 120s 是 loopBudget 截断的结果，不是建连超时）。
 //
-//	建连失败只能等 TCP 层自己超时 —— 实测失败侧有一个 135.2 秒的尖峰
-//	（Linux SYN 重传耗尽：1+2+4+8+16+32+64 ≈ 127s + 开销）。再乘上重试预算
-//	（loopBudget = maxAttempts 3 + maxQuotaSwitches 5 = 8 次尝试），
-//	含 connect_error 的整请求实测 p50=137 秒、max=1,221 秒。
+// 新值 8s 是「先量后定」的结果：用生产 call_log 的成功请求做误杀率上界（ttft 覆盖
+// 建连+响应头+首 token，因此是纯建连误杀率的严格上界）：
 //
-// ★ 为什么是 60 秒（依据是成功侧的实测分布，不是拍脑袋）：
+//	5s → 29.1%（10-26 窗口 n=864） / 21.8%（全窗口 n=9,045）
+//	8s → 15.1% / 13.0%
 //
-//	成功侧建连耗时（取自节点池探针记录的 latency_ms，n=141）：
-//	  p50=11.7s · p90=15.4s · p99=18.0s · max=18.8s，>20s 的 0 个。
-//	取值 → 误杀率（按成功请求的 connect_ok−请求ts 上界口径，n=171,823）：
-//	  10s → 58.2%   ★ 绝对不能用（会把整个快峰全杀）
-//	  15s → 13.5%   ★ 不能用
-//	  30s → 0.941%
-//	  60s → 0.234%  ← 采用
-//	60s 对实测 max(18.8s) 有 3.2 倍余量，同时把 135s 的病态尾部砍掉一半以上。
-//	★ 成功侧是【强双峰】（58 个在 1~3s、82 个在 10~19s，中间 2.6~9.8s 完全空白），
-//	所以这个值是按「池子里最慢的那个来源」定的，不是按中位数。
-//
-// ★ 只限建连这一个阶段：下方 Transport 的 ResponseHeaderTimeout(60s) 保持不变 ——
-//
-//	那是「已建连、等响应头」的另一个阶段，两者互不覆盖。
-const defaultDialTimeout = 60 * time.Second
+// 两档都远高于 0.5% 门槛，按计划规则「5s 误杀 >0.5% 则取 8s」采用 8s。上界包含
+// 建连之后的响应头与首 token 等待，真实建连阶段远小于此；口径与数据见
+// docs/research/scoring2/08-task3-report.md。
+const legacyDialTimeout = 60 * time.Second // 旧值：仅保留作历史对照，不再生效
 
-// dialTimeout 实际生效的建连超时。做成 var 而非直接用 const，是为了让测试能临时
-// 下调到秒级验证机制（真等 60 秒的测试没有实用价值）；生产取值恒为 defaultDialTimeout。
-var dialTimeout = defaultDialTimeout
+var connectTimeout = 8 * time.Second
+
+// dialTimeout 实际生效的建连超时。保留旧名字：既有调用点（newNodeTransport、
+// bun_egress）与测试都读它；production 取值 = connectTimeout。
+var dialTimeout = connectTimeout
+
+// globalTTFTP95 是【全局】首字节等待 p95（不按节点）。
+// 依据 .research/scoring2/05-latency.md：上线后节点对 ttft 的 ICC=0.0%，按节点取
+// p95 只会引入噪声。取值 13.06s = 2026-10-26 生产 call_log 中 864 条成功请求的
+// 精确 ttft p95（口径见 08-task3-report.md）。
+var globalTTFTP95 = 13060 * time.Millisecond
+
+// firstByteDeadline 返回首字节（响应头）等待上限 = max(15s, 全局 ttft p95 × 1.5)。
+// T3 的目标不是压 p95（p95 由 mimo 长生成驱动），只是给「永远等不到首字节」设上限。
+func firstByteDeadline(globalP95 time.Duration) time.Duration {
+	d := globalP95 * 3 / 2
+	if d < 15*time.Second {
+		return 15 * time.Second
+	}
+	return d
+}
+
+// firstByteTimeout 实际生效的响应头等待上限。三处 Transport（直连 / 节点池 / Bun）
+// 共用同一个值，保证「首字节」在各个出口语义一致。做成 var 便于测试注入。
+var firstByteTimeout = firstByteDeadline(globalTTFTP95)
 
 // tlsHandshakeTimeout TLS 握手阶段的上限。
 // 为什么必须有它：Go 里 http.Transport.TLSHandshakeTimeout 的零值表示【不超时】。
@@ -448,6 +470,12 @@ func (p *nodePool) pick(force bool) *ProxyNode {
 
 // pickWithMeta 与 pick 相同，额外返回本次被迫换节点的候选数（switch 事件埋点用）。
 func (p *nodePool) pickWithMeta(force bool) (*ProxyNode, int) {
+	return p.pickWithMetaExcluding(force, nil)
+}
+
+// pickWithMetaExcluding 在 pickWithMeta 基础上排除指定出口（429 漂移守卫）。
+// nil/空 map 等价于原行为；非强制路径若当前节点被排除，也会立即改选。
+func (p *nodePool) pickWithMetaExcluding(force bool, exclude map[string]bool) (*ProxyNode, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -473,9 +501,13 @@ func (p *nodePool) pickWithMeta(force bool) (*ProxyNode, int) {
 		return nil, 0 // 全部冷却/隔离中：直连（调用方另做全订阅隔离 fail-fast）
 	}
 
-	// 1) 不强制且当前仍可用 → 沿用（T2 硬约束：粘滞语义一个字不改）
+	excluded := func(n *ProxyNode) bool {
+		return n != nil && len(exclude) > 0 && exclude[nodeEgressKey(n.Fingerprint)]
+	}
+	// 1) 不强制且当前仍可用 → 沿用（T2 硬约束：粘滞语义一个字不改；
+	//    但 429 漂移集合里的出口例外——必须换出去）。
 	if !force && p.activeID != "" {
-		if cur := p.byID[p.activeID]; cur != nil && p.eligible(cur, now) {
+		if cur := p.byID[p.activeID]; cur != nil && p.eligible(cur, now) && !excluded(cur) {
 			p.markUsedLocked(cur, now)
 			return cur, 0
 		}
@@ -483,7 +515,7 @@ func (p *nodePool) pickWithMeta(force bool) (*ProxyNode, int) {
 	// 2) 手动指定优先
 	if p.manualPick != "" {
 		if pref := p.byID[p.manualPick]; pref != nil {
-			if !(force && pref.Fingerprint == p.activeID) && p.eligible(pref, now) {
+			if !(force && pref.Fingerprint == p.activeID) && p.eligible(pref, now) && !excluded(pref) {
 				p.activeID = pref.Fingerprint
 				p.markUsedLocked(pref, now)
 				return pref, 0
@@ -500,6 +532,9 @@ func (p *nodePool) pickWithMeta(force bool) (*ProxyNode, int) {
 			continue
 		}
 		if force && n.Fingerprint == p.activeID {
+			continue
+		}
+		if excluded(n) {
 			continue
 		}
 		candidates = append(candidates, n)
@@ -533,6 +568,18 @@ func (p *nodePool) switchCandidatesLocked(candidates []*ProxyNode, fromFp string
 		return candidates
 	}
 	if from := p.byID[fromFp]; from != nil {
+		// R1：先排除当前订阅；有其它订阅候选才排除，否则退化。
+		fromSub := subKeyOf(from.Name)
+		crossSub := make([]*ProxyNode, 0, len(candidates))
+		for _, n := range candidates {
+			if subKeyOf(n.Name) != fromSub {
+				crossSub = append(crossSub, n)
+			}
+		}
+		if len(crossSub) > 0 {
+			candidates = crossSub
+		}
+		// 再排除同 /24、/64；无其它候选时退化到当前候选集。
 		filtered := make([]*ProxyNode, 0, len(candidates))
 		for _, n := range candidates {
 			if sameNodeSubnet(from, n) {
@@ -608,6 +655,12 @@ func (p *nodePool) quarantineSubLocked(sub string, now time.Time) {
 		st = &sub403State{}
 		p.sub403[sub] = st
 	}
+	if !st.last403.IsZero() && now.Sub(st.last403) > sub403Silence {
+		st.escalations = 0
+		st.strikes = 0
+		st.windowStart = now
+	}
+	st.last403 = now
 	if st.windowStart.IsZero() || now.Sub(st.windowStart) > sub403Window {
 		st.strikes = 0
 		st.windowStart = now
@@ -637,6 +690,19 @@ func (p *nodePool) confirmSub403(fp string, now time.Time) {
 	if n := p.byID[fp]; n != nil {
 		p.quarantineSubLocked(subKeyOf(n.Name), now)
 	}
+}
+
+// freeTierConfirmAllowed 统一判定「换节点后成功」的确认侧是否允许落地：
+// 先判定 halt / shape_latch / pool_floor；被抑制则调用方不得 mark，也不得喂订阅 strike。
+// 这是 R2 的强制顺序：确认与 mark 同生共死，不能先喂熔断再决定抑制。
+func (p *nodePool) freeTierConfirmAllowed(now time.Time) (suppressed string, allowed bool) {
+	if p.poolHalted(now) {
+		return "pool_halt", false
+	}
+	if ok, why := p.freeTierMarkAllowed(); !ok {
+		return why, false
+	}
+	return "", true
 }
 
 func (p *nodePool) subQuarantined(name string, now time.Time) bool {
@@ -710,12 +776,13 @@ func (p *nodePool) maybeHaltPoolLocked(now time.Time) {
 	if attempted == 0 {
 		attempted = len(p.pool403)
 	}
-	threshold := pool403Min
-	if attempted/2 > threshold {
-		threshold = attempted / 2
+	// R3：max(8, min(24, ceil(0.35 * 窗口内被尝试节点数))).
+	threshold := (attempted*35 + 99) / 100
+	if threshold < pool403Min {
+		threshold = pool403Min
 	}
-	if attempted%2 != 0 && (attempted+1)/2 > threshold {
-		threshold = (attempted + 1) / 2
+	if threshold > pool403Max {
+		threshold = pool403Max
 	}
 	if len(p.pool403) >= threshold {
 		p.poolHaltUntil = now.Add(poolHaltFor)
@@ -1551,7 +1618,7 @@ func newNodeTransport(dial func(ctx context.Context, network, addr string) (net.
 			return dial(dctx, network, addr)
 		},
 		TLSHandshakeTimeout:   tlsHandshakeTimeout,
-		ResponseHeaderTimeout: 60 * time.Second,
+		ResponseHeaderTimeout: firstByteTimeout,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
@@ -1847,9 +1914,22 @@ func (p *nodePool) pickForRegion(force bool, requiredRegion string) *ProxyNode {
 	return n
 }
 
-func (p *nodePool) pickForRegionMeta(force bool, requiredRegion string) (*ProxyNode, int) {
+func (p *nodePool) pickForRegionExcluding(force bool, requiredRegion string, exclude map[string]bool) *ProxyNode {
 	if requiredRegion == "" {
-		return p.pickWithMeta(force)
+		n, _ := p.pickWithMetaExcluding(force, exclude)
+		return n
+	}
+	n, _ := p.pickForRegionMetaExcluding(force, requiredRegion, exclude)
+	return n
+}
+
+func (p *nodePool) pickForRegionMeta(force bool, requiredRegion string) (*ProxyNode, int) {
+	return p.pickForRegionMetaExcluding(force, requiredRegion, nil)
+}
+
+func (p *nodePool) pickForRegionMetaExcluding(force bool, requiredRegion string, exclude map[string]bool) (*ProxyNode, int) {
+	if requiredRegion == "" {
+		return p.pickWithMetaExcluding(force, exclude)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -1866,7 +1946,7 @@ func (p *nodePool) pickForRegionMeta(force bool, requiredRegion string) (*ProxyN
 		return nil, 0
 	}
 
-	// 过滤：仅选匹配区域的节点
+	// 过滤：仅选匹配区域，且排除指定出口。
 	from := p.activeID
 	var candidates []*ProxyNode
 	for _, n := range ordered {
@@ -1877,6 +1957,9 @@ func (p *nodePool) pickForRegionMeta(force bool, requiredRegion string) (*ProxyN
 			continue
 		}
 		if force && n.Fingerprint == p.activeID {
+			continue
+		}
+		if len(exclude) > 0 && exclude[nodeEgressKey(n.Fingerprint)] {
 			continue
 		}
 		candidates = append(candidates, n)
