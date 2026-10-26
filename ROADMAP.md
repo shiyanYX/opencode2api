@@ -34,7 +34,7 @@
 | | C-5b 探测层判据（「节点池悄悄烂掉、而节点流量几乎为零」这种形态对纯流量判据不可见） | 待做（见下文「已知盲区」） |
 | | C-7 `loadState()` 空实现（重启丢运行时状态：gate_state/streak） | 待做（低危） |
 | **2. 上线 + 环境** | 修 `NO_PROXY`（根因在 `~/.docker/config.json`，不是 compose）+ 部署本批代码到生产 | ✅ 2026-10-19 `37ed108`（池内可用 0 → 216，真实请求 1.19~2.23s 走节点） |
-| **3. UI 大改** | **U1** freellm UI 深度学习 ✅ `1f651ba`（`docs/research/U1-freellm-ui-study.md`）→ **U2a** freellm **大框架**逆向 + 我们是否换栈的决断（`task-15`）／ **U2b** freellm **风格配方** + 我们页面的重画样例（`task-16`）→ 用户拍板 → **U3** 分步实施 + 上线。早期三个方向草稿（运维监控台 / 诊断流 / 表格优先，`docs/mockups/u2/`）保留作参照，但**风格与大框架以 U2a/U2b 为准** | ✅ **U2a/U2b 交付完成，待用户拍板**（详见下方「UI 大改」专题；导航索引 `docs/mockups/index.html` 由 `task-25` 产出） |
+| **3. UI 大改** | ~~U1/U2a/U2b/U3 全线~~ **2026-10-24 用户裁决：新 UI 全部推倒重来**。旧预览稿（mockups/u2/u2a/u2b/u3/u4）、新面板源码（web/）、UI 研究文档与任务全部清除（归档 `/tmp/ui-restart-20261024/`），`static/admin.html` 已回滚到生产版（md5 `dee593fd…`）。**当前状态：待重新开始**——等用户给出新的方向/风格要求后再立项 | 🔄 **待重新开始** |
 | **4. 节点评分机制（S3）** | ★ **阻塞于阶段 3 的设计定稿**；评分必须能在新面板上呈现（列表列 / 排序入口 / 分档徽章 / 独立健康视图，由 U2 定）。**U2 未定稿前不动手** | 阻塞 |
 | **5. 观测与根因** | IP-3（一眼分清「IP 被锁」vs「上游收紧」）、IP-2 剩余（事件驱动闸门探针、修盲目复活）、IP-4（IP 来源采样实验） | 待做 |
 
@@ -1196,25 +1196,22 @@ U2a 已把它列为 `D1`（建议 ECharts 本地化）。
 
 ---
 
-## ★ UI 大改（U1 → U2a/U2b → U3）：待用户拍板
+## ★ UI 大改：**已推倒重来，待重新开始**（2026-10-24 用户裁决）
 
-用户 2026-10-19 明确：**照 freellm 大改前端**（风格 + 大框架），并且这是「节点评分机制」的前置。
+用户裁决原话：**「不行，删除现在对于新ui的所有进度，我决定从头开始」**。
 
-**两份研究交付物（都已独立验证存在且可打开）：**
+**已执行的清理（2026-10-24）：**
+- 预览稿全删：`docs/mockups/`（u2/u2a/u2b/u3/u4 + 索引页）
+- 新 UI 研究文档 13 篇删除（U1/U2a/U2b、u3-*、panel-*、overview-* 等）+ UI 计划稿（admin-visual-port、overview-ccswitch、filter-linkage）
+- `.research/` 下 UI 证据（u4/u3-overview/u3-shell/live-panel 等）删除
+- 新面板源码 `web/` 删除；`static/admin.html` 已 `git checkout` 回生产版（md5 `dee593fd95a5c778279023b6a0b2a378`）
+- 任务板 41 个 UI 任务全部删除
+- **归档**：全部打包在 `/tmp/ui-restart-20261024/`（104 MB，782 文件），需要任何旧材料可取
+- 9400 预览服务与 cloudflared 隧道已停
 
-| 交付物 | 内容 | 一句话结论 |
-|---|---|---|
-| `docs/research/U2a-freellm-shell-and-stack.md`（53.7 KB）<br>`docs/mockups/u2a/shell-blueprint.html`（可点）<br>`docs/mockups/u2a/routeA-proto-admin.html`（**可运行原型**） | 大框架逆向 + **要不要跟着换栈** | **不换栈。**「照 freellm 改大框架」的全部框架级改动只有**侧栏换顶栏**，已做成**可运行原型**：改 5 处、净 **+20 行（+0.86%）**、gzip **+291 B**，桌面+移动都过 Playwright。换栈要付 **9.3 倍明文首屏**（191,661 B → 1,786,089 B；gzip 60,692 → 512,555 B = 8.4 倍），并打断 `discev_test.go` 从 `admin.html` 抽常量的既有契约 |
-| `docs/research/U2b-freellm-style-recipe.md`（745 行）<br>`docs/mockups/u2b/style-specimen.html`（826 行，可点） | 风格配方（构图 P1–P5 / 视觉 V1–V10 / 密度 D1–D5 / 明暗 T1–T4 / 动效 M1–M3）+ **把我们真实页面重画** | 差距是**反向**的：freellm 卡片 24px 圆角 + 1px ring + **零阴影**、值 20px/600 等宽数字、标签 11px；我们是阴影、30px 值、12px 圆角 |
+**保留未动**：后端全部改动（calllog/main/proxy_node/statscan/node_scoring 等）、后端/运维研究文档、任务板 12 个后端任务。
 
-**★ U2a 顺带查出一条真问题（已排 `task-27`）**：**我们的面板零 HTTP 压缩** —— 非 vendor Go 代码里 `gzip|Content-Encoding` 零命中，`adminPageHandler`（`main.go:7402`）直接 `w.Write(adminPageHTML)`。实测 `static/admin.html` **191,661 B 明文 / gzip 60,692 B（3.16 倍）**，生产 `curl -H 'Accept-Encoding: gzip, deflate, br'` 响应**无 `Content-Encoding` 头**。历史记录里「面板打开慢已修好（5.2s → 0.0017s）」说的是**服务端渲染耗时**，**传输体积从未优化**。
-
-**Lead 已独立复验（不是采信报告）：** 两个 HTML 在 **1440 / 390 / 320** 三种宽度下 `pageerror=0`、`console.error=0`、**外部请求=0**、`scrollWidth === clientWidth`；样例里的 C-5 告警横幅在 1440 与 390 下均可见、跨视图保持可见（我自己用 Playwright 重跑，见下「验收纪律」）。
-
-**待用户拍板的一件事**：U2a 建议**路线 A（保持无构建单文件，只抄它的 shell）**，随后按 §4.3 增量补组件（≈+383 行 / +16.6%）。翻转条件（什么情况下该换栈）写在 U2a §5.5。**用户点头前不写 U3 代码。**
-
-**打开方式**：`docs/mockups/index.html`（一个入口，按推荐顺序逐个点开）。
-
+**下一步**：等用户给出新方向（风格/信息架构/参照物）后再立项，从头走「设计 → 预览 → 用户拍板 → 实现 → 独立验收」流程。旧规则仍有效：不许造数、缺数据标「未提供」、图内少字、对齐与空白都要验收。
 ---
 
 ## ★ 用户三条成功指标的实测（2026-10-19 16:10，生产数据）
@@ -1449,7 +1446,7 @@ test 分支合并到 main  →  GitHub Actions 构建并推送 ghcr 镜像  → 
        第二批待独立验收：task-21 统计口径 / task-22 面板展示（md5 a858af8e…）/ task-27 gzip
        C-5 v3 修复完成（node_alert.go b0783b4a…），已随第一批上线
        C-5 横幅全局可见 + 窄屏溢出修复完成，独立盲验中
-       U2a/U2b 面板大改研究交付完成，待用户拍板是否走路线 A
+       UI 大改全线推倒重来（用户 10-24 裁决），待重新开始
        ★ 未映射模型统计 bug：否决公式 A（会删 4,437 条真实成功），改用公式 B
        三条成功指标实测：成功率 99.82%、等待 p99 65.7s、>120s 归零
 10-13  第 1 步全部完成并上线

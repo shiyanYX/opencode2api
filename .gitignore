@@ -37,3 +37,6 @@ docker-compose.yml
 .gocache/
 .modcache/
 .gotmp/
+# 前端开发用的本地假数据（含真实配置，绝不入库）
+web/fixtures/
+.scratch/
