@@ -182,13 +182,30 @@ func shapeToolsForUpstream(bodyMap map[string]any) (mapping map[string]string, i
 
 // ensureAgentUpstreamShape 把上游请求体调整为免费层要求的形态，返回工具名回映射
 // 与补齐的占位工具集合，供响应侧还原/过滤。
+//
+// 2026-10-25 起对齐官方 2.x 客户端形态（对照实验定案，见 oc_shape_v2.go 文件头）：
+//   - 工具集换成官方 2.x 13 工具（真实 schema，含 strict:false），由
+//     shapeToolsV2 完成；旧 requiredOfficialTools 的 11 个占位名退役。
+//   - 注入官方 system prompt（含 <env> 块与 skills），由 injectOfficialPrompt 完成。
+//   - 无 ceiling 时补 max_completion_tokens=32000（2.x 客户端每个 chat body 都带）。
 func ensureAgentUpstreamShape(bodyMap map[string]any) (map[string]string, map[string]bool) {
 	bodyMap["stream"] = true
 	// 聚合需要用量，而上游只在 include_usage 时于末尾 chunk 返回 usage。
 	if _, ok := bodyMap["stream_options"]; !ok {
 		bodyMap["stream_options"] = map[string]any{"include_usage": true}
 	}
-	return shapeToolsForUpstream(bodyMap)
+	mapping, injected := shapeToolsV2(bodyMap)
+	// 官方 prompt 注入按 model 字段（此时已由调用方置入）渲染 <env> 块。
+	model, _ := bodyMap["model"].(string)
+	injectOfficialPrompt(bodyMap, model)
+	// 2.x 客户端对无 ceiling 的 chat body 固定发 max_completion_tokens:32000；
+	// 显式 max_tokens / max_completion_tokens 保留调用方值。
+	if _, ok := bodyMap["max_tokens"]; !ok {
+		if _, ok := bodyMap["max_completion_tokens"]; !ok {
+			bodyMap["max_completion_tokens"] = 32000
+		}
+	}
+	return mapping, injected
 }
 
 // remapToolCallsInDelta 就地改写 delta 里的工具调用：命中 mapping 的改回客户端原名，

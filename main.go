@@ -2745,7 +2745,10 @@ func buildOCRequest(modelID string, bodyMap map[string]any, auth UpstreamAuth, n
 
 func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth UpstreamAuth, useGoEndpoint bool, nodeFP, ver string) (*http.Request, error) {
 	bodyMap["model"] = modelID
-	tryBody, err := json.Marshal(bodyMap)
+	// v2 gate 对 body 做指纹比对：encoding/json 的 HTML 转义（\u003c 等）
+	// 与 JSON.stringify 字节不同，免费层 body 必须无转义编码。
+	// 付费/Go 层语义等价，统一走同一路径无害。
+	tryBody, err := marshalBodyBytes(bodyMap)
 	if err != nil {
 		return nil, err
 	}
@@ -2753,11 +2756,11 @@ func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth Ups
 	if useGoEndpoint {
 		upstreamURL = "https://opencode.ai/zen/go/v1/chat/completions"
 	} else {
-		// 2026-10-15 起用 /inference/v1/：官方客户端（1.18.33）已迁到该路径，
-		// 而旧的 /zen/v1/chat/completions 现在只放行「完全真客户端」的请求——
-		// 同一份请求（同头同体）在 /zen/v1/ 上 403 FreeTierError、在 /inference/v1/
-		// 上 200。两个路径目前都还在，但只有新路径接受网关形态。
-		upstreamURL = "https://opencode.ai/inference/v1/chat/completions"
+		// 2026-10-25 起 v2 lane 用 2.1 客户端的 family 路由：/inference 后
+		// 按协议族分组（openai/anthropic），Chat 是 /inference/openai/v1/...。
+		// 旧的扁平路由 /inference/v1/... 仍在响应，但 2.1 客户端不再发它，
+		// flat 路由现在是过时客户端特征（上游 v1.4.4 同步，commit f9ef5693）。
+		upstreamURL = "https://opencode.ai/inference/openai/v1/chat/completions"
 	}
 	req, err := http.NewRequest("POST", upstreamURL, bytes.NewReader(tryBody))
 	if err != nil {
@@ -2767,12 +2770,21 @@ func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth Ups
 	req.Header.Set("Authorization", auth.authorizationHeader())
 	// 版本由调用方传入（本请求自己携带），不再在函数内二次读全局：
 	// 否则「attemptVer == 实际发出的版本」不是不变量，C1 的归因守卫会失效。
-	req.Header.Set("User-Agent", fmt.Sprintf("opencode/%s", ver))
-	req.Header.Set("x-opencode-client", "cli")
-	req.Header.Set("x-opencode-project", ocProjectID)
-	req.Header.Set("x-opencode-session", getOrCreateSessionByNode(nodeFP))
-	req.Header.Set("x-opencode-request", newOpenCodeID("msg"))
-	req.Header.Set("Accept", "application/json")
+	//
+	// 2026-10-25 起免费层（非 Go endpoint）走 v2 头形态：四段 UA、双 session
+	// 头 + affinity、无 x-opencode-request（v2 gate 拒它）。Go endpoint 维持
+	// 1.x 形态（zen/go lane 的 gate 未随 2.x 演进）。ver 参数在 v2 分支不用于
+	// UA（v2UserAgent 内置 2.1.1），保留形参签名以最小化调用面改动。
+	if useGoEndpoint {
+		req.Header.Set("User-Agent", fmt.Sprintf("opencode/%s", ver))
+		req.Header.Set("x-opencode-client", "cli")
+		req.Header.Set("x-opencode-project", ocProjectID)
+		req.Header.Set("x-opencode-session", getOrCreateSessionByNode(nodeFP))
+		req.Header.Set("x-opencode-request", newOpenCodeID("msg"))
+		req.Header.Set("Accept", "application/json")
+	} else {
+		applyV2Headers(req, getOrCreateSessionByNode(nodeFP), ocProjectID)
+	}
 	return req, nil
 }
 
@@ -2894,6 +2906,12 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			break
 		}
 		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		// 免费层（zen）请求经 BunTransport 发出：TLS 指纹是 v2 gate 的硬前提
+		// （2026-10-25 对照实验，见 bun_transport.go）。Go endpoint 维持原传输。
+		// 付费 zen key 走免费模型时同样需要（v2 gate 按 lane 而非按 key 校验）。
+		if !useGoEndpoint {
+			egResult = bunEgressResult(egResult)
+		}
 		client, nodeFp := egResult.Client, egResult.NodeFP
 		// I2：本 attempt 实际发出的 UA 版本由本请求自己携带（builder 不再读全局），
 		// 否则 C1 的「失败 attempt 与确认 attempt 版本相同」不是不变量。
@@ -3299,6 +3317,10 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			break
 		}
 		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		// 免费层（zen）请求经 BunTransport 发出（同非流式，见上方注释）。
+		if !useGoEndpoint {
+			egResult = bunEgressResult(egResult)
+		}
 		client, nodeFp := egResult.Client, egResult.NodeFP
 		// I2：同非流式——版本由本请求携带，见上方注释。
 		attemptVer := ocClientVersion()
