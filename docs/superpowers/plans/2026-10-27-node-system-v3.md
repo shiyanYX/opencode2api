@@ -1,119 +1,126 @@
-# 节点系统 v3 执行计划（2026-10-27）
+# 节点系统 v3.1 执行计划（2026-10-27）
 
-> **状态：DRAFT v3.0 —— 未定稿。** 尚未经过 ≥2 轮独立对抗校对，不得据此开工。
-> 校对纪律：**同一时刻只允许一个代理在跑**（用户 2026-10-27 要求），逐轮串行。
+> **状态：DRAFT v3.1 —— 已过 R3 校对，待 R4 复审。** R3 结论 NO-GO（3 条 blocker）已全部写入本版。
+> 纪律：同一时刻只允许一个代理在跑；R4 通过前不开工。
 
-> 回答「实现计划规划好了吗」：**之前没有**。之前只有设计方向 + 4 个粗批次；两份独立研究（`11-shape-drift-design.md` 的 C10、`12-shape-drift-review.md` 的 G1）刚刚证明工作区里那版漂移闩 **no-go**，并给出了更强的方案。
-> 本文件才是执行计划：每个切片有文件、验收、变异数、提交边界、回滚方式。
+## 0. 决策记录（R3 裁决后）
 
-## 0. 决策记录
+**默认路径：per-`(model, egress)` 排除。全局闸降为严格例外。**
 
-**采纳：C10 × G1 合并方案。**
-- 来自 C10（healthcheck-probe）：`(model, egress)` 级排除 + 5m/30m/2h/5h 递进冷却 + 每 IP 24h 坏形态预算 + 探测只允许单飞。
-- 来自 G1（review-t1-design）：**发送前闸门**（probe_only 时除单飞探测外一律不发）+ blocked 集合只由证据清除、**TTL 不清空** + 试探令牌绑定具体出口 + 对外 503 + `Retry-After`。
-- 合并后的关键取舍：
-  1. **排除状态按 `(model, egress)`**（因为配额是 per-model，有 deepseek 成功而 mimo 失败的实证）；
-  2. **probe_only 是全局单闸**（形态拒绝是账号/IP 级；避免 M 个 model 放大探测）；
-  3. **触发条件改为「连续 K=5 个新出口 429 且期间无 2xx，且距上次 2xx >60s」**，不用「3 个不同出口/10min」这个伪信号；
-  4. **任何真实 2xx 立即清 probe_only**（跨 model）；
-  5. **probe_only 期间禁止回退直连**（`allow_direct_in_probe=false`），全排除时 fail-fast 503；
-  6. **每次抑制都写结构化事件**，没有留痕的方案不合格。
+| 分歧 | v3.0 | v3.1（R3 裁决） |
+|---|---|---|
+| D1 状态粒度 | 全局单闸 × per-model 二选一 | **默认 per-`(model,egress)`**；全局仅在严格布尔条件下启用 |
+| D2 触发条件 | 3 distinct/10min 或 K=5 | **K=5 + distinct_new_egress≥5 + 60s 无任何 2xx + attempts≥20 + 429 比例≥0.90** |
+| D3 闩退出 | TTL 10min 退出 | **TTL 只推 `nextProbeAt`，绝不清 `blocked`**；退出唯一条件是任一真实 2xx |
+| D4 每 IP 预算 | 24h 8 次 | 接受，但**只统计 shape-suspect**，不统计普通配额 429 |
+| D5 冷却 5h | 固定 5h | **5m→30m→2h→5h 递进 + 真实请求 canary**；190 个首次标记 100% 为 +5.00h，无依据 |
+| D6 probation 证据 | 真实请求 vs 探测未定 | 配额 probation **只用真实请求**；主动探测只用于 dead/transport；**删除 `recordProbeSuccess` 对 NodeProbation 的提升** |
+| D7 对外状态码 | 混用 | 全局/pool403/direct → **503 + Retry-After**；仅 per-model 配额 → 429；**禁止透传上游 429** |
+| D8 三套 halt | 并存 | **唯一 `Decide(GateInput) GateDecision`**，优先级 `pool403 > global shape > model quota > direct quota > selection` |
 
-**明确否决**：现有 23:32 版（per-model 桶 + 10min TTL 清空 seen + 事后 Halt）——评审实测 5h 内发送 5,520 次、每出口命中 30 次、主 IP 命中 30 次，2h40m 烧穿全池。
+**更正一处先前错误**：我此前说「23:03/00:33/01:00 有 21/29/9 个节点到期」是**日志行数**，distinct fp 只有 **3/1/2**；18:03 的 21 行只涉及 2 个节点。涉及这些数字的论证已按 R3 复算修正。
 
-## 1. 切片（每个切片 = 一个可独立回滚的提交）
+## 1. 唯一裁决点
 
-### S0 前置：拆干净工作区
-- 把当前混在一起的 T1/T2/T3/T6 改动按切片拆分提交到 `test`（允许提交，`main` 仍需用户批准）。
-- `*_test.go` 永不入库（`.gitignore:26`）。
-- 验收：每个提交单独 `go build ./...` 通过；`git log` 里 T1/T2/T3 各自可 revert。
-- **为什么先做**：现在 12 个文件、1,253 行改动混在一起，任何回滚都会带走无关修复。
+```go
+type GateInput struct {
+    Now               time.Time
+    Model             string
+    EgressKey         string
+    AttemptsLast60s   int
+    Ratio429Last60s   float64
+    DistinctNew429    int   // 600s，去重 egress
+    ConsecutiveNew429 int
+    LastAny2xx        time.Time
+    Pool403Halted     bool
+    PairBlocked       bool
+    ModelQuotaBlocked bool
+    DirectQuotaBlocked bool
+    GlobalArmed       bool
+}
+type GateDecision struct {
+    Allow      bool
+    Reason     string // pool403 | global_shape | model_quota | direct_quota | ok
+    StatusCode int    // 503 或 429
+    RetryAfter int
+    TrialToken string // 单飞探测令牌（绑 egress）
+    SuppressBy string
+}
+func Decide(in GateInput) GateDecision
+```
 
-### S1 漂移闩替换为合并方案
-- 文件：`shape_drift.go`（重写）、`main.go`（两条循环：发送前闸门 + 503/Retry-After + 试探令牌绑定 + 成功清闩）。
-- 必须实现：
-  - 全局 `probeOnly` + `nextProbeAt` + 单飞 `probe{key,at}` + `blocked`（首次时间，不刷新）；
-  - 每 `(model,egress)` 排除，strikes 冷却 5m/30m/2h/5h；24h 内单 egress 命中预算 8；
-  - 触发 K=5 连续新出口失败 + 无 2xx + last_success>60s；
-  - 退出：任一 2xx / TTL 10min（退出后每小时最多重入 6 次，且消耗预算）；
-  - 全排除时 503 + `Retry-After: 30`，不回退直连；
-  - 抑制事件字段：`model`、`node_fp`、`would_be_egress`、`suppressed_by=shape_drift_probe_only`、`blocked_n`。
-- 测试 ≥18：触发阈值边界、TTL 不清 blocked、单飞、令牌错配不升级退避、2xx 清闩、model 名 10 万不爆内存、24h 预算、直连禁止、503 头。
-- 变异 ≥8 全红（删发送前闸门、TTL 清 blocked、去单飞、去预算、去 2xx 清闩、per-model 换成全局、503 换 429、抑制不留痕）。
-- 验收：`go test -skip 'TestIP4RV' -count=1 ./...` + 事故仿真（下节）+ 独立评审 PASS。
+优先级（高→低）：`pool403 > global_shape > model_quota > direct_quota > selection`。
+- 同一事务内更新全局闸与 per-pair 状态，禁止只更新一边。
+- 禁止在 gate 内调用 `hasEligibleNode()` 之类有副作用的函数。
 
-### S2 生命周期：probation + mark 幂等
-- 文件：`proxy_node.go`、`main.go`（成功/失败调用点）。
-- 冷却到期 → `probation`；单次证据请求；成功 → available；429 → 递进冷却；其他失败 → dead。
-- mark 幂等：重复 mark 不延长 `CooldownUntil`、不重复写日志。
-- 测试已有规格：`node_probation_test.go`（本地）。
-- 验收：该文件全绿 + 变异 ≥5 全红。
+## 2. 全局 shape 的可判定条件（R3 §2.3）
 
-### S3 资格：per `(model, node)` 配额状态
-- 文件：`proxy_node.go`、`calllog.go`、状态持久化（`proxy_state` 迁移，需向后兼容：旧文件无该字段时视为 `unknown`）。
-- 429 只写该 model 的配额；节点对其他 model 仍可选。
-- 面板新增只读字段（缺失显示「未提供」）。
-- 验收：迁移测试（旧状态文件可加载）、跨 model 隔离测试、变异 ≥5。
+```text
+GLOBAL_SHAPE =
+  no_2xx_any_model(last 60s)                      // 硬否决：任一 2xx 立即 false
+  AND last_any_2xx_age >= 60s
+  AND distinct_new_egress_429(last 600s) >= 5     // 同一 egress 被不同 model 429 只算 1 个
+  AND consecutive_new_egress_429 >= 5              // 同出口重复 429 不递增
+  AND attempts(last 60s) >= 20
+  AND 429_count(last 60s) / attempts(last 60s) >= 0.90
+```
 
-### S4 打分架构（等 T7 结论）
-- 按 `13-scoring-architecture.md` 落地；不阻塞 S1–S3。
+- 只有 1 个出口反复 429（如 00:20 的 `US-191.96.254.138`，167 次）**永远不触发全局**，由 per-pair 处理。
+- 低流量（attempts<20）不启用全局，靠 per-pair + fail-fast。
+- 全局闸生效时：`blocked` 保留；TTL 只推 `nextProbeAt`；除单飞探测外零上游发送。
+- 任一真实 2xx（任意 model）⇒ 同事务清除全局闸与对应 `(model,egress)`。
 
-## 2. 事故仿真验收（每个切片都要跑）
+## 3. 切片（每个切片 = 一个可独立回滚的提交）
 
-用 `18:03–23:00` 与 `00:20–00:25` 的真实参数（R≈0.5 req/s、212 出口、H=10–16）跑虚拟时间 5h：
-- 断言：`sent`（上游发送总数）≤ 请求数 × 0 + 探测数（probe_only 生效时应 ≈ 探测量级，而不是 5,520）；
-- 单出口命中 ≤ 1 次/风暴（除非证据恢复后再次失败）；
-- 主 IP 命中 = 0；
-- 闩最长连续 armed < 10min，且期间至少 1 次成功退出；
-- 24h 后无出口达到封禁阈值。
-仿真脚本入库到 `docs/research/scoring2/replay/`（只读日志、可复跑）。
+### S0 拆分提交（已完成基础）
+- `da85f2b`（T1/T2/T3 + 草案）、`456256f`（probation + mark 幂等）。测试文件不入库。
 
-## 3. 上线与回滚
+### S1 闸门引擎 + 唯一裁决点
+- 文件：`shape_drift.go`（重写为引擎）、`gate.go`（新增 `Decide`）、`main.go`（两条循环改为先 `Decide` 再发）、`calllog.go`（结构化抑制字段）。
+- 必须：per-pair 递进冷却 5m/30m/2h/5h；24h shape-suspect 预算 8；单飞令牌绑 egress；全局条件如上；禁止回退直连；`SHAPE_DRIFT_GATE=off` 时行为回到 HEAD。
+- 测试 ≥20（含 D1 条件逐条布尔、单出口 167 连发不升级、同窗口 40 ok 禁止全局、TTL 不清 blocked、令牌错配、24h 预算、503 header、off 开关、并发 100 单飞）。
+- 变异 ≥8 全红。
+- 事故仿真：18:03 与 00:20 两段参数各跑 5h 虚拟时间；断言单出口命中 ≤1、主 IP 命中 0、无 5,520 次发送、全局 armed 连续 <10min。
+- 独立评审 PASS 后才进 S2。
 
-- **开关**：`SHAPE_DRIFT_GATE=off|on`（默认 on，panic 时可关闭回到旧行为）；`SHAPE_DRIFT_PROBE_ONLY_TTL`、`SHAPE_DRIFT_K` 可调。
-- **部署节奏**：S0+S1 一次部署（止血+正确性），S2 紧随，S3 单独。
-- **观察窗口**：每次部署后 30min 看四项——成功率、`sent` 总量、`suppressed_by` 计数、单出口命中分布。
-- **回滚判据**：成功率低于部署前 10 个百分点，或可用节点 <20，或 probe_only 连续 >15min 未退出 ⇒ 关开关/回滚。
-- **不许**：靠重启清闩（会清掉 blocked 证据，重新烧）。
+### S2 生命周期收尾（probation 已在 `456256f`）
+- 删除 `recordProbeSuccess` 对 NodeProbation 的提升；冷却改 5m/30m/2h/5h + canary；补测试与变异。
 
-## 4. 验证门禁（每个切片）
+### S3 per `(model,node)` 配额状态 + 持久化迁移
+- 旧状态文件无字段 ⇒ `unknown`；面板只读字段缺失显示「未提供」。
 
-1. `go build ./...`、`go vet ./...`、改动文件 gofmt 干净；
-2. `go test -skip 'TestIP4RV' -count=1 ./...` 通过（`TestIP4RV*` 与缺 `free_models_cache.json` 的 T23 为既有基线）；
-3. 变异全红（数量见各切片）；
+### S4 打分架构（等 T7 完成；`13-scoring-architecture.md` 目前仍是半成品）
+
+## 4. 验证门禁
+
+1. `go build` / `go vet` / gofmt；
+2. `go test -skip 'TestIP4RV' -count=1 ./...`；
+3. 变异全红；
 4. 事故仿真通过；
-5. **独立评审**（非实现者）出 go/no-go；
-6. 提交信息写清切片编号与回滚方式。
+5. **独立评审**（非实现者）go/no-go；
+6. 提交信息含切片号与回滚方式。
 
-## 5. 当前阻塞与依赖
+## 5. 上线与回滚
 
-- S1 需要重写 `shape_drift.go`：现有 400 行实现方向对但触发/闸门错，**不能增量修补**。
-- S2 已有测试规格，可并行。
-- S3 需要状态文件迁移设计（尚未做）。
-- S4 等 T7（`13-scoring-architecture.md` 仍是半成品，167 行，结论未回填）。
-- 研究文档状态：`11-shape-drift-design.md` 736 行（完整）、`12-shape-drift-review.md` 757 行（完整）、`13-scoring-architecture.md` 167 行（未完成）。
+- 开关：`SHAPE_DRIFT_GATE=off|on`（默认 on）、`SHAPE_DRIFT_K`、`SHAPE_DRIFT_PROBE_TTL`。
+- 观察 30min：成功率、上游发送总量、`suppressed_by` 分布、单出口命中分布、`Retry-After` 命中率。
+- 回滚：成功率低于部署前 10pp / 可用节点 <20 / 全局 armed >15min 未退出 ⇒ 关开关或回滚 S1。
+- 禁止靠重启清闩（会清掉 blocked 证据）。
 
+## 6. 校对轮次
 
-## 6. 待校对的分歧（下一轮必须逐条裁决）
+| 轮次 | 评审者 | 结论 | 本版处理 |
+|---|---|---|---|
+| R1 | review-t1-design | 现实现 no-go（C1–C4）+ G1 | 采纳发送前闸门/令牌/不清 blocked |
+| R2 | healthcheck-probe | 提出 C10 + 烧 IP 上界 | 采纳 per-pair 递进冷却 + 24h 预算 |
+| R3 | verify-c5v2 | DRAFT NO-GO，8 条裁决 + 3 个 blocker | 全部写入 v3.1（本文件） |
+| R4（待跑） | 待定（非 R1–R3） | — | — |
 
-这些是两份研究之间、以及研究与现实现之间**尚未达成一致**的点。未经裁决不得实现：
+## 7. R4 必须攻击的点
 
-| # | 分歧 | 一方 | 另一方 | 需要什么证据 |
-|---|---|---|---|---|
-| D1 | 状态粒度：全局单闸 vs per-(model,egress) | G1：全局（形态是账号/IP 级，per-model 放大 M 倍烧 IP） | C10：per-model 排除（deepseek 成功而 mimo 429 有实证） | 用 10-26 日志统计「同窗口内不同 model 的 429/2xx 交错比例」 |
-| D2 | 触发条件：3 出口/10min vs K=5 连续新出口失败且无 2xx | 现实现/C10 的 freshFailures | G1 未给阈值 | 回放 3 次事故窗口，比较两种阈值下的误触发/漏触发 |
-| D3 | 闩退出：硬 TTL 10min + 重入上限 6/h 是否仍会周期性打穿 | C10 | G1（TTL 只推 nextTrial，不清 blocked） | 仿真：TTL 退出后 5h 内每出口命中次数 |
-| D4 | 24h 单 IP 命中预算 8 的依据 | C10（实测封禁阈值 10–16） | 无独立验证 | 找上游封禁阈值的一手证据或灰度实验 |
-| D5 | 冷却 5h 的依据 | 现状 | 无 | 「429 → 真实恢复」的时长分布（T7/生命周期研究） |
-| D6 | probation 证据：真实请求 vs 主动探测 | S2 规格 | 未比较 | 成本/延迟/误判率三方对比 |
-| D7 | 全排除时 503+Retry-After vs 透传 429 | G1 | 现实现 | 客户端重试行为与惊群实测 |
-| D8 | 三套 halt（pool403 / quota_halt / drift）是否必须合并为一个裁决点 | G1 的 K6 | 现实现三套并存 | 交互矩阵穷举（已有初稿，需评审） |
-
-## 7. 校对轮次记录
-
-| 轮次 | 评审者 | 输入 | 结论 | 修订 |
-|---|---|---|---|---|
-| R1 | review-t1-design | 现实现 23:32 版 | no-go（C1–C4）+ 提出 G1 | — |
-| R2 | healthcheck-probe | 事故日志 | 提出 C10 + 烧 IP 上界 | — |
-| R3（待跑） | 待定（单人） | 本文件 | 待定 | 待定 |
-| R4（待跑） | 待定（单人，非 R3 同一人） | 修订版 | 待定 | 待定 |
+1. `Decide` 的优先级是否真的能消除「一处放行、另一处闩死」；用交互矩阵穷举。
+2. 全局条件里 `attempts≥20` 与 `ratio≥0.9` 在低流量/突发流量下的边界；会不会因为流量小永远不触发、或因为 1 个 2xx 永远不触发。
+3. per-pair 冷却到期 + canary 是否会重新引入「假性恢复」；canary 失败后的退避是否单调。
+4. 24h 预算只统计 shape-suspect 的判定规则是否可被伪造（客户端/上游行为）。
+5. 切换 503 后客户端重试行为（惊群）与 `Retry-After` 的实际效果。
+6. 迁移：旧持久化状态、`SHAPE_DRIFT_GATE=off` 的回退语义。
