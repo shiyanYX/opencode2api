@@ -233,6 +233,64 @@ type nodePool struct {
 	// lastProbeOK 是「上一轮可用节点巡检」里探测成功的指纹集合（对照组候选池）。
 	// 由 checkFiltered(probeAvailable) 在每轮结束时整体替换；只读快照给选样用。
 	lastProbeOK []string
+
+	// T2：403 风暴遏制。sub403 是「已确认」403 的订阅级熔断状态；
+	// pool403 / poolAttempts 是池级 10 分钟窗口内的原始 403 与尝试节点集合。
+	// poolHaltUntil 非零且未到期时，强制换节点 fail-fast（粘滞 pick(false) 不受影响）。
+	sub403         map[string]*sub403State
+	pool403        map[string]time.Time
+	poolAttempts   map[string]time.Time
+	poolHaltUntil  time.Time
+	lastCandidates int // 最近一次 pick 的候选数（switch 事件埋点，近似并发安全）
+}
+
+const (
+	sub403Window      = 10 * time.Minute
+	sub403Threshold   = 3
+	sub403BaseBackoff = 10 * time.Minute
+	sub403MaxBackoff  = 30 * time.Minute
+
+	pool403Window = 10 * time.Minute
+	pool403Min    = 10
+	poolHaltFor   = 10 * time.Minute
+)
+
+type sub403State struct {
+	strikes     int
+	windowStart time.Time
+	until       time.Time
+	escalations int
+}
+
+type switchRank struct {
+	recentSuccess bool
+	samples       int
+	score         float64
+}
+
+// switchRankFor 默认从 nodeScoring 取「近期成功 + 有效样本 + 分数」。
+// 测试可替换，避免依赖全局评分存储。
+var switchRankFor = func(n *ProxyNode, now time.Time) switchRank {
+	st, ok := nodeScoring.statsCopy(n.Fingerprint)
+	if !ok {
+		return switchRank{}
+	}
+	r := switchRank{
+		recentSuccess: !st.LastSuccessAt.IsZero() && now.Sub(st.LastSuccessAt) <= time.Hour,
+		samples:       int(st.EffN),
+	}
+	if r.samples < 3 {
+		r.recentSuccess = false
+	}
+	views := nodeScoring.scoreSnapshot([]nodeScoringSnapshotInput{{
+		FP: n.Fingerprint, Name: n.Name, State: n.State.String(),
+		LatencyMs: st.LatencyMs, LastProbeAt: st.LastProbeAt,
+		LastError: st.LastProbeError, LastUsedAt: n.LastUsedAt,
+	}}, now)
+	if len(views) > 0 {
+		r.score = views[0].Score
+	}
+	return r
 }
 
 // 健康检查默认值（Clash url-test 语义：真实连接 + HTTP 2xx 判定可用）。
@@ -288,6 +346,9 @@ func newProxyPool(statePath string) *nodePool {
 	p := &nodePool{
 		byID:              make(map[string]*ProxyNode),
 		clients:           make(map[string]*http.Client),
+		sub403:            make(map[string]*sub403State),
+		pool403:           make(map[string]time.Time),
+		poolAttempts:      make(map[string]time.Time),
 		exhaustedCooldown: time.Hour,
 		deadCooldown:      time.Minute,
 		statePath:         statePath,
@@ -316,7 +377,11 @@ func (p *nodePool) effectiveDeadCooldown() time.Duration {
 //   - exhausted：配额冷却到期后由 sweepExpiredLocked 定时恢复（翻回 available）；
 //   - dead：只由探测成功（recordProbeSuccess）事件恢复，冷却时间不参与判定。
 func (p *nodePool) eligible(n *ProxyNode, now time.Time) bool {
-	return n.State == NodeAvailable
+	if n.State != NodeAvailable {
+		return false
+	}
+	// T2：订阅级 403 熔断。隔离只影响选路，不改节点状态/分数（可恢复、可解释）。
+	return !p.subQuarantinedLocked(n.Name, now)
 }
 
 // sweepExpiredLocked 把冷却已过期的 exhausted 节点翻回 available 并清空标记
@@ -375,16 +440,27 @@ func (p *nodePool) orderedLocked() ([]*ProxyNode, bool) {
 }
 
 // pick 选择当前生效节点。force=true 表示本轮必须换一个节点（配额切换）。
-// 返回 nil 表示池为空或没有可用节点（调用方直连）。
+// 返回 nil 表示池为空、没有可用节点、或 403 风暴 halt（调用方 fail-fast）。
 func (p *nodePool) pick(force bool) *ProxyNode {
+	n, _ := p.pickWithMeta(force)
+	return n
+}
+
+// pickWithMeta 与 pick 相同，额外返回本次被迫换节点的候选数（switch 事件埋点用）。
+func (p *nodePool) pickWithMeta(force bool) (*ProxyNode, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
+	p.lastCandidates = 0
+	if force && p.poolHaltedLocked(now) {
+		p.lastCandidates = 0
+		return nil, 0
+	}
 	p.sweepExpiredLocked(now)
 
 	ordered, anyPool := p.orderedLocked()
 	if !anyPool || len(ordered) == 0 {
-		return nil
+		return nil, 0
 	}
 	hasUsable := false
 	for _, n := range ordered {
@@ -394,14 +470,14 @@ func (p *nodePool) pick(force bool) *ProxyNode {
 		}
 	}
 	if !hasUsable {
-		return nil // 全部冷却中：直连
+		return nil, 0 // 全部冷却/隔离中：直连（调用方另做全订阅隔离 fail-fast）
 	}
 
-	// 1) 不强制且当前仍可用 → 沿用
+	// 1) 不强制且当前仍可用 → 沿用（T2 硬约束：粘滞语义一个字不改）
 	if !force && p.activeID != "" {
 		if cur := p.byID[p.activeID]; cur != nil && p.eligible(cur, now) {
 			p.markUsedLocked(cur, now)
-			return cur
+			return cur, 0
 		}
 	}
 	// 2) 手动指定优先
@@ -410,14 +486,15 @@ func (p *nodePool) pick(force bool) *ProxyNode {
 			if !(force && pref.Fingerprint == p.activeID) && p.eligible(pref, now) {
 				p.activeID = pref.Fingerprint
 				p.markUsedLocked(pref, now)
-				return pref
+				return pref, 0
 			}
 		} else {
 			p.manualPick = ""
 		}
 	}
 	// 3) 轮询/强制切换：按序选第一个可用（force 时排除当前）
-	var candidates []*ProxyNode
+	from := p.activeID
+	candidates := make([]*ProxyNode, 0, len(ordered))
 	for _, n := range ordered {
 		if !p.eligible(n, now) {
 			continue
@@ -427,17 +504,242 @@ func (p *nodePool) pick(force bool) *ProxyNode {
 		}
 		candidates = append(candidates, n)
 	}
+	if force {
+		candidates = p.switchCandidatesLocked(candidates, from, now)
+	}
+	p.lastCandidates = len(candidates)
 	if len(candidates) == 0 {
-		return nil
+		return nil, 0
 	}
-	if p.rrIndex >= len(candidates) {
-		p.rrIndex = 0
+	var n *ProxyNode
+	if force {
+		n = candidates[0] // 已按「近期成功 → 分数 → 原序」稳定排序
+	} else {
+		if p.rrIndex >= len(candidates) {
+			p.rrIndex = 0
+		}
+		n = candidates[p.rrIndex]
+		p.rrIndex = (p.rrIndex + 1) % len(candidates)
 	}
-	n := candidates[p.rrIndex]
-	p.rrIndex = (p.rrIndex + 1) % len(candidates)
 	p.activeID = n.Fingerprint
 	p.markUsedLocked(n, now)
-	return n
+	return n, len(candidates)
+}
+
+// switchCandidatesLocked 对被迫换节点候选做同网段排除 + 稳定排序。
+// 同 /24（IPv4）/ /64（IPv6）只针对失败节点；域名不排除。无其它候选时退化为原行为。
+func (p *nodePool) switchCandidatesLocked(candidates []*ProxyNode, fromFp string, now time.Time) []*ProxyNode {
+	if len(candidates) == 0 {
+		return candidates
+	}
+	if from := p.byID[fromFp]; from != nil {
+		filtered := make([]*ProxyNode, 0, len(candidates))
+		for _, n := range candidates {
+			if sameNodeSubnet(from, n) {
+				continue
+			}
+			filtered = append(filtered, n)
+		}
+		if len(filtered) > 0 {
+			candidates = filtered
+		}
+	}
+	ranks := make(map[string]switchRank, len(candidates))
+	for _, n := range candidates {
+		ranks[n.Fingerprint] = switchRankFor(n, now)
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		a, b := ranks[candidates[i].Fingerprint], ranks[candidates[j].Fingerprint]
+		if a.recentSuccess != b.recentSuccess {
+			return a.recentSuccess
+		}
+		return a.score > b.score
+	})
+	return candidates
+}
+
+func sameNodeSubnet(a, b *ProxyNode) bool {
+	if a == nil || b == nil || a.Address == "" || b.Address == "" {
+		return false
+	}
+	ia, ib := net.ParseIP(a.Address), net.ParseIP(b.Address)
+	if ia == nil || ib == nil {
+		return false // 域名不排除
+	}
+	a4, b4 := ia.To4(), ib.To4()
+	if a4 != nil && b4 != nil {
+		return a4.Mask(net.CIDRMask(24, 32)).Equal(b4.Mask(net.CIDRMask(24, 32)))
+	}
+	if a4 == nil && b4 == nil {
+		return ia.Mask(net.CIDRMask(64, 128)).Equal(ib.Mask(net.CIDRMask(64, 128)))
+	}
+	return false
+}
+
+func subKeyOf(name string) string {
+	if i := strings.Index(name, "::"); i >= 0 {
+		return name[:i]
+	}
+	return name
+}
+
+func (p *nodePool) subQuarantinedLocked(name string, now time.Time) bool {
+	st := p.sub403[subKeyOf(name)]
+	return st != nil && st.until.After(now)
+}
+
+// quarantineSub 记一次「已确认 403」。10 分钟内累计 3 次 ⇒ 10/20/30 分钟退避。
+func (p *nodePool) quarantineSub(sub string, now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.quarantineSubLocked(sub, now)
+}
+
+func (p *nodePool) quarantineSubLocked(sub string, now time.Time) {
+	sub = subKeyOf(sub)
+	if sub == "" {
+		return
+	}
+	if p.sub403 == nil {
+		p.sub403 = make(map[string]*sub403State)
+	}
+	st := p.sub403[sub]
+	if st == nil {
+		st = &sub403State{}
+		p.sub403[sub] = st
+	}
+	if st.windowStart.IsZero() || now.Sub(st.windowStart) > sub403Window {
+		st.strikes = 0
+		st.windowStart = now
+	}
+	st.strikes++
+	if st.strikes < sub403Threshold {
+		return
+	}
+	st.escalations++
+	d := sub403BaseBackoff
+	for i := 1; i < st.escalations; i++ {
+		d *= 2
+		if d >= sub403MaxBackoff {
+			d = sub403MaxBackoff
+			break
+		}
+	}
+	st.until = now.Add(d)
+	st.strikes = 0
+	st.windowStart = now
+}
+
+// confirmSub403 在 confirm-then-mark 的确认侧调用：把节点映射到订阅并记一次已确认 403。
+func (p *nodePool) confirmSub403(fp string, now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if n := p.byID[fp]; n != nil {
+		p.quarantineSubLocked(subKeyOf(n.Name), now)
+	}
+}
+
+func (p *nodePool) subQuarantined(name string, now time.Time) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.subQuarantinedLocked(name, now)
+}
+
+func (p *nodePool) allSubsQuarantined(now time.Time) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.nodes) == 0 {
+		return false
+	}
+	for _, n := range p.nodes {
+		if !p.subQuarantinedLocked(n.Name, now) {
+			return false
+		}
+	}
+	return true
+}
+
+// noteAttempt 记录池级 403 窗口的「被尝试节点」（分母）。
+func (p *nodePool) noteAttempt(fp string, now time.Time) {
+	if fp == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.prunePool403Locked(now)
+	if p.poolAttempts == nil {
+		p.poolAttempts = make(map[string]time.Time)
+	}
+	p.poolAttempts[fp] = now
+}
+
+// note403 记录一次原始 403（不要求已确认）；达到池级阈值立即 halt。
+func (p *nodePool) note403(fp string, now time.Time) {
+	if fp == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.prunePool403Locked(now)
+	if p.pool403 == nil {
+		p.pool403 = make(map[string]time.Time)
+	}
+	p.pool403[fp] = now
+	p.maybeHaltPoolLocked(now)
+}
+
+func (p *nodePool) prunePool403Locked(now time.Time) {
+	cut := now.Add(-pool403Window)
+	for fp, at := range p.pool403 {
+		if at.Before(cut) {
+			delete(p.pool403, fp)
+		}
+	}
+	for fp, at := range p.poolAttempts {
+		if at.Before(cut) {
+			delete(p.poolAttempts, fp)
+		}
+	}
+}
+
+func (p *nodePool) maybeHaltPoolLocked(now time.Time) {
+	if p.poolHaltUntil.After(now) {
+		return
+	}
+	attempted := len(p.poolAttempts)
+	if attempted == 0 {
+		attempted = len(p.pool403)
+	}
+	threshold := pool403Min
+	if attempted/2 > threshold {
+		threshold = attempted / 2
+	}
+	if attempted%2 != 0 && (attempted+1)/2 > threshold {
+		threshold = (attempted + 1) / 2
+	}
+	if len(p.pool403) >= threshold {
+		p.poolHaltUntil = now.Add(poolHaltFor)
+		slog.Warn("pool 403 halt",
+			"distinct_403_nodes", len(p.pool403), "attempted_nodes", attempted,
+			"threshold", threshold, "until", p.poolHaltUntil.Format(time.RFC3339))
+	}
+}
+
+func (p *nodePool) poolHaltedLocked(now time.Time) bool {
+	return p.poolHaltUntil.After(now)
+}
+
+func (p *nodePool) poolHalted(now time.Time) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.poolHaltedLocked(now)
+}
+
+// lastSwitchCandidates 返回最近一次 pick 的候选数（仅用于 switch 事件埋点）。
+func (p *nodePool) lastSwitchCandidates() int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.lastCandidates
 }
 
 // markUsedLocked 记录节点最近一次被真实调用的时间（task-67：last_used_at 此前从未写入）。
@@ -1541,20 +1843,31 @@ func inferRegionFromName(name string) string {
 // requiredRegion 为空时退化为普通 pick。
 // 返回 nil 表示没有可用节点（调用方返回错误或回退直连）。
 func (p *nodePool) pickForRegion(force bool, requiredRegion string) *ProxyNode {
+	n, _ := p.pickForRegionMeta(force, requiredRegion)
+	return n
+}
+
+func (p *nodePool) pickForRegionMeta(force bool, requiredRegion string) (*ProxyNode, int) {
 	if requiredRegion == "" {
-		return p.pick(force)
+		return p.pickWithMeta(force)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
+	p.lastCandidates = 0
+	if force && p.poolHaltedLocked(now) {
+		p.lastCandidates = 0
+		return nil, 0
+	}
 	p.sweepExpiredLocked(now)
 
 	ordered, anyPool := p.orderedLocked()
 	if !anyPool || len(ordered) == 0 {
-		return nil
+		return nil, 0
 	}
 
 	// 过滤：仅选匹配区域的节点
+	from := p.activeID
 	var candidates []*ProxyNode
 	for _, n := range ordered {
 		if !p.eligible(n, now) {
@@ -1569,16 +1882,25 @@ func (p *nodePool) pickForRegion(force bool, requiredRegion string) *ProxyNode {
 		candidates = append(candidates, n)
 	}
 	if len(candidates) == 0 {
-		return nil // 无匹配区域的可用节点
+		return nil, 0 // 无匹配区域的可用节点
 	}
-	if p.rrIndex >= len(candidates) {
-		p.rrIndex = 0
+	if force {
+		candidates = p.switchCandidatesLocked(candidates, from, now)
 	}
-	n := candidates[p.rrIndex]
-	p.rrIndex = (p.rrIndex + 1) % len(candidates)
+	p.lastCandidates = len(candidates)
+	var n *ProxyNode
+	if force {
+		n = candidates[0]
+	} else {
+		if p.rrIndex >= len(candidates) {
+			p.rrIndex = 0
+		}
+		n = candidates[p.rrIndex]
+		p.rrIndex = (p.rrIndex + 1) % len(candidates)
+	}
 	p.activeID = n.Fingerprint
 	p.markUsedLocked(n, now)
-	return n
+	return n, len(candidates)
 }
 
 // availableRegions 返回当前可用节点的所有唯一区域标识（含空字符串表示未标记区域）。

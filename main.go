@@ -2904,6 +2904,11 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	loopBudget := maxAttempts + maxQuotaSwitches
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
+		// T2：池级 403 halt 期间不再换节点、不再发新 attempt，fail-fast。
+		if proxyPool.poolHalted(time.Now()) {
+			callLogEvent(ctx, "switch", proxyPool.currentFp(), "reason=pool_halt candidates=0")
+			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
+		}
 		// 请求级总预算：到点就收手，不再叠加等待（砍掉 135s 的病态尾部）。
 		if attempt > 0 && time.Since(upstreamLoopStart) >= upstreamLoopBudget {
 			log.Warn("upstream_loop_budget_exhausted",
@@ -2913,6 +2918,12 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			break
 		}
 		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		switchCandidates := proxyPool.lastSwitchCandidates()
+		if proxyPool.poolHalted(time.Now()) {
+			// 另一个请求可能在本次 egress.Get 期间刚触发 halt：不能再直连/发请求。
+			callLogEvent(ctx, "switch", egResult.NodeFP, "reason=pool_halt candidates=0")
+			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
+		}
 		// 免费层（zen）请求经 BunTransport 发出：TLS 指纹是 v2 gate 的硬前提
 		// （2026-10-25 对照实验，见 bun_transport.go）。Go endpoint 维持原传输。
 		// 付费 zen key 走免费模型时同样需要（v2 gate 按 lane 而非按 key 校验）。
@@ -2920,6 +2931,13 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			egResult = bunEgressResult(egResult)
 		}
 		client, nodeFp := egResult.Client, egResult.NodeFP
+		if nodeFp != "" {
+			proxyPool.noteAttempt(nodeFp, time.Now())
+		}
+		if nodeFp == "" && proxyPool.allSubsQuarantined(time.Now()) {
+			callLogEvent(ctx, "switch", "", "reason=sub_quarantine candidates=0")
+			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("all subscriptions quarantined after 403")
+		}
 		// I2：本 attempt 实际发出的 UA 版本由本请求自己携带（builder 不再读全局），
 		// 否则 C1 的「失败 attempt 与确认 attempt 版本相同」不是不变量。
 		attemptVer := ocClientVersion()
@@ -2978,7 +2996,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			}
 			if canRetry {
 				if nodeFp != "" {
-					callLogEvent(ctx, "switch", nodeFp, "connect_error:"+err.Error())
+					callLogEvent(ctx, "switch", nodeFp, "connect_error:"+err.Error()+fmt.Sprintf(" reason=switch_after_fail candidates=%d", switchCandidates))
 				}
 				client.CloseIdleConnections()
 				egResult.Invalidate()
@@ -3025,7 +3043,13 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 					callLogEvent(ctx, "freetier_confirm_rejected_version_changed", pendingBadFp,
 						fmt.Sprintf("failed_ver=%s confirm_ver=%s", pendingVer, attemptVer))
 				} else if nodeFp != "" && nodeFp != pendingBadFp {
-					if ok, why := proxyPool.freeTierMarkAllowed(); ok {
+					// T2：请求最终成功才把之前的 403 记成「已确认」并喂订阅级熔断。
+					proxyPool.confirmSub403(pendingBadFp, time.Now())
+					if proxyPool.poolHalted(time.Now()) {
+						// T2 硬约束：池级 halt 期间不 mark 任何节点。
+						callLogEvent(ctx, "freetier_confirm_suppressed", pendingBadFp, "suppressed:pool_halt")
+						log.Warn("freetier_confirm_suppressed", "node", proxyPool.nameOf(pendingBadFp), "reason", "pool_halt")
+					} else if ok, why := proxyPool.freeTierMarkAllowed(); ok {
 						proxyPool.markFreeTierRejected(pendingBadFp)
 						callLogEvent(ctx, "freetier_node_confirmed_bad", pendingBadFp,
 							fmt.Sprintf("confirmed_ip_rejected failed_ver=%s confirm_ver=%s switches=%d", pendingVer, attemptVer, freeTierSwitches))
@@ -3043,6 +3067,16 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+
+		// T2：每次 FreeTier 403 都进池级窗口（未确认也计数，用于 halt）；达到阈值立即 fail-fast。
+		if resp.StatusCode == http.StatusForbidden && isFreeTierErrorBody(errBody) && nodeFp != "" {
+			proxyPool.note403(nodeFp, time.Now())
+		}
+		// T2 硬约束：halt 期间不 mark、不换节点；本请求若在飞行中撞上 halt，也立即失败。
+		if proxyPool.poolHalted(time.Now()) {
+			callLogEvent(ctx, "switch", nodeFp, fmt.Sprintf("reason=pool_halt candidates=%d", switchCandidates))
+			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
+		}
 
 		// 426 UpgradeRequired：上游提高了免费层的版本门槛。刷新一次版本号后重试
 		// （npm latest 通常已满足新门槛），每个请求最多刷新一次。见 oc_version.go。
@@ -3085,7 +3119,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				pendingBadFp = nodeFp
 				pendingVer = attemptVer
 			}
-			callLogEvent(ctx, "switch", nodeFp, "freetier:probe_alt_node")
+			callLogEvent(ctx, "switch", nodeFp, "freetier:probe_alt_node"+fmt.Sprintf(" reason=switch_after_fail candidates=%d", switchCandidates))
 			log.Warn("freetier_node_switch",
 				"try_model", modelID, "surface", surface,
 				"from", proxyPool.nameOf(nodeFp), "switches_done", freeTierSwitches,
@@ -3180,7 +3214,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				break
 			}
 			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
-				callLogEvent(ctx, "switch", nodeFp, "quota:"+quotaReason)
+				callLogEvent(ctx, "switch", nodeFp, fmt.Sprintf("quota:%s reason=switch_quota candidates=%d", quotaReason, switchCandidates))
 				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
 				quotaSwitches++
 				client.CloseIdleConnections()
@@ -3336,6 +3370,11 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	loopBudget := maxAttempts + maxQuotaSwitches
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
+		// T2：池级 403 halt 期间不再换节点、不再发新 attempt，fail-fast。
+		if proxyPool.poolHalted(time.Now()) {
+			callLogEvent(ctx, "switch", proxyPool.currentFp(), "reason=pool_halt candidates=0")
+			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
+		}
 		// 请求级总预算：到点就收手，不再叠加等待（砍掉 135s 的病态尾部）。
 		if attempt > 0 && time.Since(upstreamLoopStart) >= upstreamLoopBudget {
 			log.Warn("upstream_loop_budget_exhausted",
@@ -3345,11 +3384,24 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			break
 		}
 		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		switchCandidates := proxyPool.lastSwitchCandidates()
+		if proxyPool.poolHalted(time.Now()) {
+			// 另一个请求可能在本次 egress.Get 期间刚触发 halt：不能再直连/发请求。
+			callLogEvent(ctx, "switch", egResult.NodeFP, "reason=pool_halt candidates=0")
+			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
+		}
 		// 免费层（zen）请求经 BunTransport 发出（同非流式，见上方注释）。
 		if !useGoEndpoint {
 			egResult = bunEgressResult(egResult)
 		}
 		client, nodeFp := egResult.Client, egResult.NodeFP
+		if nodeFp != "" {
+			proxyPool.noteAttempt(nodeFp, time.Now())
+		}
+		if nodeFp == "" && proxyPool.allSubsQuarantined(time.Now()) {
+			callLogEvent(ctx, "switch", "", "reason=sub_quarantine candidates=0")
+			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("all subscriptions quarantined after 403")
+		}
 		// I2：同非流式——版本由本请求携带，见上方注释。
 		attemptVer := ocClientVersion()
 		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp, attemptVer)
@@ -3402,7 +3454,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			}
 			if canRetry {
 				if nodeFp != "" {
-					callLogEvent(ctx, "switch", nodeFp, "connect_error:"+err.Error())
+					callLogEvent(ctx, "switch", nodeFp, "connect_error:"+err.Error()+fmt.Sprintf(" reason=switch_after_fail candidates=%d", switchCandidates))
 				}
 				client.CloseIdleConnections()
 				egResult.Invalidate()
@@ -3436,7 +3488,13 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 					callLogEvent(ctx, "freetier_confirm_rejected_version_changed", pendingBadFp,
 						fmt.Sprintf("failed_ver=%s confirm_ver=%s", pendingVer, attemptVer))
 				} else if nodeFp != "" && nodeFp != pendingBadFp {
-					if ok, why := proxyPool.freeTierMarkAllowed(); ok {
+					// T2：请求最终成功才把之前的 403 记成「已确认」并喂订阅级熔断。
+					proxyPool.confirmSub403(pendingBadFp, time.Now())
+					if proxyPool.poolHalted(time.Now()) {
+						// T2 硬约束：池级 halt 期间不 mark 任何节点。
+						callLogEvent(ctx, "freetier_confirm_suppressed", pendingBadFp, "suppressed:pool_halt")
+						log.Warn("freetier_confirm_suppressed", "node", proxyPool.nameOf(pendingBadFp), "reason", "pool_halt")
+					} else if ok, why := proxyPool.freeTierMarkAllowed(); ok {
 						proxyPool.markFreeTierRejected(pendingBadFp)
 						callLogEvent(ctx, "freetier_node_confirmed_bad", pendingBadFp,
 							fmt.Sprintf("confirmed_ip_rejected failed_ver=%s confirm_ver=%s switches=%d", pendingVer, attemptVer, freeTierSwitches))
@@ -3454,6 +3512,16 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+
+		// T2：每次 FreeTier 403 都进池级窗口（未确认也计数，用于 halt）；达到阈值立即 fail-fast。
+		if resp.StatusCode == http.StatusForbidden && isFreeTierErrorBody(errBody) && nodeFp != "" {
+			proxyPool.note403(nodeFp, time.Now())
+		}
+		// T2 硬约束：halt 期间不 mark、不换节点；本请求若在飞行中撞上 halt，也立即失败。
+		if proxyPool.poolHalted(time.Now()) {
+			callLogEvent(ctx, "switch", nodeFp, fmt.Sprintf("reason=pool_halt candidates=%d", switchCandidates))
+			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
+		}
 
 		// 426 UpgradeRequired：上游提高了免费层的版本门槛。刷新一次版本号后重试
 		// （npm latest 通常已满足新门槛），每个请求最多刷新一次。见 oc_version.go。
@@ -3496,7 +3564,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				pendingBadFp = nodeFp
 				pendingVer = attemptVer
 			}
-			callLogEvent(ctx, "switch", nodeFp, "freetier:probe_alt_node")
+			callLogEvent(ctx, "switch", nodeFp, "freetier:probe_alt_node"+fmt.Sprintf(" reason=switch_after_fail candidates=%d", switchCandidates))
 			log.Warn("freetier_node_switch",
 				"try_model", modelID, "surface", surface,
 				"from", proxyPool.nameOf(nodeFp), "switches_done", freeTierSwitches,
@@ -3587,7 +3655,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				break
 			}
 			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
-				callLogEvent(ctx, "switch", nodeFp, "quota:"+quotaReason)
+				callLogEvent(ctx, "switch", nodeFp, fmt.Sprintf("quota:%s reason=switch_quota candidates=%d", quotaReason, switchCandidates))
 				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
 				quotaSwitches++
 				client.CloseIdleConnections()
