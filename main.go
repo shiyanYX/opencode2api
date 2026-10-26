@@ -3151,6 +3151,27 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		// 免费额度耗尽：标记当前节点 → 强制切下一个节点重试（预算内）
 		if quota, quotaReason := classifyQuota(resp.StatusCode, errBody); quota {
 			callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d quota_signal", resp.StatusCode))
+			// 形态漂移守卫：FreeUsageLimitError 在多个不同出口短窗内同时出现，
+			// 说明是【网关形态被拒】而不是【出口配额耗尽】——继续切节点只会把
+			// 坏形态请求散布到更多 IP（每 IP 挨 N 次就当日封禁，实测 ~16 次量级）。
+			// 确认漂移后本次请求按原错误返回，不再消耗出口。见 shape_drift.go。
+			haltDrift, driftConfirmed := shapeDriftShouldHalt(egResult.EgressKey(), quotaReason, time.Now())
+			if driftConfirmed {
+				callLogEvent(ctx, "shape_drift", nodeFp, "quota_switches_halted:"+quotaReason)
+				log.Warn("shape_drift_detected",
+					"try_model", modelID, "surface", surface,
+					"reason", quotaReason, "status", resp.StatusCode,
+					"detail", "FreeUsageLimitError across distinct egress in window; gateway shape may be rejected upstream — quota switching halted",
+				)
+			}
+			if haltDrift {
+				// 不切节点、不 mark：漂移期 mark 会把健康出口误标 exhausted。
+				lastBody = errBody
+				lastStatus = resp.StatusCode
+				lastHeader = resp.Header
+				lastErr = fmt.Errorf("upstream error")
+				break
+			}
 			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
 				callLogEvent(ctx, "switch", nodeFp, "quota:"+quotaReason)
 				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
@@ -3541,6 +3562,23 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		// 免费额度耗尽：标记当前节点 → 强制切下一个节点重试（头部阶段可安全重试）
 		if quota, quotaReason := classifyQuota(resp.StatusCode, errBody); quota {
 			callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d quota_signal", resp.StatusCode))
+			// 形态漂移守卫（同非流式，见 shape_drift.go）：多出口同窗 429
+			// 一致出现 → 停配额切换，按原错误返回，不烧更多出口。
+			haltDrift, driftConfirmed := shapeDriftShouldHalt(egResult.EgressKey(), quotaReason, time.Now())
+			if driftConfirmed {
+				callLogEvent(ctx, "shape_drift", nodeFp, "quota_switches_halted:"+quotaReason)
+				log.Warn("shape_drift_detected",
+					"try_model", modelID, "surface", surface,
+					"reason", quotaReason, "status", resp.StatusCode,
+					"detail", "FreeUsageLimitError across distinct egress in window; gateway shape may be rejected upstream — quota switching halted",
+				)
+			}
+			if haltDrift {
+				lastBody = errBody
+				lastStatus = resp.StatusCode
+				lastHeader = resp.Header
+				break
+			}
 			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
 				callLogEvent(ctx, "switch", nodeFp, "quota:"+quotaReason)
 				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
