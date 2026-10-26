@@ -2210,7 +2210,12 @@ func convertRequest(req *OpenAIRequest) map[string]any {
 	// 缓存增强：向 zen 上游显式声明 prompt 前缀缓存的保留时长。
 	// 上游默认约 5 分钟(in_memory)，agent 任务间歇易过期，导致缓存难命中；
 	// 注入 retention 后拉长到 24h。客户端显式传入的值(extra_body)优先。
-	if retention := getPromptCacheRetention(); retention != "off" {
+	// ★ 2026-10-26 修正：prompt_cache_retention 是旧 /zen/v1/ 路由的私有参数，
+	//   v2 /inference 路由不认识它，直接 400 unsupported_parameter（要求
+	//   prompt_cache_options）。官方 2.x 客户端也不发任何缓存参数，注入本身
+	//   就是形态差异。因此：模型走 v2 免费层（isFreeModel 判定，对应
+	//   /inference 路由）时不再注入；Go endpoint（zen/go 私有路由）保留。
+	if retention := getPromptCacheRetention(); retention != "off" && !isFreeModel(req.Model) {
 		if _, exists := converted["prompt_cache_retention"]; !exists {
 			converted["prompt_cache_retention"] = retention
 		}
@@ -2218,7 +2223,9 @@ func convertRequest(req *OpenAIRequest) map[string]any {
 	// Anthropic 风格 cache_control 断点：对接受该字段的模型(排除 GLM/Zhipu)
 	// 显式标记缓存断点并拉长 TTL。对不支持的上游，zen 网关负责剥离；
 	// DeepSeek 等自动前缀缓存不受影响。
-	if getCacheBreakpoints() && !rejectsCacheControl(req.Model) {
+	// ★ 2026-10-26 同 prompt_cache_retention 的修正：v2 /inference 路由
+	//   不剥离该参数，免费模型注入会 400。官方 2.x 客户端不发它。
+	if getCacheBreakpoints() && !rejectsCacheControl(req.Model) && !isFreeModel(req.Model) {
 		if _, exists := converted["cache_control"]; !exists {
 			converted["cache_control"] = map[string]any{"type": "ephemeral", "ttl": "1h"}
 		}
