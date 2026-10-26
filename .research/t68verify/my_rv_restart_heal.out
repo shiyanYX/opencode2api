@@ -1,0 +1,7 @@
+=== RUN   TestIP4RVRestartHealsDrift
+    zz_ip4rv_restart_heal_test.go:21: ① 吸收时（尚未成功）: totals=0 unmapped=1 Σattempts=0
+    zz_ip4rv_restart_heal_test.go:30: ② 首次成功之后（漂移态）: totals=1 unmapped=1 Σattempts=2
+    zz_ip4rv_restart_heal_test.go:54: ③ 重启重吸收之后: totals=2 ok=1 fail=1 unmapped=0 | Σattempts=2 Σby_node=2 | stats.total=2 stats.unmapped=0
+--- PASS: TestIP4RVRestartHealsDrift (0.00s)
+PASS
+ok  	github.com/shiyanYX/opencode2api	0.010s

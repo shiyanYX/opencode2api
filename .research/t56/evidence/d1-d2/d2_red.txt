@@ -1,0 +1,10 @@
+## D2 修前红：把同 ts 游标还原为「req_id 字符串过滤」（overlay 注入，不改工作树）
+
+    calllog_defects_test.go:199: limit=1 分页并集有缺/重/乱序:
+    calllog_defects_test.go:199: limit=2 分页并集有缺/重/乱序:
+    calllog_defects_test.go:199: limit=3 分页并集有缺/重/乱序:
+    calllog_defects_test.go:199: limit=4 分页并集有缺/重/乱序:
+    calllog_defects_test.go:199: limit=5 分页并集有缺/重/乱序:
+    calllog_defects_test.go:199: limit=7 分页并集有缺/重/乱序:
+--- FAIL: TestSameTSGroupPaginationNoLoss (0.00s)
+    --- FAIL: TestSameTSGroupPaginationNoLoss/limit=1 (0.00s)

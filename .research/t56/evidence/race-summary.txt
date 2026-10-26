@@ -1,0 +1,16 @@
+WARNING: DATA RACE
+Read at 0x00c0002aa788 by goroutine 1101:
+  github.com/shiyanYX/opencode2api.(*nodePool).saveState()
+      /tmp/t56/repo/proxy_node.go:1347 +0x1ea
+
+== task-56 阶段2 -race 结论 ==
+1) 全量 go test -race -count=1 -timeout 45m ./  → FAIL：DATA RACE 在既有代码
+   proxy_node.go:1347 (*nodePool).saveState  ←→  zz_t30_alert_safety_test.go:274
+   TestT30CriterionCPoolEmptyReachability（本任务未触碰这两个文件）
+2) 基线复现（HEAD 原始代码，calllog.go sha256 6ee8ed59…）：
+   cd /tmp/t56/repo && go test -race -run TestT30CriterionCPoolEmptyReachability -count=1 ./
+   → WARNING: DATA RACE / FAIL（BASELINE_EXIT=1）⇒ 该 race 是既有问题，非本任务引入
+3) 本任务相关子系统 -race：PASS
+   T56_DAY_DIR=/tmp/t56/day go test -race -count=1 -timeout 15m \
+     -run 'TestDaily|TestCallLog|TestRetention|TestLayout|TestSingleFileModeKeeps|TestAppend|TestAbsorb|TestBackfill|TestBucket|TestConservation|TestClear|TestUnmapped|TestT39|TestT56|TestCallRecorder|TestHour|TestTrend|TestModelStats|TestSlim|TestParseStats' ./
+   → ok 79.020s，CALLLOG_RACE_EXIT=0

@@ -1,0 +1,4 @@
+    zz_tmp_perf2_test.go:30: PERF today  requests=367     unmapped=0     cold=317.36193ms  warm=4.268µs
+    zz_tmp_perf2_test.go:30: PERF 7d     requests=27044   unmapped=730   cold=338.653621ms warm=3.872µs
+    zz_tmp_perf2_test.go:30: PERF 30d    requests=157769  unmapped=1352  cold=347.838862ms warm=3.817µs
+    zz_tmp_perf2_test.go:30: PERF 180d   requests=232263  unmapped=1391  cold=382.508224ms warm=3.561µs

@@ -1,0 +1,6 @@
+=== RUN   TestIP4RVMemoAndPerf
+    zz_ip4agg_reverify_test.go:322: 7d: 冷=398.811247ms 热=3.364µs requests=27044
+    zz_ip4agg_reverify_test.go:322: 180d: 冷=519.720566ms 热=6.341µs requests=232263
+--- PASS: TestIP4RVMemoAndPerf (1.70s)
+PASS
+ok  	github.com/shiyanYX/opencode2api	1.750s

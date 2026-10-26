@@ -1,0 +1,20 @@
+--- snap/statscan.go	2026-10-21 01:04:52.086411711 +0800
++++ fix/statscan.go	2026-10-21 08:48:04.642593765 +0800
+@@ -197,6 +197,9 @@
+ 	HasStreamInterr bool
+ 	HasStreamError  bool
+ 	HasAllFailed    bool
++	// SawUnmapped 记录这一行是否出现过 unmapped 键：出现了就以落盘判断为准
++	// （请求发生那一刻冻结的语义），没出现才允许按公式 B + everServed 重算。
++	SawUnmapped bool
+ 	// Unmapped 表示这条记录是「模型名无法映射」的请求。它们**不进统计聚合**
+ 	// （不进 hourBuckets ⇒ 不进 total_requests/成功率/by_model），
+ 	// 所以分析页的 attempts/by_node/by_error/延迟分位也必须排除它们，
+@@ -295,6 +298,7 @@
+ 		case "unmapped":
+ 			// 与 parseStatsLine 同一宽容语义：只有字面量 true 才算未映射。
+ 			r.Unmapped = string(tok) == "true"
++			r.SawUnmapped = true
+ 		}
+ 		i = e
+ 	}

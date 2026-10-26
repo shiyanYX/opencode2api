@@ -1,0 +1,6 @@
+mutation                                       test                                           result   rc
+M18 [AGG] 分位桶算错（所有值塞进第 0 桶）                    TestAggregatePercentilesKnownDistribution      CAUGHT   1  --- FAIL: TestAggregatePercentilesKnownDistribution (0.00s) | FAIL
+M19 [AGG] by_model 漏算失败（Fail 恒 0）              TestAggregateTotalsAndTimeseriesMatchStats     CAUGHT   1  --- FAIL: TestAggregateTotalsAndTimeseriesMatchStats (0.00s) |     --- FAIL: TestAggregate
+M20 [AGG] attempts 把 0 与 1 合并                  TestAggregateAttemptsPhasesAndErrors           CAUGHT   1  --- FAIL: TestAggregateAttemptsPhasesAndErrors (0.00s) | FAIL
+M21 [AGG] 缓存键漏 range                           TestAggregateCacheKeyIncludesRangeAndDate      CAUGHT   1  --- FAIL: TestAggregateCacheKeyIncludesRangeAndDate (0.00s) | FAIL
+M22 [AGG] by_model p95 用全局直方图（不分模型）            TestAggregateByModelP95DistinguishesModels     CAUGHT   1  --- FAIL: TestAggregateByModelP95DistinguishesModels (0.00s) | FAIL

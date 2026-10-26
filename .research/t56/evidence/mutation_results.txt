@@ -1,0 +1,13 @@
+mutation                                   test                                                 result   rc
+M1 段排序 legacy 放最后                          TestDailySegmentsOrderLegacyFirstThenDaysAscending   CAUGHT   1  --- FAIL: TestDailySegmentsOrderLegacyFirstThenDaysAscending (0.00s) | FAIL
+M2 日切仍写最后一段（不建新天文件）                        TestDailyRolloverNeverWritesBackToOlderSegment       CAUGHT   1  --- FAIL: TestDailyRolloverNeverWritesBackToOlderSegment (0.00s) | FAIL
+M3 events 精简不做深拷贝                          TestDailyDiskTrimDefaultFieldsAndRestore             CAUGHT   1  --- FAIL: TestDailyDiskTrimDefaultFieldsAndRestore (0.00s) | FAIL
+M4 非最后段半行不消费                               TestDailyNonLastSegmentPartialLineConsumed           CAUGHT   1  --- FAIL: TestDailyNonLastSegmentPartialLineConsumed (0.00s) | FAIL
+M5 尾部加载只读最后一段                              TestDailyLoadCallLogTailAcrossSegments               CAUGHT   1  --- FAIL: TestDailyLoadCallLogTailAcrossSegments (0.04s) | FAIL
+M6 删除超期段整段逻辑（不 prune）                      TestRetentionArchiveCompressesOldDaysAndPrunes       CAUGHT   1  --- FAIL: TestRetentionArchiveCompressesOldDaysAndPrunes (0.01s) | FAIL
+M7 before 等值边界变包含                          TestCallLogHistoryFilters                            CAUGHT   1  --- FAIL: TestCallLogHistoryFilters (0.00s) | FAIL
+M8 读取侧不还原 node_name                        TestDailyDiskTrimDefaultFieldsAndRestore             CAUGHT   1  --- FAIL: TestDailyDiskTrimDefaultFieldsAndRestore (0.00s) | FAIL
+M9 clear 不删日文件                             TestDailyClearRemovesEverySegment                    CAUGHT   1  --- FAIL: TestDailyClearRemovesEverySegment (0.00s) | FAIL
+M10 吸收时 gz 段当明文读                           TestDailyGzSegmentAbsorb                             CAUGHT   1  --- FAIL: TestDailyGzSegmentAbsorb (0.00s) | FAIL
+M11 daily 游标推进用 parsedTo                   TestDailyAppendWritesTodaysFileAndIncr               CAUGHT   1  --- FAIL: TestDailyAppendWritesTodaysFileAndIncr (0.00s) | FAIL
+M12 daily 模式不分派，走单文件吸收                     TestDailyAbsorbReplaysAllSegmentsIdempotently        CAUGHT   1  --- FAIL: TestDailyAbsorbReplaysAllSegmentsIdempotently (0.00s) | FAIL

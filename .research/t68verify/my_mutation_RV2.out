@@ -1,0 +1,8 @@
+=== RUN   TestIP4AggPerModelP95UnboundedBucket
+    zz_ip4agg_verify_test.go:769: model=m-A-free p95=900000 requests=3
+    zz_ip4agg_verify_test.go:771: m-A-free 的 p95=900000 借用了别的模型的 max：A 的样本全是 700000ms
+    zz_ip4agg_verify_test.go:769: model=m-B-free p95=900000 requests=1
+--- FAIL: TestIP4AggPerModelP95UnboundedBucket (0.00s)
+FAIL
+FAIL	github.com/shiyanYX/opencode2api	0.013s
+FAIL

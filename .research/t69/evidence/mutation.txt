@@ -1,0 +1,14 @@
+CAUGHT  M1 Stat 请求数改成成功数（口径回归）
+        dev-server 已在 http://127.0.0.1:9310 | PASS  页面标题为「日志」 | PASS  三个 tab 存在 | PASS  分析档默认可见 | PASS  分析档 4 个 Stat |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ |   File "/home/jingyx/.local/lib/python3.12/site-packages/playwright/_impl/_connection.py", line 563, in wrap_api_call |     raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None | playwright._impl._errors.TimeoutError: 
+CAUGHT  M2 加载更多丢掉游标（退化成重复取第一页）
+        PASS  range=180d Stat 失败数 | PASS  range=180d Stat 未映射 | PASS  range=180d 趋势桶数 | PASS  明细首屏 200 行（limit=200） | PASS  明细首屏 req_id 无重复 | PASS  明细计数文案显示已加载 200 |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ |   File "/home/jingyx/.local/lib/python3.12/site-packages/playwright/_impl/_connection.py", line 563, in wrap_api_call |     raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from
+CAUGHT  M3 切页不关 EventSource（连接泄漏）
+        PASS  浅色主题无横向溢出 | ===== 91/93 PASS ===== | FAILED: |   - 离开日志页后每个 EventSource 都处于 CLOSED(2)   |   - 三次 EventSource 全部 CLOSED(2)
+CAUGHT  M4 运行日志级别筛选失效
+        PASS  浅色主题无横向溢出 | ===== 91/93 PASS ===== | FAILED: |   - 级别筛选 ERROR 生效  500 vs 19 |   - 全部级别取消 → 0 行
+CAUGHT  M5 引入外部 CDN 请求（零外部请求被破坏）
+        PASS  浅色主题无横向溢出 | ===== 91/93 PASS ===== | FAILED: |   - 零外部请求  ['https://cdn.example.com/echarts.min.js', 'https://cdn.example.com/echarts.min.js', 'https://cdn.example.com/echarts.min.js'] |   - 无 console.error  ['Failed to load resource: net::ERR_NAME_NOT_RESOLVED', 'Failed to load resource: net::ERR_NAME_NOT_RESOLVED']
+
+===== 5/5 CAUGHT =====
+ALL_MUTATIONS_CAUGHT
+exit=0

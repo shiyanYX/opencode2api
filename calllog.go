@@ -20,6 +20,7 @@ import (
 	"net/http/httptrace"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -3396,6 +3397,783 @@ scan:
 		nextCursor = encodeCallLogCursor(callLogSegKey(segs[lastSeg]), lastLine)
 	}
 	return out, hasMore, truncated, nextCursor, nil
+}
+
+// ---- task-67：分析页聚合接口 /api/logs/aggregate ----
+//
+// 分析页 6 个 Panel 的数据源。**口径红线**：totals / timeseries 必须与
+// /api/stats、/api/stats/trends 同源同值（2b 口径不改）。
+// 延迟分位、attempts、phases、by_node、by_error 需要逐记录信息，桶里没有，
+// 因此由一次磁盘扫描填充（TTL 缓存 + singleflight，见 log_aggregate 段）。
+
+// aggregateResponse 是 GET /api/logs/aggregate 的响应体（字段语义见
+// docs/research/log-aggregate-api.md）。
+type aggregateResponse struct {
+	Range       string        `json:"range"`
+	Window      aggWindow     `json:"window"`
+	GeneratedAt string        `json:"generated_at"`
+	Totals      aggTotals     `json:"totals"`
+	Latency     aggLatency    `json:"latency"`
+	Timeseries  []aggPoint    `json:"timeseries"`
+	ByModel     []aggModelRow `json:"by_model"`
+	ByNode      []aggNodeRow  `json:"by_node"`
+	ByError     []aggErrorRow `json:"by_error"`
+	Attempts    aggAttempts   `json:"attempts"`
+	Phases      aggPhases     `json:"phases"`
+	Unmapped    aggUnmapped   `json:"unmapped"`
+	NodeAggBy   string        `json:"node_agg_by"` // "node_name"：by_node 按节点显示名聚合
+}
+
+type aggWindow struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+type aggTotals struct {
+	Requests    int64   `json:"requests"`
+	OK          int64   `json:"ok"`
+	Fail        int64   `json:"fail"`
+	SuccessRate float64 `json:"success_rate"`
+}
+
+type aggLatency struct {
+	P50Ms    float64 `json:"p50_ms"`
+	P95Ms    float64 `json:"p95_ms"`
+	P99Ms    float64 `json:"p99_ms"`
+	MaxMs    float64 `json:"max_ms"`
+	TTFT50Ms float64 `json:"ttft_p50_ms"`
+	TTFT95Ms float64 `json:"ttft_p95_ms"`
+}
+
+type aggPoint struct {
+	TS       string `json:"ts"`
+	OK       int64  `json:"ok"`
+	Fail     int64  `json:"fail"`
+	Requests int64  `json:"requests"`
+}
+
+type aggModelRow struct {
+	Model            string  `json:"model"`
+	Requests         int64   `json:"requests"`
+	OK               int64   `json:"ok"`
+	Fail             int64   `json:"fail"`
+	SuccessRate      float64 `json:"success_rate"`
+	P95Ms            float64 `json:"p95_ms"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	TotalTokens      int64   `json:"total_tokens"`
+}
+
+type aggNodeRow struct {
+	Name        string  `json:"name"`
+	Requests    int64   `json:"requests"`
+	OK          int64   `json:"ok"`
+	Fail        int64   `json:"fail"`
+	SuccessRate float64 `json:"success_rate"`
+	AvgMs       float64 `json:"avg_ms"`
+}
+
+type aggErrorRow struct {
+	Kind   string `json:"kind"`
+	Count  int64  `json:"count"`
+	Sample string `json:"sample"`
+}
+
+type aggAttempts struct {
+	A0     int64 `json:"a0"`
+	A1     int64 `json:"a1"`
+	A2     int64 `json:"a2"`
+	A3Plus int64 `json:"a3plus"`
+}
+
+type aggPhases struct {
+	QueueAvgMs float64 `json:"queue_avg_ms"`
+	TTFTAvgMs  float64 `json:"ttft_avg_ms"`
+	GenAvgMs   float64 `json:"gen_avg_ms"`
+}
+
+type aggUnmapped struct {
+	Count   int64              `json:"count"`
+	ByModel []aggUnmappedModel `json:"by_model"`
+}
+
+type aggUnmappedModel struct {
+	Model string `json:"model"`
+	Count int64  `json:"count"`
+}
+
+// 直方桶边界（毫秒）。分位数用「直方桶 + 桶内线性插值」，不保存全量样本。
+// 分布跨度大（几 ms ~ 数分钟）用近对数刻度；低延迟区（<1s）密一些。
+var aggDurBucketsMS = []float64{0, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 20000, 30000, 60000, 120000, 300000, 600000}
+var aggTTFTBucketsMS = []float64{0, 5, 10, 25, 50, 100, 150, 200, 300, 500, 800, 1200, 2000, 4000, 8000, 16000, 30000, 60000}
+
+// aggBucketBoundsFor 返回值 v 落在的直方桶闭区间（测试用；生产侧插值也用它）。
+func aggBucketBoundsFor(v float64) (lo, hi float64) {
+	bs := aggDurBucketsMS
+	lo = bs[len(bs)-1]
+	hi = lo * 2
+	for i := 0; i < len(bs); i++ {
+		if v >= bs[i] {
+			lo = bs[i]
+		} else {
+			hi = bs[i]
+			return lo, hi
+		}
+	}
+	return lo, hi
+}
+
+// ---- 缓存：20s TTL + singleflight ----
+
+// aggregateCacheTTL 是分析页聚合的缓存时长。15~30s 是面板可接受的新鲜度，
+// 也是「分析页连续切 range / 多点几下」不重复扫盘的窗口。测试可临时改小。
+var aggregateCacheTTL = 20 * time.Second
+
+type aggCacheEntry struct {
+	expire time.Time
+	resp   aggregateResponse
+}
+
+type aggCacheCall struct {
+	done chan struct{}
+	resp aggregateResponse
+}
+
+var aggCache = struct {
+	mu       sync.Mutex
+	entries  map[string]aggCacheEntry
+	inflight map[string]*aggCacheCall
+}{entries: map[string]aggCacheEntry{}, inflight: map[string]*aggCacheCall{}}
+
+// aggregateCacheKey 是缓存键：必须同时含 range 与当日日期（跨零点自然失效）。
+// 「today」是滚动 24h 窗口（按整点对齐），一小时一变；把小时也编进键会让
+// 缓存命中率随小时边界变化但没有正确性收益（TTL 20s 远小于 1h），
+// 因此键只到「日」——跨零点时日期变化即自然失效。
+func aggregateCacheKey(rng string, now time.Time) string {
+	// 键里带 store 身份（path|dir）：生产进程内不变，但**测试会反复替换夹具目录**。
+	// 不带它的话，上一个测试针对同一 range/日期缓存的响应会串到下一个夹具，
+	// 造成「换了一份数据还返回旧数字」的假失败/假通过。
+	callLog.mu.RLock()
+	storePath, storeDir := callLog.path, callLog.dir
+	callLog.mu.RUnlock()
+	return rng + "|" + now.In(time.Local).Format("2006-01-02") + "|" + storePath + "|" + storeDir
+}
+
+// aggregateCacheReset 清空缓存（测试与数据变更用）。
+func aggregateCacheReset() {
+	aggCache.mu.Lock()
+	aggCache.entries = map[string]aggCacheEntry{}
+	aggCache.inflight = map[string]*aggCacheCall{}
+	aggCache.mu.Unlock()
+}
+
+// aggregateResponseFor 组装分析页聚合响应（TTL 缓存 + singleflight）。
+//
+// singleflight 不是可选优化：冷启动首次聚合要扫一遍磁盘（生产 23 万行
+// 约数百 ms），面板一次刷新 6 个 Panel 会并发打进来，没有单飞就是 6 次
+// 全量扫描叠加。这里用「每个 key 一个 call + done channel」实现，
+// 不引入外部依赖。
+func aggregateResponseFor(rng string) aggregateResponse {
+	rng = normalizeTrendRange(rng)
+	now := time.Now()
+	key := aggregateCacheKey(rng, now)
+
+	aggCache.mu.Lock()
+	if e, ok := aggCache.entries[key]; ok && now.Before(e.expire) {
+		aggCache.mu.Unlock()
+		return e.resp
+	}
+	if c, ok := aggCache.inflight[key]; ok {
+		aggCache.mu.Unlock()
+		<-c.done
+		return c.resp
+	}
+	c := &aggCacheCall{done: make(chan struct{})}
+	aggCache.inflight[key] = c
+	aggCache.mu.Unlock()
+
+	resp := aggregateCompute(rng)
+
+	aggCache.mu.Lock()
+	c.resp = resp
+	delete(aggCache.inflight, key)
+	aggCache.entries[key] = aggCacheEntry{expire: time.Now().Add(aggregateCacheTTL), resp: resp}
+	aggCache.mu.Unlock()
+	close(c.done)
+	return resp
+}
+
+// ---- 直方桶 ----
+
+// aggHist 是「计数 + 值和」的直方桶。和只用于**单样本桶**回真值：
+// 桶里只有 1 条时（如单条记录夹具、p99 落在尾部稀疏处）插值会给出桶边界，
+// 而 Σ/1 给出精确值。多样本桶仍用桶内线性插值（不保存全量样本的硬约束）。
+type aggHist struct {
+	counts []int64
+	sums   []float64
+}
+
+func newAggHist(capacity int) *aggHist {
+	return &aggHist{counts: make([]int64, capacity), sums: make([]float64, capacity)}
+}
+
+// aggHistAdd 把 v 放进 bounds 定义的直方桶。bounds 最后一个元素是「无上界桶」的下界。
+func aggHistAdd(h *aggHist, bounds []float64, v float64) {
+	if v < 0 {
+		v = 0
+	}
+	i := len(bounds) - 1
+	for k := 0; k < len(bounds)-1; k++ {
+		if v < bounds[k+1] {
+			i = k
+			break
+		}
+	}
+	h.counts[i]++
+	h.sums[i] += v
+}
+
+// aggHistQuantile 用「直方桶 + 桶内线性插值」求 q 分位（q∈[0,1]）。
+// maxV 是窗口内实际最大值，用于无上界桶的回退。
+func aggHistQuantile(h *aggHist, bounds []float64, q, maxV float64) float64 {
+	if h == nil {
+		return 0
+	}
+	var n int64
+	for _, c := range h.counts {
+		n += c
+	}
+	if n == 0 {
+		return 0
+	}
+	rank := int64(math.Ceil(q * float64(n)))
+	if rank < 1 {
+		rank = 1
+	}
+	if rank > n {
+		rank = n
+	}
+	var cum int64
+	for i, c := range h.counts {
+		if c == 0 {
+			continue
+		}
+		if cum+c >= rank {
+			lo := bounds[i]
+			if c == 1 {
+				// 单样本桶：用精确值（见 aggHist 注释）。这个分支也让
+				// 「单条记录时 p50=p95=p99=max」成立。
+				return h.sums[i]
+			}
+			hi := math.Inf(1)
+			if i+1 < len(bounds) {
+				hi = bounds[i+1]
+			}
+			if math.IsInf(hi, 1) {
+				if maxV <= 0 {
+					return lo
+				}
+				return maxV
+			}
+			frac := float64(rank-cum) / float64(c)
+			if frac < 0 {
+				frac = 0
+			}
+			if frac > 1 {
+				frac = 1
+			}
+			return lo + (hi-lo)*frac
+		}
+		cum += c
+	}
+	return maxV
+}
+
+// ---- 聚合扫描 ----
+
+type aggNodeAcc struct {
+	req, ok, fail int64
+	durSum        float64
+}
+
+type aggErrorAcc struct {
+	count  int64
+	sample string
+}
+
+// aggScanResult 是一次磁盘扫描得到的「桶里没有」的分析维度。
+type aggScanResult struct {
+	durHist     *aggHist
+	ttftHist    *aggHist
+	maxDur      float64
+	maxTTFT     float64
+	perModel    map[string]*aggHist
+	perModelMax map[string]float64 // 每模型自己的 max（无上界桶的分位回退要用它，不能借全局 max）
+	byNode      map[string]*aggNodeAcc
+	byError     map[string]*aggErrorAcc
+	attempts    aggAttempts
+	queueSum    float64
+	queueN      int64
+	ttftSum     float64
+	ttftN       int64
+	genSum      float64
+	genN        int64
+}
+
+const aggErrorSampleMax = 120
+
+// aggregateScanExtras 扫一遍窗口内的调用日志，填充分位/节点/错误/attempts/phases。
+//
+// 窗口过滤与 /api/stats 用**同一份** bidx（trendBuckets 返回），保证「哪些记录
+// 算进窗口」与 totals/timeseries 完全一致。ts 解析失败的行走 parseLogFilterTime
+// 的宽容分支；仍失败则跳过该行（与桶吸收的跳过语义一致）。
+func aggregateScanExtras(ts []string, bidx func(time.Time) int) *aggScanResult {
+	// 先把所有窗口相关段的物理行收集起来，再按行号切块并行消费。
+	//
+	// 为什么必须做并行：生产快照单文件 233,654 行、124.6 MB，单线程冷扫描
+	// 实测 ~800 ms（time.Parse + 手写 JSON 扫描）。分析页冷请求目标是
+	// p95 < 300 ms，单线程达不到；按行切块后 8 核实测降到 ~200 ms。
+	// 单文件布局无法按段并行（只有一段），按行切块对两种布局都有效。
+	var lines [][]byte
+	for _, seg := range callLog.readSegments() {
+		data, _, err := readDailySegment(seg.path, seg.gz)
+		if err != nil {
+			continue
+		}
+		lines = append(lines, splitJSONLines(data)...)
+	}
+	if len(lines) == 0 {
+		return newAggScanResult()
+	}
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > 8 {
+		workers = 8
+	}
+	if workers < 1 {
+		workers = 1
+	}
+	if len(lines) < 4000 {
+		workers = 1 // 小夹具/小库：并行的调度成本大于收益
+	}
+	parts := make([]*aggScanResult, workers)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		lo := w * len(lines) / workers
+		hi := (w + 1) * len(lines) / workers
+		wg.Add(1)
+		go func(w, lo, hi int) {
+			defer wg.Done()
+			part := newAggScanResult()
+			memo := make(map[string]bool, 16) // 模型名 → 是否老行未映射（每 worker 私有）
+			for _, line := range lines[lo:hi] {
+				part.consumeAggLine(line, bidx, memo)
+			}
+			parts[w] = part
+		}(w, lo, hi)
+	}
+	wg.Wait()
+	return mergeAggScanResults(parts)
+}
+
+// newAggScanResult 初始化空的（部分）结果。
+func newAggScanResult() *aggScanResult {
+	return &aggScanResult{
+		durHist:     newAggHist(len(aggDurBucketsMS)),
+		ttftHist:    newAggHist(len(aggTTFTBucketsMS)),
+		perModel:    make(map[string]*aggHist),
+		perModelMax: make(map[string]float64),
+		byNode:      make(map[string]*aggNodeAcc),
+		byError:     make(map[string]*aggErrorAcc),
+	}
+}
+
+// mergeAggScanResults 按 worker 顺序合并部分结果。
+// 顺序合并保证 by_error.sample 取「文件里最早」的那条（与单线程语义一致），
+// 不依赖 goroutine 完成顺序。
+func mergeAggScanResults(parts []*aggScanResult) *aggScanResult {
+	out := newAggScanResult()
+	for _, p := range parts {
+		if p == nil {
+			continue
+		}
+		mergeAggHist(out.durHist, p.durHist)
+		mergeAggHist(out.ttftHist, p.ttftHist)
+		if p.maxDur > out.maxDur {
+			out.maxDur = p.maxDur
+		}
+		if p.maxTTFT > out.maxTTFT {
+			out.maxTTFT = p.maxTTFT
+		}
+		for m, v := range p.perModelMax {
+			if v > out.perModelMax[m] {
+				out.perModelMax[m] = v
+			}
+		}
+		for m, h := range p.perModel {
+			if out.perModel[m] == nil {
+				out.perModel[m] = newAggHist(len(aggDurBucketsMS))
+			}
+			mergeAggHist(out.perModel[m], h)
+		}
+		for name, na := range p.byNode {
+			dst := out.byNode[name]
+			if dst == nil {
+				dst = &aggNodeAcc{}
+				out.byNode[name] = dst
+			}
+			dst.req += na.req
+			dst.ok += na.ok
+			dst.fail += na.fail
+			dst.durSum += na.durSum
+		}
+		for kind, ea := range p.byError {
+			dst := out.byError[kind]
+			if dst == nil {
+				dst = &aggErrorAcc{}
+				out.byError[kind] = dst
+			}
+			dst.count += ea.count
+			if dst.sample == "" {
+				dst.sample = ea.sample
+			}
+		}
+		out.attempts.A0 += p.attempts.A0
+		out.attempts.A1 += p.attempts.A1
+		out.attempts.A2 += p.attempts.A2
+		out.attempts.A3Plus += p.attempts.A3Plus
+		out.queueSum += p.queueSum
+		out.queueN += p.queueN
+		out.ttftSum += p.ttftSum
+		out.ttftN += p.ttftN
+		out.genSum += p.genSum
+		out.genN += p.genN
+	}
+	return out
+}
+
+// mergeAggHist 把 src 的计数与值和累加进 dst。
+func mergeAggHist(dst, src *aggHist) {
+	for i := range src.counts {
+		dst.counts[i] += src.counts[i]
+		dst.sums[i] += src.sums[i]
+	}
+}
+
+// consumeAggLine 消费一行：窗口过滤 + 全部分析维度累计。
+// 与单线程版本逐字同语义；抽出来是为了按行切块并行。
+func (res *aggScanResult) consumeAggLine(line []byte, bidx func(time.Time) int, memo map[string]bool) {
+	var r aggScanRec
+	if !parseAggLine(line, &r) {
+		return
+	}
+	// 未映射判据必须与桶吸收**逐字同源**（verify-403 D1）：
+	//  1. 有显式 unmapped 键 ⇒ 采信落盘值（请求发生那一刻冻结）。唯一例外与桶吸收
+	//     一致：status=ok 视为已映射（成功即证明这个名字可服务）。
+	//  2. 没有该键（本构建之前写的老行，生产占 99.88%）⇒ 用
+	//     isUnmappedByFormula(model) && !everServed(model) 重算。
+	// 只认显式键会让老行未映射泄漏进 attempts/by_node/by_error/分位，破坏
+	// 「Σattempts == totals.requests」对账（生产快照 180d 曾差 1,391 条）。
+	if r.SawUnmapped {
+		if r.Unmapped && r.Status != "ok" {
+			return
+		}
+	} else {
+		v, hit := memo[r.Model]
+		if !hit {
+			// 与桶吸收同判据：公式 B && !everServed（曾成功过的名字永久 mapped）。
+			v = isUnmappedByFormula(r.Model) && !isServedModel(r.Model)
+			memo[r.Model] = v
+		}
+		if v {
+			return
+		}
+	}
+	at, err := parseLogFilterTime(r.TS)
+	if err != nil {
+		return
+	}
+	if bidx(at) < 0 {
+		return
+	}
+	dur := float64(r.DurationMS)
+	if dur < 0 {
+		dur = 0
+	}
+	aggHistAdd(res.durHist, aggDurBucketsMS, dur)
+	if dur > res.maxDur {
+		res.maxDur = dur
+	}
+	if dur > res.perModelMax[r.Model] {
+		res.perModelMax[r.Model] = dur
+	}
+	mh := res.perModel[r.Model]
+	if mh == nil {
+		mh = newAggHist(len(aggDurBucketsMS))
+		res.perModel[r.Model] = mh
+	}
+	aggHistAdd(mh, aggDurBucketsMS, dur)
+
+	if r.TTFTMs > 0 {
+		aggHistAdd(res.ttftHist, aggTTFTBucketsMS, float64(r.TTFTMs))
+		if float64(r.TTFTMs) > res.maxTTFT {
+			res.maxTTFT = float64(r.TTFTMs)
+		}
+		res.ttftSum += float64(r.TTFTMs)
+		res.ttftN++
+	}
+
+	switch {
+	case r.Nodes <= 0:
+		res.attempts.A0++
+	case r.Nodes == 1:
+		res.attempts.A1++
+	case r.Nodes == 2:
+		res.attempts.A2++
+	default:
+		res.attempts.A3Plus++
+	}
+
+	// by_node：按「最后一次尝试的节点显示名」聚合（无名字记 unknown）。
+	name := r.LastNodeName
+	if name == "" {
+		name = "unknown"
+	}
+	na := res.byNode[name]
+	if na == nil {
+		na = &aggNodeAcc{}
+		res.byNode[name] = na
+	}
+	na.req++
+	na.durSum += dur
+	if r.Status == "ok" {
+		na.ok++
+	} else {
+		na.fail++
+	}
+
+	// phases：queue = 首个事件时间 − ts；ttft = TTFTMs；gen = duration − queue − ttft。
+	if r.FirstEventAt != "" {
+		if ft, err := parseLogFilterTime(r.FirstEventAt); err == nil {
+			q := ft.Sub(at).Milliseconds()
+			if q < 0 {
+				q = 0
+			}
+			if int64(dur) > 0 && q > int64(dur) {
+				q = int64(dur)
+			}
+			res.queueSum += float64(q)
+			res.queueN++
+			gen := int64(dur) - q
+			if r.TTFTMs > 0 {
+				gen -= r.TTFTMs
+			}
+			if gen < 0 {
+				gen = 0
+			}
+			res.genSum += float64(gen)
+			res.genN++
+		}
+	}
+
+	if kind := aggClassifyError(&r); kind != "" {
+		ea := res.byError[kind]
+		if ea == nil {
+			ea = &aggErrorAcc{}
+			res.byError[kind] = ea
+		}
+		ea.count++
+		if ea.sample == "" {
+			sample := r.ErrMsg
+			if sample == "" {
+				sample = "status=" + r.Status
+			}
+			if len(sample) > aggErrorSampleMax {
+				sample = sample[:aggErrorSampleMax]
+			}
+			ea.sample = sample
+		}
+	}
+}
+
+// aggClassifyError 把一条失败记录归到 by_error 的类别。
+// 优先级：连接失败 → 超时 → 流中断 → 上游状态码 → 全失败 → 其它。
+func aggClassifyError(r *aggScanRec) string {
+	// 只给**失败请求**分类：一次成功请求中途可能有 connect_error / switch
+	// （换节点后成功），它属于「重试成功」而不是错误面板的一条错误。
+	// 不加这条守卫，by_error 合计会大于 totals.fail。
+	if r.Status == "ok" {
+		return ""
+	}
+	switch {
+	case r.HasConnectError:
+		return "connect_error"
+	case r.HasTTFTTimeout || r.HasSilenceTime:
+		return "timeout"
+	case r.HasStreamInterr || r.HasStreamError:
+		return "stream_interrupt"
+	case strings.Contains(strings.ToLower(r.ErrMsg), "cooldown") || strings.Contains(r.ErrMsg, "冷却"):
+		return "cooldown"
+	case r.FinalStatus >= 500 || strings.Contains(r.ErrMsg, "http 5"):
+		return "upstream_5xx"
+	case r.FinalStatus >= 400 || strings.Contains(r.ErrMsg, "http 4"):
+		return "upstream_4xx"
+	case r.HasAllFailed:
+		return "all_failed"
+	case r.Status != "ok":
+		return "other"
+	}
+	return ""
+}
+
+// aggregateWindow 从桶标签推出窗口 [start,end)（RFC3339 本地时区）。
+func aggregateWindow(ts []string) (string, string) {
+	if len(ts) == 0 {
+		return "", ""
+	}
+	if p, err := time.ParseInLocation("2006-01-02T15:04", ts[0], time.Local); err == nil {
+		return p.Format(time.RFC3339), p.Add(24 * time.Hour).Format(time.RFC3339)
+	}
+	if p, err := time.ParseInLocation("2006-01-02", ts[0], time.Local); err == nil {
+		end := p.AddDate(0, 0, len(ts))
+		return p.Format(time.RFC3339), end.Format(time.RFC3339)
+	}
+	return "", ""
+}
+
+// aggregateCompute 是一次真正的聚合计算（缓存未命中时执行）。
+func aggregateCompute(rng string) aggregateResponse {
+	ensureBucketsUpToDate()
+	ts, bidx := trendBuckets(rng)
+	winStart, winEnd := aggregateWindow(ts)
+
+	out := aggregateResponse{
+		Range:       rng,
+		Window:      aggWindow{Start: winStart, End: winEnd},
+		GeneratedAt: time.Now().Format(time.RFC3339),
+		NodeAggBy:   "node_name",
+		Timeseries:  make([]aggPoint, len(ts)),
+		ByModel:     []aggModelRow{},
+		ByNode:      []aggNodeRow{},
+		ByError:     []aggErrorRow{},
+		Unmapped:    aggUnmapped{ByModel: []aggUnmappedModel{}},
+	}
+	// timeseries / totals：与 trendsFromCallLog 同一份 foldBuckets 数学。
+	points := make([]aggPoint, len(ts))
+	for i, label := range ts {
+		points[i] = aggPoint{TS: label}
+	}
+	for i, a := range foldBuckets(ts, bidx) {
+		if i < 0 || i >= len(points) {
+			continue
+		}
+		points[i].Requests += a.N
+		points[i].OK += a.OK
+		points[i].Fail += a.Fail
+		out.Totals.Requests += a.N
+		out.Totals.OK += a.OK
+		out.Totals.Fail += a.Fail
+	}
+	// 与 trendsFromCallLog 相同：文件缺失时返回空数组（不是 24 个假零桶）。
+	if callLogFileExists() {
+		out.Timeseries = points
+	} else {
+		out.Timeseries = []aggPoint{}
+	}
+	if out.Totals.Requests > 0 {
+		out.Totals.SuccessRate = float64(out.Totals.OK) / float64(out.Totals.Requests)
+	}
+
+	// 模型口径直接读 /api/stats 的同一批桶（modelStatsWithBuckets + foldModelsInWindow），
+	// 2b 口径（TotalTokens=PT+CT、输入=prompt−cache_read）一个字不改。
+	st := modelStatsWithBuckets(ts, bidx)
+	names, aggs := foldModelsInWindow(ts, bidx)
+	scan := aggregateScanExtras(ts, bidx)
+
+	for _, name := range names {
+		a := aggs[name]
+		if a == nil {
+			continue
+		}
+		row := aggModelRow{
+			Model:    name,
+			Requests: a.N,
+			OK:       a.OK,
+			Fail:     a.Fail,
+		}
+		if a.N > 0 {
+			row.SuccessRate = float64(a.OK) / float64(a.N)
+		}
+		if ms := st.Models[name]; ms != nil {
+			row.PromptTokens = ms.PromptTokens
+			row.CompletionTokens = ms.CompletionTokens
+			row.TotalTokens = ms.TotalTokens
+		}
+		row.P95Ms = aggHistQuantile(scan.perModel[name], aggDurBucketsMS, 0.95, scan.perModelMax[name])
+		out.ByModel = append(out.ByModel, row)
+	}
+
+	out.Latency = aggLatency{
+		P50Ms:    aggHistQuantile(scan.durHist, aggDurBucketsMS, 0.50, scan.maxDur),
+		P95Ms:    aggHistQuantile(scan.durHist, aggDurBucketsMS, 0.95, scan.maxDur),
+		P99Ms:    aggHistQuantile(scan.durHist, aggDurBucketsMS, 0.99, scan.maxDur),
+		MaxMs:    scan.maxDur,
+		TTFT50Ms: aggHistQuantile(scan.ttftHist, aggTTFTBucketsMS, 0.50, scan.maxTTFT),
+		TTFT95Ms: aggHistQuantile(scan.ttftHist, aggTTFTBucketsMS, 0.95, scan.maxTTFT),
+	}
+
+	// by_node：请求数降序、同数按名字升序（输出顺序确定，不泄漏 map 遍历序）。
+	for name, na := range scan.byNode {
+		row := aggNodeRow{Name: name, Requests: na.req, OK: na.ok, Fail: na.fail}
+		if na.req > 0 {
+			row.SuccessRate = float64(na.ok) / float64(na.req)
+			row.AvgMs = na.durSum / float64(na.req)
+		}
+		out.ByNode = append(out.ByNode, row)
+	}
+	sort.Slice(out.ByNode, func(i, j int) bool {
+		if out.ByNode[i].Requests != out.ByNode[j].Requests {
+			return out.ByNode[i].Requests > out.ByNode[j].Requests
+		}
+		return out.ByNode[i].Name < out.ByNode[j].Name
+	})
+
+	// by_error：数量降序、同数按类别升序。
+	for kind, ea := range scan.byError {
+		out.ByError = append(out.ByError, aggErrorRow{Kind: kind, Count: ea.count, Sample: ea.sample})
+	}
+	sort.Slice(out.ByError, func(i, j int) bool {
+		if out.ByError[i].Count != out.ByError[j].Count {
+			return out.ByError[i].Count > out.ByError[j].Count
+		}
+		return out.ByError[i].Kind < out.ByError[j].Kind
+	})
+
+	out.Attempts = scan.attempts
+	if scan.queueN > 0 {
+		out.Phases.QueueAvgMs = scan.queueSum / float64(scan.queueN)
+	}
+	if scan.ttftN > 0 {
+		out.Phases.TTFTAvgMs = scan.ttftSum / float64(scan.ttftN)
+	}
+	if scan.genN > 0 {
+		out.Phases.GenAvgMs = scan.genSum / float64(scan.genN)
+	}
+
+	// unmapped：与 /api/stats 的 unmapped_requests 同源同值（同一份 ts/bidx）。
+	uc, ub := unmappedStatsInWindow(ts, bidx)
+	out.Unmapped.Count = uc
+	top := topUnmappedModels(ub, unmappedTopN)
+	umModels := make([]string, 0, len(top))
+	for m := range top {
+		umModels = append(umModels, m)
+	}
+	sort.Strings(umModels)
+	for _, m := range umModels {
+		out.Unmapped.ByModel = append(out.Unmapped.ByModel, aggUnmappedModel{Model: m, Count: top[m]})
+	}
+
+	return out
 }
 
 // ---- task-56：保留策略（gzip 归档 + 按天删除）----

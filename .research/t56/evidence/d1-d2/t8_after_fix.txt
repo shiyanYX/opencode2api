@@ -1,0 +1,17 @@
+    calllog_invariance_test.go:126: L1 单文件: 124520431 字节, 冷启动 634.89154ms, absorbed=233444 桶=1089
+    calllog_invariance_test.go:153: L3 纯日文件: 冷启动 677.368225ms, absorbed=233444 桶=1089
+    calllog_invariance_test.go:198: L2 legacy+最后一天: 冷启动 560.030184ms, absorbed=233444
+    calllog_invariance_test.go:243: trends[today/plain      ] 三布局逐字节相等（3547 字节）
+    calllog_invariance_test.go:243: trends[today/group=model] 三布局逐字节相等（41445 字节）
+    calllog_invariance_test.go:243: trends[7d   /plain      ] 三布局逐字节相等（1156 字节）
+    calllog_invariance_test.go:243: trends[7d   /group=model] 三布局逐字节相等（17891 字节）
+    calllog_invariance_test.go:243: trends[30d  /plain      ] 三布局逐字节相等（4971 字节）
+    calllog_invariance_test.go:243: trends[30d  /group=model] 三布局逐字节相等（90794 字节）
+    calllog_invariance_test.go:243: trends[180d /plain      ] 三布局逐字节相等（26266 字节）
+    calllog_invariance_test.go:243: trends[180d /group=model] 三布局逐字节相等（893455 字节）
+    calllog_invariance_test.go:259: trends 非空 + 三布局逐字节相等: PASS
+    calllog_invariance_test.go:271: call-log 历史查询三布局逐字节相等（216931 字节）
+    calllog_invariance_test.go:278: 守恒通过：ΣN=233444 == absorbed 233444 − unabsorbed 0
+T8 PASS
+--- PASS: TestT56FourWindowInvariance (3.98s)
+PASS

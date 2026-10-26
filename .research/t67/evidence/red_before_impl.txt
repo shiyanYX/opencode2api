@@ -1,0 +1,28 @@
+# RED：测试先写、实现前真实运行（脚手架阶段 aggregateResponseFor 为空实现/缓存键为空串）
+# 命令：go test -run 'TestAggregate' -count=1 ./
+--- FAIL: TestAggregateTotalsAndTimeseriesMatchStats (0.00s)
+    --- FAIL: .../today (0.00s)
+        log_aggregate_test.go:95: totals.requests=0 与 /api/stats total_requests=3 不一致（口径红线）
+    --- FAIL: .../7d (0.00s)
+        log_aggregate_test.go:95: totals.requests=0 与 /api/stats total_requests=4 不一致（口径红线）
+--- FAIL: TestAggregateEmptyDataset (0.00s)
+    log_aggregate_test.go:194: today 空集 timeseries 桶数 0，期望 24（与 trends 一致）
+--- FAIL: TestAggregateSingleRecord (0.00s)
+    log_aggregate_test.go:218: 单条 totals: {Requests:0 OK:0 Fail:0 SuccessRate:0}
+--- FAIL: TestAggregateAllFailed (0.00s)
+    log_aggregate_test.go:251: 全失败 totals: {Requests:0 OK:0 Fail:0 SuccessRate:0}
+--- FAIL: TestAggregatePercentilesKnownDistribution (0.00s)
+    log_aggregate_test.go:283: p50_ms=0 不在期望 501 所在桶 [500,1000]（直方桶+插值，±1 桶）
+--- FAIL: TestAggregateAttemptsPhasesAndErrors (0.00s)
+    log_aggregate_test.go:318: attempts={a0:0 a1:0 a2:0 a3plus:0}，期望 1/1/1/1
+--- FAIL: TestAggregateByErrorKinds (0.00s)
+    log_aggregate_test.go:371: by_error 缺少类别 "upstream_5xx": map[]
+--- FAIL: TestAggregateWindowBoundaries (0.00s)
+    log_aggregate_test.go:408: today: aggregate 0 != /api/stats 1
+--- FAIL: TestAggregateUnmappedConsistency (0.00s)
+    log_aggregate_test.go:433: 未映射不得进 totals: {Requests:0 OK:0 Fail:0 SuccessRate:0}
+--- FAIL: TestAggregateCacheKeyIncludesRangeAndDate (0.00s)
+    log_aggregate_test.go:519: 缓存键未含 range: "" == ""
+--- FAIL: TestAggregateCacheTTLAndInvalidation (0.00s)
+    log_aggregate_test.go:538: 首次 totals=0
+--- FAIL: TestAggregatePerformanceWarmUnder300ms (2.26s)

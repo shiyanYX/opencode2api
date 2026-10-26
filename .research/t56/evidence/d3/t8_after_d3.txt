@@ -1,0 +1,25 @@
+=== RUN   TestT56FourWindowInvariance
+    calllog_invariance_test.go:72: 夹具: 61 个日文件，最新 2026-10-20.jsonl
+    calllog_invariance_test.go:127: L1 单文件: 124520431 字节, 冷启动 506.048106ms, absorbed=233444 桶=1089
+    calllog_invariance_test.go:155: L3 纯日文件: 冷启动 527.821712ms, absorbed=233444 桶=1089
+    calllog_invariance_test.go:201: L2 legacy+最后一天: 冷启动 527.711767ms, absorbed=233444
+    calllog_invariance_test.go:222: 窗口 today 三布局逐字节相等: {"total_requests":926,"models":{"big-pickle":{"request_count":4,"prompt_tokens":1305,"completion_tokens":17,"total_token
+    calllog_invariance_test.go:222: 窗口 7d    三布局逐字节相等: {"total_requests":28868,"models":{"big-pickle":{"request_count":4,"prompt_tokens":1305,"completion_tokens":17,"total_tok
+    calllog_invariance_test.go:222: 窗口 30d   三布局逐字节相等: {"total_requests":175597,"models":{"big-pickle":{"request_count":7,"prompt_tokens":7773,"completion_tokens":528,"total_t
+    calllog_invariance_test.go:222: 窗口 180d  三布局逐字节相等: {"total_requests":233444,"models":{"big-pickle":{"request_count":11,"prompt_tokens":8377,"completion_tokens":621,"total_
+    calllog_invariance_test.go:246: trends[today/plain      ] 三布局逐字节相等（3543 字节）
+    calllog_invariance_test.go:246: trends[today/group=model] 三布局逐字节相等（41441 字节）
+    calllog_invariance_test.go:246: trends[7d   /plain      ] 三布局逐字节相等（1156 字节）
+    calllog_invariance_test.go:246: trends[7d   /group=model] 三布局逐字节相等（17891 字节）
+    calllog_invariance_test.go:246: trends[30d  /plain      ] 三布局逐字节相等（4971 字节）
+    calllog_invariance_test.go:246: trends[30d  /group=model] 三布局逐字节相等（90794 字节）
+    calllog_invariance_test.go:246: trends[180d /plain      ] 三布局逐字节相等（26266 字节）
+    calllog_invariance_test.go:246: trends[180d /group=model] 三布局逐字节相等（893455 字节）
+    calllog_invariance_test.go:262: trends 非空 + 三布局逐字节相等: PASS
+    calllog_invariance_test.go:274: call-log 历史查询三布局逐字节相等（216931 字节）
+    calllog_invariance_test.go:297: 分页门禁：位置游标 limit=500 全量连翻 467 页 / 233444 条，0 漏 0 重；三布局前 3 页顺序一致
+    calllog_invariance_test.go:304: 守恒通过：ΣN=233444 == absorbed 233444 − unabsorbed 0
+T8 PASS
+--- PASS: TestT56FourWindowInvariance (34.89s)
+PASS
+ok  	github.com/shiyanYX/opencode2api	34.936s

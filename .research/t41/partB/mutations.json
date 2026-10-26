@@ -1,0 +1,119 @@
+{
+  "note": "变异清单（Lead 授权版，2026-10-20 冻结 pin 上自行重做，不引用实现方 12 条结果）。find 必须唯一命中；count!=1 报 MUTATION_DRIFT，绝不静默跳过。red 判据 = 出现基线没有的 --- FAIL: TestX。",
+  "mutations": [
+    {
+      "id": "M1",
+      "title": "everServed 短路恒假（判定与回填快照两处都忽略历史成功）",
+      "expect": "red",
+      "why": "task-39 的全部价值在这一支；仍绿说明测试没覆盖漂移退化",
+      "patches": [
+        {
+          "file": "calllog.go",
+          "find": "func isServedModel(name string) bool {\n\tif name == \"\" {",
+          "replace": "func isServedModel(name string) bool {\n\tif true {"
+        },
+        {
+          "file": "calllog.go",
+          "find": "\tout := make(map[string]struct{}, len(servedModels)+len(staged))\n\tfor m := range servedModels {\n\t\tout[m] = struct{}{}\n\t}\n\tfor m := range staged {",
+          "replace": "\tout := make(map[string]struct{}, len(staged))\n\tfor m := range staged {"
+        }
+      ]
+    },
+    {
+      "id": "M2",
+      "title": "everServed 恒真（所有非空模型名直接算 mapped）",
+      "expect": "red",
+      "why": "未映射桶会恒空、unmapped_requests.count 归零",
+      "patches": [
+        {
+          "file": "main.go",
+          "find": "\tif isServedModel(m) {\n\t\treturn false\n\t}",
+          "replace": "\tif m != \"\" {\n\t\treturn false\n\t}"
+        }
+      ]
+    },
+    {
+      "id": "M3",
+      "title": "只写不读历史（回填时把 everServed 置空，老行只按公式 B 判）",
+      "expect": "red",
+      "why": "正是用户裁决要修的退化路径：目录漂移后历史成功被追认未映射",
+      "patches": [
+        {
+          "file": "calllog.go",
+          "find": "ever := servedModelsSnapshot(stagedServed)",
+          "replace": "ever := map[string]struct{}{}"
+        }
+      ]
+    },
+    {
+      "id": "M4",
+      "title": "删掉 `-free` 后缀分支（公式 B 只剩文档表一支）",
+      "expect": "red",
+      "why": "deepseek-v4-flash-free / x-preview-f-free 等漂移模型会被删出概览（5,702 条成功）",
+      "patches": [
+        {
+          "file": "main.go",
+          "find": "\t// `-free` 后缀：与 defaultFreeModels / free_models_cache.json 的命名约定同源。\n\t// 这一条覆盖了「文档表已把该模型摘掉、但它仍是免费层模型」的漂移场景\n\t// （生产实例：deepseek-v4-flash-free、x-preview-f-free）。\n\tif strings.HasSuffix(resolved, \"-free\") {\n\t\treturn false\n\t}\n\treturn true",
+          "replace": "\treturn true"
+        }
+      ]
+    },
+    {
+      "id": "M5",
+      "title": "F1 过滤恒真（去掉 OK 判据 → 等于不过滤，零成功模型照样出现在两个出口）",
+      "expect": "red",
+      "why": "用户口径「图表只显示有成功的模型」直接失效；/api/stats 与 trends?group=model 都会多出 6 个模型",
+      "patches": [
+        {
+          "file": "calllog.go",
+          "find": "\tfor k, a := range hourBuckets {\n\t\tif a.OK == 0 {\n\t\t\tcontinue\n\t\t}\n\t\tif bucketIndexOf(k.Hour, len(ts), bidx) < 0 {",
+          "replace": "\tfor k := range hourBuckets {\n\t\tif bucketIndexOf(k.Hour, len(ts), bidx) < 0 {"
+        }
+      ]
+    },
+    {
+      "id": "M6",
+      "title": "F1 过滤恒假（两个出口都传空 keep → 所有模型被删光）",
+      "expect": "red",
+      "why": "防止「判据写反」这类实现被放过：models/trends_by_model/model-trends 应全空但 total_requests 不变",
+      "patches": [
+        {
+          "file": "main.go",
+          "find": "keep := modelsWithOKInWindow(ts, bidx)\n\tfor m := range out.Models {",
+          "replace": "keep := map[string]struct{}{}\n\tfor m := range out.Models {"
+        },
+        {
+          "file": "main.go",
+          "find": "keep := modelsWithOKInWindow(ts, bidx)\n\t\tpts := filterTrendsByOK(",
+          "replace": "keep := map[string]struct{}{}\n\t\tpts := filterTrendsByOK("
+        }
+      ]
+    },
+    {
+      "id": "M7",
+      "title": "F1 半实现 A：只过滤 models，漏掉 /api/stats 的 trends_by_model",
+      "expect": "red",
+      "why": "同一响应内两个字段口径分叉（面板表格与图表对不上）",
+      "patches": [
+        {
+          "file": "main.go",
+          "find": "\tout.TrendsByModel = filterTrendsByOK(out.TrendsByModel, keep)\n",
+          "replace": ""
+        }
+      ]
+    },
+    {
+      "id": "M8",
+      "title": "F1 半实现 B（Q1）：/api/stats 已过滤，但 /api/stats/trends?group=model 出口未过滤",
+      "expect": "red",
+      "why": "面板模型维度趋势图会多出零成功模型，与 /api/stats 模型数不一致",
+      "patches": [
+        {
+          "file": "main.go",
+          "find": "\t\tkeep := modelsWithOKInWindow(ts, bidx)\n\t\tpts := filterTrendsByOK(trendsByModelWithBuckets(ts, bidx), keep)",
+          "replace": "\t\t_ = modelsWithOKInWindow(ts, bidx)\n\t\tpts := trendsByModelWithBuckets(ts, bidx)"
+        }
+      ]
+    }
+  ]
+}

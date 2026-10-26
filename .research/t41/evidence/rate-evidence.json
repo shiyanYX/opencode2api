@@ -1,0 +1,62 @@
+{
+ "nofilter": {
+  "7d": {
+   "total_requests": 27739,
+   "ok": 20576,
+   "rate_pct": 74.177151,
+   "models": 12,
+   "unmapped": 730
+  },
+  "30d": {
+   "total_requests": 173846,
+   "ok": 159441,
+   "rate_pct": 91.713931,
+   "models": 14,
+   "unmapped": 1352
+  },
+  "180d": {
+   "total_requests": 231654,
+   "ok": 208037,
+   "rate_pct": 89.805054,
+   "models": 22,
+   "unmapped": 1391
+  },
+  "today": {
+   "total_requests": 2059,
+   "ok": 2017,
+   "rate_pct": 97.960175,
+   "models": 10,
+   "unmapped": 728
+  }
+ },
+ "new": {
+  "7d": {
+   "total_requests": 27739,
+   "ok": 20576,
+   "rate_pct": 74.177151,
+   "models": 9,
+   "unmapped": 730
+  },
+  "30d": {
+   "total_requests": 173846,
+   "ok": 159441,
+   "rate_pct": 91.713931,
+   "models": 10,
+   "unmapped": 1352
+  },
+  "180d": {
+   "total_requests": 231654,
+   "ok": 208037,
+   "rate_pct": 89.805054,
+   "models": 16,
+   "unmapped": 1391
+  },
+  "today": {
+   "total_requests": 2059,
+   "ok": 2017,
+   "rate_pct": 97.960175,
+   "models": 8,
+   "unmapped": 728
+  }
+ }
+}

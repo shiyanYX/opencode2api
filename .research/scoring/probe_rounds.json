@@ -1,0 +1,264 @@
+{
+ "rounds": [
+  {
+   "ts": "2026-10-21T03:26:46.073+08:00",
+   "probed": 130,
+   "failed": 4,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T03:26:46.074+08:00",
+   "checked": 130
+  },
+  {
+   "ts": "2026-10-21T03:41:12.966+08:00",
+   "probed": 152,
+   "failed": 7,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T03:41:12.968+08:00",
+   "checked": 152
+  },
+  {
+   "ts": "2026-10-21T03:57:11.175+08:00",
+   "probed": 156,
+   "failed": 32,
+   "canary_probed": 5,
+   "canary_failed": 1,
+   "canary_rate": 0.2,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T03:57:11.179+08:00",
+   "checked": 156
+  },
+  {
+   "ts": "2026-10-21T04:11:38.515+08:00",
+   "probed": 157,
+   "failed": 31,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T04:11:38.567+08:00",
+   "checked": 157
+  },
+  {
+   "ts": "2026-10-21T04:27:57.841+08:00",
+   "probed": 156,
+   "failed": 30,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T04:27:57.845+08:00",
+   "checked": 156
+  },
+  {
+   "ts": "2026-10-21T04:44:04.917+08:00",
+   "probed": 156,
+   "failed": 36,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T04:44:04.946+08:00",
+   "checked": 156
+  },
+  {
+   "ts": "2026-10-21T04:58:58.731+08:00",
+   "probed": 131,
+   "failed": 6,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T04:58:58.733+08:00",
+   "checked": 131
+  },
+  {
+   "ts": "2026-10-21T05:13:59.242+08:00",
+   "probed": 134,
+   "failed": 4,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T05:13:59.243+08:00",
+   "checked": 134
+  },
+  {
+   "ts": "2026-10-21T05:29:55.487+08:00",
+   "probed": 149,
+   "failed": 23,
+   "canary_probed": 5,
+   "canary_failed": 1,
+   "canary_rate": 0.2,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T05:29:55.493+08:00",
+   "checked": 149
+  },
+  {
+   "ts": "2026-10-21T05:45:06.922+08:00",
+   "probed": 149,
+   "failed": 26,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T05:45:06.928+08:00",
+   "checked": 149
+  },
+  {
+   "ts": "2026-10-21T06:00:03.444+08:00",
+   "probed": 130,
+   "failed": 3,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T06:00:03.444+08:00",
+   "checked": 130
+  },
+  {
+   "ts": "2026-10-21T06:15:15.356+08:00",
+   "probed": 154,
+   "failed": 9,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T06:15:15.357+08:00",
+   "checked": 154
+  },
+  {
+   "ts": "2026-10-21T06:31:12.271+08:00",
+   "probed": 154,
+   "failed": 30,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T06:31:12.289+08:00",
+   "checked": 154
+  },
+  {
+   "ts": "2026-10-21T06:46:44.450+08:00",
+   "probed": 151,
+   "failed": 26,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T06:46:44.455+08:00",
+   "checked": 151
+  },
+  {
+   "ts": "2026-10-21T07:01:51.234+08:00",
+   "probed": 131,
+   "failed": 5,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T07:01:51.236+08:00",
+   "checked": 131
+  },
+  {
+   "ts": "2026-10-21T07:16:48.295+08:00",
+   "probed": 131,
+   "failed": 4,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T07:16:48.295+08:00",
+   "checked": 131
+  },
+  {
+   "ts": "2026-10-21T07:32:57.247+08:00",
+   "probed": 131,
+   "failed": 6,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T07:32:57.248+08:00",
+   "checked": 131
+  },
+  {
+   "ts": "2026-10-21T07:49:20.915+08:00",
+   "probed": 127,
+   "failed": 5,
+   "canary_probed": 5,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T07:49:20.915+08:00",
+   "checked": 127
+  },
+  {
+   "ts": "2026-10-21T08:07:02.630+08:00",
+   "probed": 136,
+   "failed": 11,
+   "canary_probed": 0,
+   "canary_failed": 0,
+   "canary_rate": 0.0,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T08:07:02.631+08:00",
+   "checked": 136
+  },
+  {
+   "ts": "2026-10-21T08:22:45.502+08:00",
+   "probed": 137,
+   "failed": 14,
+   "canary_probed": 5,
+   "canary_failed": 1,
+   "canary_rate": 0.2,
+   "verdict": "trusted"
+  },
+  {
+   "ts": "2026-10-21T08:22:45.527+08:00",
+   "checked": 137
+  }
+ ]
+}

@@ -169,6 +169,288 @@ func parseStatsLine(line []byte, r *slimRec) bool {
 	}
 }
 
+// ---- task-67：分析页聚合专用扫描器 ----
+//
+// 为什么不复用 parseStatsLine：那个函数的 slimRec 只装统计桶需要的 10 个字段
+// （节点/事件/错误信息从不被统计访问），而分析页要 attempts（节点数）、
+// by_node（最后尝试节点名）、by_error（错误类别+样本）、phases（首个事件时间）。
+// 这些字段只由 /api/logs/aggregate 的**一次缓存扫描**消费，不进入热路径的桶吸收，
+// 所以单独一个解析器，避免给 parseStatsLine 增加开销、也避免污染 slimRec 语义。
+//
+// 判据与 parseStatsLine 一致：脏行不中断整体扫描，只跳过该行；数值越界留零值。
+
+// aggScanRec 是分析页聚合扫描的单行结果。
+type aggScanRec struct {
+	TS              string
+	Model           string
+	Status          string
+	DurationMS      int64
+	TTFTMs          int64
+	FinalStatus     int
+	ErrMsg          string
+	Nodes           int    // len(nodes)：尝试过的节点数（attempts 分布）
+	LastNodeName    string // node_names[len-1]：by_node 按「最后尝试节点」聚合
+	FirstEventAt    string // events[0].at：phases.queue = 首事件时间 - ts
+	HasConnectError bool
+	HasTTFTTimeout  bool
+	HasSilenceTime  bool
+	HasStreamInterr bool
+	HasStreamError  bool
+	HasAllFailed    bool
+	// SawUnmapped 记录这一行是否出现过 unmapped 键：出现了就以落盘判断为准
+	// （请求发生那一刻冻结的语义），没出现才允许按公式 B + everServed 重算。
+	// 与 slimRec.SawUnmapped 同义，区别只是本结构供聚合扫描使用。
+	SawUnmapped bool
+	// Unmapped 表示这条记录是「模型名无法映射」的请求。它们**不进统计聚合**
+	// （不进 hourBuckets ⇒ 不进 total_requests/成功率/by_model），
+	// 所以分析页的 attempts/by_node/by_error/延迟分位也必须排除它们，
+	// 否则「Σattempts == totals.requests」这条对账不成立。
+	Unmapped bool
+}
+
+// parseAggLine 把一行 JSON 解析进 aggScanRec。与 parseStatsLine 一样手写，
+// 只为聚合扫描服务（不走桶吸收热路径）。
+func parseAggLine(line []byte, r *aggScanRec) bool {
+	i := skipJSONSpace(line, 0)
+	if i >= len(line) || line[i] != '{' {
+		return false
+	}
+	i++
+	*r = aggScanRec{}
+	for {
+		i = skipJSONSpace(line, i)
+		if i >= len(line) {
+			return false
+		}
+		switch line[i] {
+		case '}':
+			return true
+		case ',':
+			i++
+			continue
+		case '"':
+		default:
+			return false
+		}
+		key, ni := jsonReadKey(line, i)
+		if ni < 0 {
+			return false
+		}
+		i = skipJSONSpace(line, ni)
+		if i >= len(line) || line[i] != ':' {
+			return false
+		}
+		i = skipJSONSpace(line, i+1)
+		if i >= len(line) {
+			return false
+		}
+
+		if line[i] == '{' {
+			i = jsonSkipContainer(line, i)
+			continue
+		}
+		if line[i] == '[' {
+			switch string(key) {
+			case "nodes":
+				r.Nodes, i = parseAggStringArrayCount(line, i)
+			case "node_names":
+				r.LastNodeName, i = parseAggStringArrayLast(line, i)
+			case "events":
+				i = parseAggEvents(line, i, r)
+			default:
+				i = jsonSkipContainer(line, i)
+			}
+			if i < 0 {
+				return false
+			}
+			continue
+		}
+		if line[i] == '"' {
+			str, ni := jsonReadString(line, i)
+			if ni < 0 {
+				return false
+			}
+			switch string(key) {
+			case "ts":
+				r.TS = str
+			case "model":
+				r.Model = str
+			case "status":
+				r.Status = str
+			case "err_msg":
+				r.ErrMsg = str
+			}
+			i = ni
+			continue
+		}
+
+		e := i
+		for e < len(line) && line[e] != ',' && line[e] != '}' {
+			e++
+		}
+		tok := bytes.TrimRight(line[i:e], " \t")
+		switch string(key) {
+		case "duration_ms":
+			r.DurationMS = jsonInt(tok)
+		case "ttft_ms":
+			r.TTFTMs = jsonInt(tok)
+		case "final_status":
+			r.FinalStatus = int(jsonInt(tok))
+		case "unmapped":
+			// 与 parseStatsLine 同一宽容语义：只有字面量 true 才算未映射。
+			r.Unmapped = string(tok) == "true"
+			r.SawUnmapped = true
+		}
+		i = e
+	}
+}
+
+// parseAggStringArrayCount 数一个 JSON 字符串数组的元素个数（nodes）。
+func parseAggStringArrayCount(b []byte, i int) (int, int) {
+	n := 0
+	i++ // '['
+	for {
+		i = skipJSONSpace(b, i)
+		if i >= len(b) {
+			return 0, -1
+		}
+		switch b[i] {
+		case ']':
+			return n, i + 1
+		case ',', ' ':
+			i++
+		default:
+			if b[i] == '"' {
+				_, ni := jsonReadString(b, i)
+				if ni < 0 {
+					return 0, -1
+				}
+				i = ni
+			} else {
+				i = jsonSkipContainer(b, i)
+			}
+			n++
+		}
+	}
+}
+
+// parseAggStringArrayLast 返回一个 JSON 字符串数组里最后一个非空元素（node_names）。
+func parseAggStringArrayLast(b []byte, i int) (string, int) {
+	var last string
+	i++
+	for {
+		i = skipJSONSpace(b, i)
+		if i >= len(b) {
+			return "", -1
+		}
+		switch b[i] {
+		case ']':
+			return last, i + 1
+		case ',':
+			i++
+		default:
+			if b[i] == '"' {
+				str, ni := jsonReadString(b, i)
+				if ni < 0 {
+					return "", -1
+				}
+				if str != "" {
+					last = str
+				}
+				i = ni
+			} else {
+				i = jsonSkipContainer(b, i)
+			}
+		}
+	}
+}
+
+// parseAggEvents 扫描 events 数组：取第一个事件的 at，并收集事件类型标志位。
+// 只关心类型与首事件时间，detail 用 jsonSkipContainer 跳过。
+func parseAggEvents(b []byte, i int, r *aggScanRec) int {
+	i++ // '['
+	first := true
+	for {
+		i = skipJSONSpace(b, i)
+		if i >= len(b) {
+			return -1
+		}
+		if b[i] == ']' {
+			return i + 1
+		}
+		if b[i] == ',' {
+			i++
+			continue
+		}
+		if b[i] != '{' {
+			i = jsonSkipContainer(b, i)
+			continue
+		}
+		// 逐个字段解析一个事件对象
+		i++
+		for {
+			i = skipJSONSpace(b, i)
+			if i >= len(b) {
+				return -1
+			}
+			if b[i] == '}' {
+				i++
+				first = false
+				break
+			}
+			if b[i] == ',' {
+				i++
+				continue
+			}
+			if b[i] != '"' {
+				return -1
+			}
+			key, ni := jsonReadKey(b, i)
+			if ni < 0 {
+				return -1
+			}
+			i = skipJSONSpace(b, ni)
+			if i >= len(b) || b[i] != ':' {
+				return -1
+			}
+			i = skipJSONSpace(b, i+1)
+			if i >= len(b) {
+				return -1
+			}
+			if b[i] == '"' {
+				str, ni := jsonReadString(b, i)
+				if ni < 0 {
+					return -1
+				}
+				switch string(key) {
+				case "type":
+					switch str {
+					case "connect_error":
+						r.HasConnectError = true
+					case "ttft_timeout":
+						r.HasTTFTTimeout = true
+					case "silence_timeout":
+						r.HasSilenceTime = true
+					case "stream_interrupt":
+						r.HasStreamInterr = true
+					case "stream_error":
+						r.HasStreamError = true
+					case "all_failed":
+						r.HasAllFailed = true
+					}
+				case "at":
+					if first {
+						r.FirstEventAt = str
+					}
+				}
+				i = ni
+				continue
+			}
+			i = jsonSkipContainer(b, i)
+		}
+	}
+}
+
 // jsonInt 解析一个 JSON 整数字段，失败一律返回 0。
 //
 // 判据是 err != nil，**不是**「值等于 MaxInt64 就丢」：ParseInt 对

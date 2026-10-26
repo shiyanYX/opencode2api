@@ -1,0 +1,14 @@
+=== 变异 M-A1：把集合里的 'switch' 改成 'switch_x'（前后端集合分叉）===
+--- FAIL: TestEventsRetainedOnDiskExactlyWhenHasIssue (0.00s)
+    discev_test.go:91: 后端 HasIssue 含 "switch" 但前端 CL_ISSUE_TYPES 不含 —— 落盘判据与 UI 判据已分叉
+    discev_test.go:96: 前端 CL_ISSUE_TYPES 含 "switch_x" 但后端 HasIssue 不含 —— 落盘判据与 UI 判据已分叉
+FAIL
+FAIL	github.com/shiyanYX/opencode2api	0.011s
+exit=0
+=== 变异 M-A2：整行删掉 CL_ISSUE_TYPES 常量（回到换面板后缺失态）===
+--- FAIL: TestEventsRetainedOnDiskExactlyWhenHasIssue (0.00s)
+    discev_test.go:80: static/admin.html 里找不到 CL_ISSUE_TYPES 常量 —— 方案的地基没了
+FAIL
+FAIL	github.com/shiyanYX/opencode2api	0.008s
+FAIL
+exit=0

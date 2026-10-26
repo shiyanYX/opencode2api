@@ -2210,7 +2210,12 @@ func convertRequest(req *OpenAIRequest) map[string]any {
 	// 缓存增强：向 zen 上游显式声明 prompt 前缀缓存的保留时长。
 	// 上游默认约 5 分钟(in_memory)，agent 任务间歇易过期，导致缓存难命中；
 	// 注入 retention 后拉长到 24h。客户端显式传入的值(extra_body)优先。
-	if retention := getPromptCacheRetention(); retention != "off" {
+	// ★ 2026-10-26 修正：prompt_cache_retention 是旧 /zen/v1/ 路由的私有参数，
+	//   v2 /inference 路由不认识它，直接 400 unsupported_parameter（要求
+	//   prompt_cache_options）。官方 2.x 客户端也不发任何缓存参数，注入本身
+	//   就是形态差异。因此：模型走 v2 免费层（isFreeModel 判定，对应
+	//   /inference 路由）时不再注入；Go endpoint（zen/go 私有路由）保留。
+	if retention := getPromptCacheRetention(); retention != "off" && !isFreeModel(req.Model) {
 		if _, exists := converted["prompt_cache_retention"]; !exists {
 			converted["prompt_cache_retention"] = retention
 		}
@@ -2218,7 +2223,9 @@ func convertRequest(req *OpenAIRequest) map[string]any {
 	// Anthropic 风格 cache_control 断点：对接受该字段的模型(排除 GLM/Zhipu)
 	// 显式标记缓存断点并拉长 TTL。对不支持的上游，zen 网关负责剥离；
 	// DeepSeek 等自动前缀缓存不受影响。
-	if getCacheBreakpoints() && !rejectsCacheControl(req.Model) {
+	// ★ 2026-10-26 同 prompt_cache_retention 的修正：v2 /inference 路由
+	//   不剥离该参数，免费模型注入会 400。官方 2.x 客户端不发它。
+	if getCacheBreakpoints() && !rejectsCacheControl(req.Model) && !isFreeModel(req.Model) {
 		if _, exists := converted["cache_control"]; !exists {
 			converted["cache_control"] = map[string]any{"type": "ephemeral", "ttl": "1h"}
 		}
@@ -2745,7 +2752,10 @@ func buildOCRequest(modelID string, bodyMap map[string]any, auth UpstreamAuth, n
 
 func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth UpstreamAuth, useGoEndpoint bool, nodeFP, ver string) (*http.Request, error) {
 	bodyMap["model"] = modelID
-	tryBody, err := json.Marshal(bodyMap)
+	// v2 gate 对 body 做指纹比对：encoding/json 的 HTML 转义（\u003c 等）
+	// 与 JSON.stringify 字节不同，免费层 body 必须无转义编码。
+	// 付费/Go 层语义等价，统一走同一路径无害。
+	tryBody, err := marshalBodyBytes(bodyMap)
 	if err != nil {
 		return nil, err
 	}
@@ -2753,11 +2763,11 @@ func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth Ups
 	if useGoEndpoint {
 		upstreamURL = "https://opencode.ai/zen/go/v1/chat/completions"
 	} else {
-		// 2026-10-15 起用 /inference/v1/：官方客户端（1.18.33）已迁到该路径，
-		// 而旧的 /zen/v1/chat/completions 现在只放行「完全真客户端」的请求——
-		// 同一份请求（同头同体）在 /zen/v1/ 上 403 FreeTierError、在 /inference/v1/
-		// 上 200。两个路径目前都还在，但只有新路径接受网关形态。
-		upstreamURL = "https://opencode.ai/inference/v1/chat/completions"
+		// 2026-10-25 起 v2 lane 用 2.1 客户端的 family 路由：/inference 后
+		// 按协议族分组（openai/anthropic），Chat 是 /inference/openai/v1/...。
+		// 旧的扁平路由 /inference/v1/... 仍在响应，但 2.1 客户端不再发它，
+		// flat 路由现在是过时客户端特征（上游 v1.4.4 同步，commit f9ef5693）。
+		upstreamURL = "https://opencode.ai/inference/openai/v1/chat/completions"
 	}
 	req, err := http.NewRequest("POST", upstreamURL, bytes.NewReader(tryBody))
 	if err != nil {
@@ -2767,12 +2777,21 @@ func buildOCRequestWithEndpoint(modelID string, bodyMap map[string]any, auth Ups
 	req.Header.Set("Authorization", auth.authorizationHeader())
 	// 版本由调用方传入（本请求自己携带），不再在函数内二次读全局：
 	// 否则「attemptVer == 实际发出的版本」不是不变量，C1 的归因守卫会失效。
-	req.Header.Set("User-Agent", fmt.Sprintf("opencode/%s", ver))
-	req.Header.Set("x-opencode-client", "cli")
-	req.Header.Set("x-opencode-project", ocProjectID)
-	req.Header.Set("x-opencode-session", getOrCreateSessionByNode(nodeFP))
-	req.Header.Set("x-opencode-request", newOpenCodeID("msg"))
-	req.Header.Set("Accept", "application/json")
+	//
+	// 2026-10-25 起免费层（非 Go endpoint）走 v2 头形态：四段 UA、双 session
+	// 头 + affinity、无 x-opencode-request（v2 gate 拒它）。Go endpoint 维持
+	// 1.x 形态（zen/go lane 的 gate 未随 2.x 演进）。ver 参数在 v2 分支不用于
+	// UA（v2UserAgent 内置 2.1.1），保留形参签名以最小化调用面改动。
+	if useGoEndpoint {
+		req.Header.Set("User-Agent", fmt.Sprintf("opencode/%s", ver))
+		req.Header.Set("x-opencode-client", "cli")
+		req.Header.Set("x-opencode-project", ocProjectID)
+		req.Header.Set("x-opencode-session", getOrCreateSessionByNode(nodeFP))
+		req.Header.Set("x-opencode-request", newOpenCodeID("msg"))
+		req.Header.Set("Accept", "application/json")
+	} else {
+		applyV2Headers(req, getOrCreateSessionByNode(nodeFP), ocProjectID)
+	}
 	return req, nil
 }
 
@@ -2894,6 +2913,12 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			break
 		}
 		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		// 免费层（zen）请求经 BunTransport 发出：TLS 指纹是 v2 gate 的硬前提
+		// （2026-10-25 对照实验，见 bun_transport.go）。Go endpoint 维持原传输。
+		// 付费 zen key 走免费模型时同样需要（v2 gate 按 lane 而非按 key 校验）。
+		if !useGoEndpoint {
+			egResult = bunEgressResult(egResult)
+		}
 		client, nodeFp := egResult.Client, egResult.NodeFP
 		// I2：本 attempt 实际发出的 UA 版本由本请求自己携带（builder 不再读全局），
 		// 否则 C1 的「失败 attempt 与确认 attempt 版本相同」不是不变量。
@@ -3133,6 +3158,27 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		// 免费额度耗尽：标记当前节点 → 强制切下一个节点重试（预算内）
 		if quota, quotaReason := classifyQuota(resp.StatusCode, errBody); quota {
 			callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d quota_signal", resp.StatusCode))
+			// 形态漂移守卫：FreeUsageLimitError 在多个不同出口短窗内同时出现，
+			// 说明是【网关形态被拒】而不是【出口配额耗尽】——继续切节点只会把
+			// 坏形态请求散布到更多 IP（每 IP 挨 N 次就当日封禁，实测 ~16 次量级）。
+			// 确认漂移后本次请求按原错误返回，不再消耗出口。见 shape_drift.go。
+			haltDrift, driftConfirmed := shapeDriftShouldHalt(egResult.EgressKey(), quotaReason, time.Now())
+			if driftConfirmed {
+				callLogEvent(ctx, "shape_drift", nodeFp, "quota_switches_halted:"+quotaReason)
+				log.Warn("shape_drift_detected",
+					"try_model", modelID, "surface", surface,
+					"reason", quotaReason, "status", resp.StatusCode,
+					"detail", "FreeUsageLimitError across distinct egress in window; gateway shape may be rejected upstream — quota switching halted",
+				)
+			}
+			if haltDrift {
+				// 不切节点、不 mark：漂移期 mark 会把健康出口误标 exhausted。
+				lastBody = errBody
+				lastStatus = resp.StatusCode
+				lastHeader = resp.Header
+				lastErr = fmt.Errorf("upstream error")
+				break
+			}
 			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
 				callLogEvent(ctx, "switch", nodeFp, "quota:"+quotaReason)
 				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
@@ -3299,6 +3345,10 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			break
 		}
 		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion})
+		// 免费层（zen）请求经 BunTransport 发出（同非流式，见上方注释）。
+		if !useGoEndpoint {
+			egResult = bunEgressResult(egResult)
+		}
 		client, nodeFp := egResult.Client, egResult.NodeFP
 		// I2：同非流式——版本由本请求携带，见上方注释。
 		attemptVer := ocClientVersion()
@@ -3519,6 +3569,23 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		// 免费额度耗尽：标记当前节点 → 强制切下一个节点重试（头部阶段可安全重试）
 		if quota, quotaReason := classifyQuota(resp.StatusCode, errBody); quota {
 			callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d quota_signal", resp.StatusCode))
+			// 形态漂移守卫（同非流式，见 shape_drift.go）：多出口同窗 429
+			// 一致出现 → 停配额切换，按原错误返回，不烧更多出口。
+			haltDrift, driftConfirmed := shapeDriftShouldHalt(egResult.EgressKey(), quotaReason, time.Now())
+			if driftConfirmed {
+				callLogEvent(ctx, "shape_drift", nodeFp, "quota_switches_halted:"+quotaReason)
+				log.Warn("shape_drift_detected",
+					"try_model", modelID, "surface", surface,
+					"reason", quotaReason, "status", resp.StatusCode,
+					"detail", "FreeUsageLimitError across distinct egress in window; gateway shape may be rejected upstream — quota switching halted",
+				)
+			}
+			if haltDrift {
+				lastBody = errBody
+				lastStatus = resp.StatusCode
+				lastHeader = resp.Header
+				break
+			}
 			if nodeFp != "" && quotaSwitches < maxQuotaSwitches {
 				callLogEvent(ctx, "switch", nodeFp, "quota:"+quotaReason)
 				proxyPool.mark(nodeFp, NodeExhausted, "quota:"+quotaReason)
@@ -7262,20 +7329,23 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 
 // nodeAdminView API 视图：只读字段 + 当前/手动标记 + 健康探测结果。
 type nodeAdminView struct {
-	Name          string `json:"name"`
-	Protocol      string `json:"protocol"`
-	Address       string `json:"address"`
-	Port          int    `json:"port"`
-	Fingerprint   string `json:"fingerprint"`
-	State         string `json:"state"`
-	MarkedAt      string `json:"marked_at,omitempty"`
-	CooldownUntil string `json:"cooldown_until,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
-	LastUsedAt    string `json:"last_used_at,omitempty"`
-	LatencyMs     int64  `json:"latency_ms,omitempty"`
-	LastProbeAt   string `json:"last_probe_at,omitempty"`
-	Active        bool   `json:"active"`
-	Manual        bool   `json:"manual"`
+	Name          string  `json:"name"`
+	Protocol      string  `json:"protocol"`
+	Address       string  `json:"address"`
+	Port          int     `json:"port"`
+	Fingerprint   string  `json:"fingerprint"`
+	State         string  `json:"state"`
+	MarkedAt      string  `json:"marked_at,omitempty"`
+	CooldownUntil *string `json:"cooldown_until"` // null = 无冷却（裁定 5：零值后端归一化）
+	LastError     *string `json:"last_error"`     // null = 无错误（task-67 契约：string|null）
+	LastUsedAt    string  `json:"last_used_at,omitempty"`
+	LatencyMs     int64   `json:"latency_ms,omitempty"`
+	LastProbeAt   *string `json:"last_probe_at"` // null = 从未探测（裁定 5：零值后端归一化）
+	Active        bool    `json:"active"`
+	Manual        bool    `json:"manual"`
+
+	// task-67：打分字段（字段名是前端契约，见 docs/research/node-scoring-spec.md §5.1）
+	nodeScoreView
 }
 
 func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
@@ -7283,6 +7353,9 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		pick, manual := proxyPool.pickState()
 		nodes := proxyPool.snapshot()
+		// task-67：打分（纯内存 O(节点数)，219 节点 <1ms；不需要缓存层）
+		scoringNow := time.Now()
+		_, scoreByFP := nodeScoringSnapshot(nodes, scoringNow)
 		activeName, manualName := "", ""
 		out := make([]nodeAdminView, 0, len(nodes))
 		health := map[string]int{"available": 0, "exhausted": 0, "dead": 0}
@@ -7296,21 +7369,28 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 			v := nodeAdminView{
 				Name: n.Name, Protocol: n.Protocol, Address: n.Address, Port: n.Port,
 				Fingerprint: n.Fingerprint, State: n.State.String(),
-				LastError: n.LastError, Active: n.Fingerprint == pick,
+				Active: n.Fingerprint == pick,
 				Manual: n.Fingerprint == manual, LatencyMs: n.LatencyMs,
+				nodeScoreView: scoreByFP[n.Fingerprint],
+			}
+			if n.LastError != "" {
+				e := n.LastError
+				v.LastError = &e
 			}
 			health[v.State]++
 			if !n.MarkedAt.IsZero() {
 				v.MarkedAt = n.MarkedAt.Format(time.RFC3339)
 			}
 			if !n.CooldownUntil.IsZero() {
-				v.CooldownUntil = n.CooldownUntil.Format(time.RFC3339)
+				t := n.CooldownUntil.Format(time.RFC3339)
+				v.CooldownUntil = &t
 			}
 			if !n.LastUsedAt.IsZero() {
 				v.LastUsedAt = n.LastUsedAt.Format(time.RFC3339)
 			}
 			if !n.LastProbeAt.IsZero() {
-				v.LastProbeAt = n.LastProbeAt.Format(time.RFC3339)
+				t := n.LastProbeAt.Format(time.RFC3339)
+				v.LastProbeAt = &t
 			}
 			out = append(out, v)
 		}
@@ -7326,6 +7406,12 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 			"nodes":           out,
 			"subscriptions":   subManager.snapshot(),
 			"node_alert":      nodeAlerts.snapshot(),
+			// task-67：打分快照元信息（前端显示「分数更新于 X」）
+			"computed_at": scoringNow.Format(time.RFC3339),
+			"scoring": map[string]any{
+				"version": scoringVersion,
+				"params":  scoringParamsView(defaultScoringParams),
+			},
 		})
 	case http.MethodPost:
 		var payload struct {
@@ -7541,6 +7627,18 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// adminAggregateHandler 是 GET /api/logs/aggregate 的入口（task-67）。
+// 方法/参数校验后交给 aggregateResponseFor（带 TTL 缓存 + singleflight）。
+func adminAggregateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	out := aggregateResponseFor(r.URL.Query().Get("range"))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
 // adminTrendsHandler 用量趋势：按 range=today|7d|30d|180d 返回聚簇时间序列（来自调用日志）。
 // group=model 时额外按模型分组，供前端做模型维度筛选；不带该参数时行为与原先完全一致。
 func adminTrendsHandler(w http.ResponseWriter, r *http.Request) {
@@ -7641,6 +7739,8 @@ func main() {
 		slog.Warn("failed to save config", "path", configPath, "error", err)
 	}
 	initCallLog(configPath)
+	// task-67：节点打分（加载 scoring_state.json + 回填历史调用日志 + 后台轮询）
+	initNodeScoring(configPath)
 	// 调用日志保留策略（gzip 归档 + 按天删除），仅 daily 模式；每小时一次。
 	startCallLogArchiver()
 
@@ -7708,6 +7808,7 @@ func main() {
 	mux.HandleFunc("/api/config", loggingMiddleware(requireAuth(adminConfigHandler)))
 	mux.HandleFunc("/api/nodes", loggingMiddleware(requireAuth(adminNodesHandler)))
 	mux.HandleFunc("/api/stats", loggingMiddleware(requireAuth(adminStatsHandler)))
+	mux.HandleFunc("/api/logs/aggregate", loggingMiddleware(requireAuth(adminAggregateHandler)))
 	mux.HandleFunc("/api/stats/trends", loggingMiddleware(requireAuth(adminTrendsHandler)))
 	mux.HandleFunc("/api/logs", loggingMiddleware(requireAuth(adminLogsHandler)))
 	mux.HandleFunc("/api/logs/stream", loggingMiddleware(requireAuth(adminLogsHandler)))

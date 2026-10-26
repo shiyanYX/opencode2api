@@ -1,0 +1,27 @@
+== 1. 面板文件 ==
+4fe4f101470f9284ea7d1edbbc04d7e5  /home/jingyx/project/opencode2api-test/static/admin.html
+84388d308cd54e05fc8085106128a62b2c61b1566f12ee81b8c82446e47f1d55  /home/jingyx/project/opencode2api-test/static/admin.html
+行数=2496
+INFO: 面板 md5 未变（4fe4f101470f9284ea7d1edbbc04d7e5）—— 仅记录，不作为验收项
+INFO: 面板 sha256 未变（84388d308cd54e05fc8085106128a62b2c61b1566f12ee81b8c82446e47f1d55）—— 仅记录，不作为验收项
+
+== 2. 面板是否依赖新字段语义 ==
+  INFO: 面板命中 /unmapped\|everServed\|servedModel/ = 0（仅记录；面板由并发任务负责，不参与本次验收）
+  面板使用 trends_by_model = 7（期望 >0：过滤后仍应正常渲染）
+
+== 3. 措辞红线（口径更正 ≠ 成功率提升）==
+  原始命中 7 行；排除否定语境后 0 行
+OK: 未发现未经否定的「提升/改善」话术
+
+== 4. 必需的「口径」表述 ==
+  实现者报告存在，出现「口径」19 次
+1:# 概览 vs 详细层：`everServed` 判据 + 展示层 `ok>0` 过滤（task-39 交付报告）
+10:> | `calllog.go` | `6ee8ed5952fef8bdb00d3584fc82ff6f02dd6643853d3aa8b23eec3d2a97c4d6` | everServed 生命周期 + 回填 + 过滤 helper |
+23:   **`mapped = everServed(解析后的名字) || 公式B`**，
+24:   其中 `everServed(name)` = 「历史任何一条 `status=ok` 记录里出现过的模型名」。
+33:   - 未映射（everServed ∪ 公式B 的排除集）：**1,391 条，ok = 0**；
+36:4. **everServed 在今天的快照上改变 0 条记录**：所有 `ok>0` 的名字要么带 `-free`、要么仍在目录里
+38:   测试 b 证明「上游把 `big-pickle` 从目录摘掉」时公式 B 会逐出 11 条成功记录，而 everServed 不会。
+65:everServed(name) := ∃ 记录 r: r.model == name ∧ r.status == "ok"      // 单调：只增不减
+
+✅ 面板/措辞检查通过

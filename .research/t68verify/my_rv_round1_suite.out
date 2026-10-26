@@ -1,0 +1,58 @@
+=== RUN   TestIP4AggFourWindowConsistency
+=== RUN   TestIP4AggFourWindowConsistency/today
+    zz_ip4agg_verify_test.go:231: today: requests=3 ok=1 fail=2 unmapped=2 buckets=24 models=2
+=== RUN   TestIP4AggFourWindowConsistency/7d
+    zz_ip4agg_verify_test.go:231: 7d: requests=4 ok=2 fail=2 unmapped=2 buckets=7 models=3
+=== RUN   TestIP4AggFourWindowConsistency/30d
+    zz_ip4agg_verify_test.go:231: 30d: requests=5 ok=2 fail=3 unmapped=2 buckets=30 models=3
+=== RUN   TestIP4AggFourWindowConsistency/180d
+    zz_ip4agg_verify_test.go:231: 180d: requests=6 ok=3 fail=3 unmapped=2 buckets=180 models=4
+--- PASS: TestIP4AggFourWindowConsistency (0.00s)
+    --- PASS: TestIP4AggFourWindowConsistency/today (0.00s)
+    --- PASS: TestIP4AggFourWindowConsistency/7d (0.00s)
+    --- PASS: TestIP4AggFourWindowConsistency/30d (0.00s)
+    --- PASS: TestIP4AggFourWindowConsistency/180d (0.00s)
+=== RUN   TestIP4AggUnmappedExcludedFromScanDims
+    zz_ip4agg_verify_test.go:268: totals.requests=2 Σattempts=2 Σby_node=2 Σby_error=1 stats.unmapped=2 agg.unmapped=2
+    zz_ip4agg_verify_test.go:270: latency.max_ms=200 by_node=[{Name:node-a Requests:2 OK:1 Fail:1 SuccessRate:0.5 AvgMs:150}] by_error=[{Kind:other Count:1 Sample:status=fail}]
+--- PASS: TestIP4AggUnmappedExcludedFromScanDims (0.00s)
+=== RUN   TestIP4AggPercentilesKnownDistribution
+    zz_ip4agg_verify_test.go:303: p50=5001.00 p95=9501.00 p99=9901.00 max=10000 n=10000
+--- PASS: TestIP4AggPercentilesKnownDistribution (0.05s)
+=== RUN   TestIP4AggPercentilesSingleSampleAndEmpty
+--- PASS: TestIP4AggPercentilesSingleSampleAndEmpty (0.00s)
+=== RUN   TestIP4AggByErrorClassification
+    zz_ip4agg_verify_test.go:409: by_error=[{Kind:all_failed Count:1 Sample:status=fail} {Kind:connect_error Count:1 Sample:status=fail} {Kind:cooldown Count:1 Sample:node cooldown 冷却中} {Kind:other Count:1 Sample:status=fail} {Kind:stream_interrupt Count:1 Sample:status=fail} {Kind:timeout Count:1 Sample:status=fail} {Kind:upstream_4xx Count:1 Sample:http 429 quota} {Kind:upstream_5xx Count:1 Sample:upstream http 502 bad gateway}] totals.fail=8
+--- PASS: TestIP4AggByErrorClassification (0.00s)
+=== RUN   TestIP4AggByNodeLastAttempt
+--- PASS: TestIP4AggByNodeLastAttempt (0.00s)
+=== RUN   TestIP4AggAttemptsBuckets
+    zz_ip4agg_verify_test.go:475: attempts={A0:1 A1:1 A2:2 A3Plus:2}
+--- PASS: TestIP4AggAttemptsBuckets (0.00s)
+=== RUN   TestIP4AggCacheHitRangeIsolationAndTTL
+--- PASS: TestIP4AggCacheHitRangeIsolationAndTTL (0.16s)
+=== RUN   TestIP4AggCacheConcurrentSingleflight
+--- PASS: TestIP4AggCacheConcurrentSingleflight (0.01s)
+=== RUN   TestIP4AggHandlerContract
+--- PASS: TestIP4AggHandlerContract (0.00s)
+=== RUN   TestIP4AggDailyLayoutConsistency
+--- PASS: TestIP4AggDailyLayoutConsistency (0.00s)
+=== RUN   TestIP4AggProdSnapshotReconciliation
+    zz_ip4agg_verify_test.go:682: 桶吸收（233k 行）耗时 562.622157ms
+    zz_ip4agg_verify_test.go:715: today: requests=367 ok=359 fail=8 | stats.total_requests=367 | Σtimeseries=367 Σattempts=367 Σby_node=367 Σby_model=367 Σby_error=8(fail=8) | unmapped agg=0 stats=0 | cold=347.494069ms hot=4.188µs
+    zz_ip4agg_verify_test.go:749: today: 冷路径 347.494069ms 超过契约目标 300ms（契约声称 386~466ms，用于对照）
+    zz_ip4agg_verify_test.go:715: 7d: requests=27044 ok=20000 fail=7044 | stats.total_requests=27044 | Σtimeseries=27044 Σattempts=27044 Σby_node=27044 Σby_model=27044 Σby_error=7044(fail=7044) | unmapped agg=730 stats=730 | cold=416.226017ms hot=3.388µs
+    zz_ip4agg_verify_test.go:749: 7d: 冷路径 416.226017ms 超过契约目标 300ms（契约声称 386~466ms，用于对照）
+    zz_ip4agg_verify_test.go:715: 30d: requests=157769 ok=146649 fail=11120 | stats.total_requests=157769 | Σtimeseries=157769 Σattempts=157769 Σby_node=157769 Σby_model=157769 Σby_error=11120(fail=11120) | unmapped agg=1352 stats=1352 | cold=348.19143ms hot=3.8µs
+    zz_ip4agg_verify_test.go:749: 30d: 冷路径 348.19143ms 超过契约目标 300ms（契约声称 386~466ms，用于对照）
+    zz_ip4agg_verify_test.go:715: 180d: requests=232263 ok=208630 fail=23633 | stats.total_requests=232263 | Σtimeseries=232263 Σattempts=232263 Σby_node=232263 Σby_model=232263 Σby_error=23633(fail=23633) | unmapped agg=1391 stats=1391 | cold=387.304817ms hot=4.015µs
+    zz_ip4agg_verify_test.go:749: 180d: 冷路径 387.304817ms 超过契约目标 300ms（契约声称 386~466ms，用于对照）
+--- PASS: TestIP4AggProdSnapshotReconciliation (2.07s)
+=== RUN   TestIP4AggPerModelP95UnboundedBucket
+    zz_ip4agg_verify_test.go:769: model=m-A-free p95=700000 requests=3
+    zz_ip4agg_verify_test.go:769: model=m-B-free p95=900000 requests=1
+--- PASS: TestIP4AggPerModelP95UnboundedBucket (0.00s)
+=== RUN   TestIP4AggDeterministicOrdering
+--- PASS: TestIP4AggDeterministicOrdering (0.00s)
+PASS
+ok  	github.com/shiyanYX/opencode2api	2.342s

@@ -1,0 +1,14 @@
+=== RUN   TestProdOrderPaginationCursorUnionEqualsFull
+--- PASS: TestProdOrderPaginationCursorUnionEqualsFull (0.11s)
+=== RUN   TestProdOrderPaginationLegacyHeadersUnionEqualsFull
+--- PASS: TestProdOrderPaginationLegacyHeadersUnionEqualsFull (0.03s)
+=== RUN   TestHistoryCursorInvalidAndStale
+--- PASS: TestHistoryCursorInvalidAndStale (0.00s)
+=== RUN   TestProdOrderCursorSameAcrossLayouts
+--- PASS: TestProdOrderCursorSameAcrossLayouts (0.01s)
+=== RUN   TestLegacyHeaderStaleCursorFallsBackToBefore
+--- PASS: TestLegacyHeaderStaleCursorFallsBackToBefore (0.00s)
+=== RUN   TestCursorSurvivesGzipRename
+--- PASS: TestCursorSurvivesGzipRename (0.00s)
+PASS
+ok  	github.com/shiyanYX/opencode2api	0.181s

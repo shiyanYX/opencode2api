@@ -1,0 +1,11 @@
+now=2026-10-21 01:00:00 +0800 CST
+ day1=2026-10-20 00:00:00 +0800 CST -> 2026-10-20.jsonl
+ day2=2026-10-20 23:00:00 +0800 CST -> 2026-10-20.jsonl
+ same-file=true
+
+# 结论：验收方探针 TestZZIP4VD1DayOnlyTrendsEqualToSingle 在本地时间 00:00–01:59 会自失败：
+#   day1 = now-25h 与 day2 = now-2h 落在**同一个本地日期**，夹具的两个日文件同名，
+#   zzWriteJSONL 第二次写覆盖第一次 ⇒ daily 布局 3 条、single 布局 5 条，探针报 trends 不一致。
+# 这不是 task-67 的改动：本任务未触碰 trends/桶吸收/日段发现逻辑；
+#   同一探针在 00:38 的全量运行里 PASS，在 01:10 起失败，时间依赖可复现。
+# 全量套件（skip 该环境性探针）：go test -skip '^TestZZIP4VD1DayOnlyTrendsEqualToSingle$' -count=1 ./ => ok 174.657s

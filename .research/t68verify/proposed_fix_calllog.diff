@@ -1,0 +1,73 @@
+--- snap/calllog.go	2026-10-21 01:05:29.227842557 +0800
++++ fix/calllog.go	2026-10-21 08:48:04.644837139 +0800
+@@ -3707,7 +3707,8 @@
+ 	ttftHist *aggHist
+ 	maxDur   float64
+ 	maxTTFT  float64
+-	perModel map[string]*aggHist
++	perModel    map[string]*aggHist
++	perModelMax map[string]float64
+ 	byNode   map[string]*aggNodeAcc
+ 	byError  map[string]*aggErrorAcc
+ 	attempts aggAttempts
+@@ -3779,7 +3780,8 @@
+ 	return &aggScanResult{
+ 		durHist:  newAggHist(len(aggDurBucketsMS)),
+ 		ttftHist: newAggHist(len(aggTTFTBucketsMS)),
+-		perModel: make(map[string]*aggHist),
++		perModel:    make(map[string]*aggHist),
++		perModelMax: make(map[string]float64),
+ 		byNode:   make(map[string]*aggNodeAcc),
+ 		byError:  make(map[string]*aggErrorAcc),
+ 	}
+@@ -3802,6 +3804,11 @@
+ 		if p.maxTTFT > out.maxTTFT {
+ 			out.maxTTFT = p.maxTTFT
+ 		}
++		for m, v := range p.perModelMax {
++			if v > out.perModelMax[m] {
++				out.perModelMax[m] = v
++			}
++		}
+ 		for m, h := range p.perModel {
+ 			if out.perModel[m] == nil {
+ 				out.perModel[m] = newAggHist(len(aggDurBucketsMS))
+@@ -3859,10 +3866,15 @@
+ 	if !parseAggLine(line, &r) {
+ 		return
+ 	}
+-	if r.Unmapped {
+-		// 未映射请求与 /api/stats 口径一致：不进 totals/by_model，
+-		// 因此也不能进延迟分位/attempts/by_node/by_error（否则对账不成立）。
+-		// 它们单独在 out.Unmapped 里统计。
++	// 未映射判据必须与桶吸收**逐字同源**：显式键优先（请求时刻冻结），
++	// 老行才用「公式 B && !everServed」重算。只按显式键会在老行上把
++	// 未映射请求算进 attempts/by_node/by_error/分位，破坏
++	// 「Σattempts == totals.requests」对账（生产快照 180d 差 1,391 条）。
++	if r.SawUnmapped {
++		if r.Unmapped {
++			return
++		}
++	} else if isUnmappedByFormula(r.Model) && !isServedModel(r.Model) {
+ 		return
+ 	}
+ 	at, err := parseLogFilterTime(r.TS)
+@@ -3880,6 +3892,9 @@
+ 	if dur > res.maxDur {
+ 		res.maxDur = dur
+ 	}
++	if dur > res.perModelMax[r.Model] {
++		res.perModelMax[r.Model] = dur
++	}
+ 	mh := res.perModel[r.Model]
+ 	if mh == nil {
+ 		mh = newAggHist(len(aggDurBucketsMS))
+@@ -4082,7 +4097,7 @@
+ 			row.CompletionTokens = ms.CompletionTokens
+ 			row.TotalTokens = ms.TotalTokens
+ 		}
+-		row.P95Ms = aggHistQuantile(scan.perModel[name], aggDurBucketsMS, 0.95, scan.maxDur)
++		row.P95Ms = aggHistQuantile(scan.perModel[name], aggDurBucketsMS, 0.95, scan.perModelMax[name])
+ 		out.ByModel = append(out.ByModel, row)
+ 	}
+ 

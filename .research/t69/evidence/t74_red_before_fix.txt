@@ -1,0 +1,96 @@
+dev-server 已在 http://127.0.0.1:9310
+PASS  页面标题为「日志」
+PASS  三个 tab 存在
+PASS  分析档默认可见
+PASS  分析档 4 个 Stat
+PASS  构建产物含 CL_ISSUE_TYPES 常量
+PASS  CL_ISSUE_TYPES 与后端 HasIssue 集合逐项一致
+PASS  CL_ISSUE_TYPES 只定义一次
+PASS  Stat 请求数 == fixture
+PASS  Stat 成功率 == fixture
+PASS  Stat 失败数 == fixture
+PASS  Stat 未映射 == fixture
+PASS  趋势图是内联 SVG
+PASS  趋势图柱子数 == timeseries 桶数
+PASS  趋势图零外部资源
+PASS  hover 柱子出现数值 tooltip
+PASS  tooltip 数值与柱子 data-tip 同源
+PASS  延迟卡含 p50 值 1.4 s
+PASS  延迟卡含 p95 值 9.8 s
+PASS  延迟卡含 p99 值 21.0 s
+PASS  延迟卡含 max 值 2.0 min
+PASS  缓存卡显示 20s TTL
+PASS  缓存卡显示 generated_at
+PASS  分布默认按模型
+PASS  模型分布行数 == by_model
+PASS  节点分布行数 == by_node
+PASS  错误分布行数 == by_error
+PASS  模型维度表行数 == by_model
+PASS  模型表含首个模型名
+PASS  节点维度表行数 == by_node
+PASS  错误分类表行数 == by_error
+PASS  异常卡「有问题记录」== 按 HasIssue 判据复算
+PASS  异常卡「异常事件数」== 按 CL_ISSUE_TYPES 复算
+PASS  异常卡按小时表行数 == 样本小时数
+PASS  异常卡注明与后端同判据
+PASS  range=7d Stat 请求数
+PASS  range=7d Stat 成功率
+PASS  range=7d Stat 失败数
+PASS  range=7d Stat 未映射
+PASS  range=7d 趋势桶数
+PASS  range=30d Stat 请求数
+PASS  range=30d Stat 成功率
+PASS  range=30d Stat 失败数
+PASS  range=30d Stat 未映射
+PASS  range=30d 趋势桶数
+PASS  range=180d Stat 请求数
+PASS  range=180d Stat 成功率
+PASS  range=180d Stat 失败数
+PASS  range=180d Stat 未映射
+PASS  range=180d 趋势桶数
+PASS  明细首屏 200 行（limit=200）
+PASS  明细首屏 req_id 无重复
+PASS  明细计数文案显示已加载 200
+PASS  首屏明细请求存在
+FAIL  首屏明细请求带过滤参数（触发文件分页）  ['http://127.0.0.1:9310/api/call-log?limit=200']
+FAIL  首屏明细请求 status 值合法  ['http://127.0.0.1:9310/api/call-log?limit=200']
+FAIL  首屏响应来自文件分页（非内存环）  ['memory', 'memory']
+FAIL  首屏 next_cursor 非空 → 加载更多可用  已全部加载
+Traceback (most recent call last):
+  File "/home/jingyx/project/opencode2api-test/web/verify/logs.py", line 578, in <module>
+    main()
+  File "/home/jingyx/project/opencode2api-test/web/verify/logs.py", line 333, in main
+    page.click("#lgDtMore")
+  File "/home/jingyx/.local/lib/python3.12/site-packages/playwright/sync_api/_generated.py", line 10941, in click
+    self._sync(
+  File "/home/jingyx/.local/lib/python3.12/site-packages/playwright/_impl/_sync_base.py", line 115, in _sync
+    return task.result()
+           ^^^^^^^^^^^^^
+  File "/home/jingyx/.local/lib/python3.12/site-packages/playwright/_impl/_page.py", line 886, in click
+    return await self._main_frame._click(**locals_to_params(locals()))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jingyx/.local/lib/python3.12/site-packages/playwright/_impl/_frame.py", line 591, in _click
+    await self._channel.send("click", self._timeout, locals_to_params(locals()))
+  File "/home/jingyx/.local/lib/python3.12/site-packages/playwright/_impl/_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/jingyx/.local/lib/python3.12/site-packages/playwright/_impl/_connection.py", line 563, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TimeoutError: Page.click: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator("#lgDtMore")
+    - locator resolved to <button disabled class="btn" type="button" id="lgDtMore">已全部加载</button>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not enabled
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not enabled
+    - retrying click action
+      - waiting 100ms
+    29 × waiting for element to be visible, enabled and stable
+       - element is not enabled
+     - retrying click action
+       - waiting 500ms
+

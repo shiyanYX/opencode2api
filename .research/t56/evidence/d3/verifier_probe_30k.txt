@@ -1,0 +1,3 @@
+    zz_ip4v_rev2_test.go:607: 生产尾部切片 30000 行（limit=200）：分页 150 页，漏 0 行（例 []），重复 0 行，唯一 req_id 30000
+    zz_ip4v_rev2_test.go:656: 单调控制组：同一批行按 ts 升序写盘后分页 0 漏 0 重
+--- PASS: TestZZIP4VDefectProdSlicePagination (4.70s)
