@@ -1,0 +1,18 @@
+## ZZ_MODE=dump 三布局对拍（prod/syn × L1/L2/L3），新实现 vs HEAD 旧实现
+
+== prod ==
+f93ef566773ed05dbcf955018d52ffa6  /tmp/t56/zz2/prod_L1_new.txt
+f93ef566773ed05dbcf955018d52ffa6  /tmp/t56/zz2/prod_L2_new.txt
+f93ef566773ed05dbcf955018d52ffa6  /tmp/t56/zz2/prod_L3_new.txt
+== syn ==
+d9a4336c633af679090e745611e61103  /tmp/t56/zz2/syn_L1_new.txt
+d9a4336c633af679090e745611e61103  /tmp/t56/zz2/syn_L2_new.txt
+d9a4336c633af679090e745611e61103  /tmp/t56/zz2/syn_L3_new.txt
+== prod cmp ==
+L1==L2
+L1==L3
+新==旧(HEAD)
+== syn cmp ==
+L1==L2
+L1==L3
+新==旧(HEAD)

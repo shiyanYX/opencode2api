@@ -1,0 +1,15 @@
+{
+ "clean_records": 201567,
+ "issue_records": 31877,
+ "clean_events_bytes": 25721562,
+ "issue_events_bytes": 19966913,
+ "ev_nodename_bytes": 8931040,
+ "ev_nodename_total": 233750,
+ "ev_nodename_in_top": 233750,
+ "ev_node_bytes": 7874752,
+ "ev_node_total": 246086,
+ "ev_node_in_top": 246086,
+ "top_node_names_bytes": 9264992,
+ "ev_at_bytes": 7949001,
+ "ev_detail_bytes": 6694861
+}

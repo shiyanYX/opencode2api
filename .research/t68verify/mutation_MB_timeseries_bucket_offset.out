@@ -1,0 +1,81 @@
+--- FAIL: TestIP4AggFourWindowConsistency (0.00s)
+    --- FAIL: TestIP4AggFourWindowConsistency/today (0.00s)
+        zz_ip4agg_verify_test.go:182: bucket[19]: agg={TS:2026-10-21T04:00 OK:0 Fail:0 Requests:0} trends={TS:2026-10-21T04:00 Requests:1 OK:0 Fail:1 PromptTokens:100 CompletionTokens:20 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[21]: agg={TS:2026-10-21T06:00 OK:0 Fail:1 Requests:1} trends={TS:2026-10-21T06:00 Requests:1 OK:1 Fail:0 PromptTokens:100 CompletionTokens:20 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[22]: agg={TS:2026-10-21T07:00 OK:1 Fail:0 Requests:1} trends={TS:2026-10-21T07:00 Requests:0 OK:0 Fail:0 PromptTokens:0 CompletionTokens:0 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:231: today: requests=3 ok=1 fail=2 unmapped=2 buckets=24 models=2
+    --- FAIL: TestIP4AggFourWindowConsistency/7d (0.00s)
+        zz_ip4agg_verify_test.go:160: totals.requests(1) != stats.total_requests(4)
+        zz_ip4agg_verify_test.go:170: totals ok/fail(1/0) != Σtrends(2/2)
+        zz_ip4agg_verify_test.go:182: bucket[5]: agg={TS:2026-10-20 OK:0 Fail:0 Requests:0} trends={TS:2026-10-20 Requests:1 OK:1 Fail:0 PromptTokens:100 CompletionTokens:20 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[6]: agg={TS:2026-10-21 OK:1 Fail:0 Requests:1} trends={TS:2026-10-21 Requests:3 OK:1 Fail:2 PromptTokens:300 CompletionTokens:60 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:193: Σby_model(4/2/2) != totals(1/1/0)
+        zz_ip4agg_verify_test.go:231: 7d: requests=1 ok=1 fail=0 unmapped=2 buckets=7 models=3
+    --- FAIL: TestIP4AggFourWindowConsistency/30d (0.00s)
+        zz_ip4agg_verify_test.go:160: totals.requests(2) != stats.total_requests(5)
+        zz_ip4agg_verify_test.go:170: totals ok/fail(1/1) != Σtrends(2/3)
+        zz_ip4agg_verify_test.go:182: bucket[19]: agg={TS:2026-10-11 OK:0 Fail:0 Requests:0} trends={TS:2026-10-11 Requests:1 OK:0 Fail:1 PromptTokens:100 CompletionTokens:20 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[20]: agg={TS:2026-10-12 OK:0 Fail:1 Requests:1} trends={TS:2026-10-12 Requests:0 OK:0 Fail:0 PromptTokens:0 CompletionTokens:0 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[28]: agg={TS:2026-10-20 OK:0 Fail:0 Requests:0} trends={TS:2026-10-20 Requests:1 OK:1 Fail:0 PromptTokens:100 CompletionTokens:20 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[29]: agg={TS:2026-10-21 OK:1 Fail:0 Requests:1} trends={TS:2026-10-21 Requests:3 OK:1 Fail:2 PromptTokens:300 CompletionTokens:60 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:193: Σby_model(5/2/3) != totals(2/1/1)
+        zz_ip4agg_verify_test.go:231: 30d: requests=2 ok=1 fail=1 unmapped=2 buckets=30 models=3
+    --- FAIL: TestIP4AggFourWindowConsistency/180d (0.00s)
+        zz_ip4agg_verify_test.go:160: totals.requests(3) != stats.total_requests(6)
+        zz_ip4agg_verify_test.go:170: totals ok/fail(2/1) != Σtrends(3/3)
+        zz_ip4agg_verify_test.go:182: bucket[79]: agg={TS:2026-07-13 OK:0 Fail:0 Requests:0} trends={TS:2026-07-13 Requests:1 OK:1 Fail:0 PromptTokens:100 CompletionTokens:20 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[80]: agg={TS:2026-07-14 OK:1 Fail:0 Requests:1} trends={TS:2026-07-14 Requests:0 OK:0 Fail:0 PromptTokens:0 CompletionTokens:0 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[169]: agg={TS:2026-10-11 OK:0 Fail:0 Requests:0} trends={TS:2026-10-11 Requests:1 OK:0 Fail:1 PromptTokens:100 CompletionTokens:20 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[170]: agg={TS:2026-10-12 OK:0 Fail:1 Requests:1} trends={TS:2026-10-12 Requests:0 OK:0 Fail:0 PromptTokens:0 CompletionTokens:0 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[178]: agg={TS:2026-10-20 OK:0 Fail:0 Requests:0} trends={TS:2026-10-20 Requests:1 OK:1 Fail:0 PromptTokens:100 CompletionTokens:20 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:182: bucket[179]: agg={TS:2026-10-21 OK:1 Fail:0 Requests:1} trends={TS:2026-10-21 Requests:3 OK:1 Fail:2 PromptTokens:300 CompletionTokens:60 CacheCreation:0 CacheRead:0}
+        zz_ip4agg_verify_test.go:193: Σby_model(6/3/3) != totals(3/2/1)
+        zz_ip4agg_verify_test.go:231: 180d: requests=3 ok=2 fail=1 unmapped=2 buckets=180 models=4
+--- FAIL: TestIP4AggUnmappedExcludedFromScanDims (0.00s)
+    zz_ip4agg_verify_test.go:268: totals.requests=2 Σattempts=3 Σby_node=3 Σby_error=2 stats.unmapped=2 agg.unmapped=2
+    zz_ip4agg_verify_test.go:270: latency.max_ms=99999999 by_node=[{Name:node-a Requests:2 OK:1 Fail:1 SuccessRate:0.5 AvgMs:150} {Name:node-y Requests:1 OK:0 Fail:1 SuccessRate:0 AvgMs:9.9999999e+07}] by_error=[{Kind:other Count:2 Sample:status=fail}]
+    zz_ip4agg_verify_test.go:276: Σattempts(3) != totals.requests(2) —— 未映射请求混进了 attempts
+    zz_ip4agg_verify_test.go:279: Σby_node.requests(3) != totals.requests(2)
+    zz_ip4agg_verify_test.go:282: Σby_error.count(2) != totals.fail(1)
+    zz_ip4agg_verify_test.go:286: latency.max_ms=99999999 把未映射记录的耗时算进了分位
+--- FAIL: TestIP4AggAttemptsBuckets (0.00s)
+    zz_ip4agg_verify_test.go:470: attempts={A0:1 A1:1 A2:2 A3Plus:2}
+    zz_ip4agg_verify_test.go:475: Σattempts=6 != totals=0
+--- FAIL: TestIP4AggCacheHitRangeIsolationAndTTL (0.16s)
+    zz_ip4agg_verify_test.go:531: TTL 过期后应重算看到 2 条，实际 1 条
+--- FAIL: TestIP4AggDailyLayoutConsistency (0.00s)
+    zz_ip4agg_verify_test.go:639: daily: totals(1) != stats(6)
+    zz_ip4agg_verify_test.go:651: daily bucket[5]: agg={TS:2026-10-20 OK:0 Fail:0 Requests:0} trends={TS:2026-10-20 Requests:1 OK:1 Fail:0 PromptTokens:100 CompletionTokens:20 CacheCreation:0 CacheRead:0}
+    zz_ip4agg_verify_test.go:651: daily bucket[6]: agg={TS:2026-10-21 OK:1 Fail:0 Requests:1} trends={TS:2026-10-21 Requests:5 OK:5 Fail:0 PromptTokens:500 CompletionTokens:100 CacheCreation:0 CacheRead:0}
+--- FAIL: TestIP4AggProdSnapshotReconciliation (3.39s)
+    zz_ip4agg_verify_test.go:677: 桶吸收（233k 行）耗时 867.059625ms
+    zz_ip4agg_verify_test.go:710: today: requests=548 ok=534 fail=14 | stats.total_requests=548 | Σtimeseries=548 Σattempts=548 Σby_node=548 Σby_model=548 Σby_error=14(fail=14) | unmapped agg=0 stats=0 | cold=611.95607ms hot=4.433µs
+    zz_ip4agg_verify_test.go:723: today: bucket[0] agg={TS:2026-10-20T09:00 OK:0 Fail:0 Requests:0} trends={TS:2026-10-20T09:00 Requests:181 OK:175 Fail:6 PromptTokens:10202409 CompletionTokens:225041 CacheCreation:0 CacheRead:8871232}
+    zz_ip4agg_verify_test.go:744: today: 冷路径 611.95607ms 超过契约目标 300ms（契约声称 386~466ms，用于对照）
+    zz_ip4agg_verify_test.go:710: 7d: requests=27044 ok=20000 fail=7044 | stats.total_requests=27044 | Σtimeseries=27044 Σattempts=27774 Σby_node=27774 Σby_model=27044 Σby_error=7774(fail=7044) | unmapped agg=730 stats=730 | cold=612.47587ms hot=6.338µs
+    zz_ip4agg_verify_test.go:723: 7d: bucket[0] agg={TS:2026-10-15 OK:0 Fail:0 Requests:0} trends={TS:2026-10-15 Requests:4400 OK:4022 Fail:378 PromptTokens:72705161 CompletionTokens:2748142 CacheCreation:0 CacheRead:60546089}
+    zz_ip4agg_verify_test.go:729: 7d: Σattempts(27774) != totals.requests(27044)：未映射/扫描口径不一致
+    zz_ip4agg_verify_test.go:732: 7d: Σby_node(27774) != totals.requests(27044)
+    zz_ip4agg_verify_test.go:735: 7d: Σby_error(7774) != totals.fail(7044)
+    zz_ip4agg_verify_test.go:744: 7d: 冷路径 612.47587ms 超过契约目标 300ms（契约声称 386~466ms，用于对照）
+    zz_ip4agg_verify_test.go:710: 30d: requests=157769 ok=146649 fail=11120 | stats.total_requests=157769 | Σtimeseries=157769 Σattempts=159121 Σby_node=159121 Σby_model=157769 Σby_error=12472(fail=11120) | unmapped agg=1352 stats=1352 | cold=584.137275ms hot=4.1µs
+    zz_ip4agg_verify_test.go:723: 30d: bucket[0] agg={TS:2026-09-22 OK:0 Fail:0 Requests:0} trends={TS:2026-09-22 Requests:13065 OK:12541 Fail:524 PromptTokens:354979460 CompletionTokens:7396255 CacheCreation:0 CacheRead:277562496}
+    zz_ip4agg_verify_test.go:729: 30d: Σattempts(159121) != totals.requests(157769)：未映射/扫描口径不一致
+    zz_ip4agg_verify_test.go:732: 30d: Σby_node(159121) != totals.requests(157769)
+    zz_ip4agg_verify_test.go:735: 30d: Σby_error(12472) != totals.fail(11120)
+    zz_ip4agg_verify_test.go:744: 30d: 冷路径 584.137275ms 超过契约目标 300ms（契约声称 386~466ms，用于对照）
+    zz_ip4agg_verify_test.go:710: 180d: requests=232263 ok=208630 fail=23633 | stats.total_requests=232263 | Σtimeseries=232263 Σattempts=233654 Σby_node=233654 Σby_model=232263 Σby_error=25024(fail=23633) | unmapped agg=1391 stats=1391 | cold=699.160084ms hot=4.641µs
+    zz_ip4agg_verify_test.go:723: 180d: bucket[111] agg={TS:2026-08-14 OK:0 Fail:0 Requests:0} trends={TS:2026-08-14 Requests:491 OK:468 Fail:23 PromptTokens:11169158 CompletionTokens:606501 CacheCreation:0 CacheRead:7504832}
+    zz_ip4agg_verify_test.go:729: 180d: Σattempts(233654) != totals.requests(232263)：未映射/扫描口径不一致
+    zz_ip4agg_verify_test.go:732: 180d: Σby_node(233654) != totals.requests(232263)
+    zz_ip4agg_verify_test.go:735: 180d: Σby_error(25024) != totals.fail(23633)
+    zz_ip4agg_verify_test.go:744: 180d: 冷路径 699.160084ms 超过契约目标 300ms（契约声称 386~466ms，用于对照）
+--- FAIL: TestIP4AggPerModelP95UnboundedBucket (0.00s)
+    zz_ip4agg_verify_test.go:764: model=m-A-free p95=900000 requests=3
+    zz_ip4agg_verify_test.go:766: m-A-free 的 p95=900000 借用了别的模型的 max：A 的样本全是 700000ms
+    zz_ip4agg_verify_test.go:764: model=m-B-free p95=900000 requests=1
+FAIL
+FAIL	github.com/shiyanYX/opencode2api	3.747s
+FAIL
+
+---STDERR---

@@ -1,0 +1,21 @@
+## D3 修前红（先写测试、后落实现；以下是实现前本轮真实运行的输出）
+## 命令：go test -run 'TestProdOrder|TestHistoryCursorInvalidAndStale' -count=1 -v ./
+
+=== RUN   TestProdOrderPaginationCursorUnionEqualsFull
+    calllog_prodorder_test.go:211: Has-More=true 但缺 X-Call-Log-Next-Cursor（位置游标未实现）
+--- FAIL: TestProdOrderPaginationCursorUnionEqualsFull (0.00s)
+=== RUN   TestProdOrderPaginationLegacyHeadersUnionEqualsFull
+    calllog_prodorder_test.go:228: 旧 Next-Before 头 limit=3: 并集 65 条，期望 400 条（漏/重见下）
+--- FAIL: TestProdOrderPaginationLegacyHeadersUnionEqualsFull (0.01s)
+=== RUN   TestHistoryCursorInvalidAndStale
+    calllog_prodorder_test.go:248: ?cursor=not-base64 期望 400，实际 200（body="[]\n"）
+--- FAIL: TestHistoryCursorInvalidAndStale (0.00s)
+=== RUN   TestProdOrderCursorSameAcrossLayouts
+    calllog_prodorder_test.go:278: Has-More=true 但缺 X-Call-Log-Next-Cursor（位置游标未实现）
+--- FAIL: TestProdOrderCursorSameAcrossLayouts (0.00s)
+
+## 说明
+- 这四条跑在「测试已写、handler/historyQuery 尚未接入位置游标」的中间态，失败原因正是 D3：
+  旧 ts 游标在「按完成序追加、ts 是开始时刻」的生产序夹具上漏/重（limit=3 时 400 条只翻回 65 条）。
+- 独立旁证（验收方探针，修前数字见 log-retention-verification.md §13.7.3）：
+  1 万行 limit=500 = 漏 7 / 重 39；3 万行 limit=200 = 漏 117 / 重 250；全量 468 页 = 漏 1124 / 重 1317。

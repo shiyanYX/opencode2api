@@ -1,0 +1,29 @@
+{
+ "tag": "new",
+ "problems": [],
+ "notes": [
+  "stats_today: 字节不同但数值等价（浮点最大相对误差 2.32e-16，整数与计数完全一致）",
+  "stats_7d: 字节不同但数值等价（浮点最大相对误差 2.88e-16，整数与计数完全一致）",
+  "stats_30d: 字节不同但数值等价（浮点最大相对误差 2.88e-16，整数与计数完全一致）",
+  "stats_180d: 字节不同但数值等价（浮点最大相对误差 2.88e-16，整数与计数完全一致）",
+  "calllog_2000: 已排除行序比较（该端点=最近2000条tail窗口+到达顺序，乱序输入下本应不同；条数/结构均正常）"
+ ],
+ "byte_equal": {
+  "stats_norange": true,
+  "stats_today": false,
+  "stats_7d": false,
+  "stats_30d": false,
+  "stats_180d": false,
+  "trends_180d_model": true,
+  "calllog_2000": false
+ },
+ "sizes": {
+  "stats_norange": 32,
+  "stats_today": 36083,
+  "stats_7d": 13798,
+  "stats_30d": 54869,
+  "stats_180d": 486920,
+  "trends_180d_model": 483030,
+  "calllog_2000": 1009340
+ }
+}

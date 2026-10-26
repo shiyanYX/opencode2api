@@ -1,0 +1,30 @@
+=== RUN   TestIP4RVOldFormatUnmappedThreeCombos
+    zz_ip4agg_reverify_test.go:123: totals.requests=4 ok=2 fail=2 | Σattempts=3 Σby_node=3 Σby_error=2 | unmapped agg=1 stats=1 | latency.max=400 | by_model=[{Model:m-plain-free Requests:1 OK:0 Fail:1 SuccessRate:0 P95Ms:50 PromptTokens:100 CompletionTokens:0 TotalTokens:100} {Model:wild-okflag-x Requests:1 OK:1 Fail:0 SuccessRate:1 P95Ms:0 PromptTokens:100 CompletionTokens:0 TotalTokens:100} {Model:wild-served-x Requests:2 OK:1 Fail:1 SuccessRate:0.5 P95Ms:400 PromptTokens:200 CompletionTokens:0 TotalTokens:200}]
+    zz_ip4agg_reverify_test.go:138: Σattempts(3) != totals.requests(4)
+    zz_ip4agg_reverify_test.go:141: Σby_node(3) != totals.requests(4)
+--- FAIL: TestIP4RVOldFormatUnmappedThreeCombos (0.00s)
+=== RUN   TestIP4RVProdReconciliationAfterFix
+    zz_ip4agg_reverify_test.go:191: today: totals=367 ok=359 fail=8 | stats.total=367 | Σattempts=367 Σby_node=367 Σby_model=367 Σby_error=8 | unmapped agg/stats=0/0 | latency.max=119974 p95=59294
+    zz_ip4agg_reverify_test.go:191: 7d: totals=27044 ok=20000 fail=7044 | stats.total=27044 | Σattempts=27044 Σby_node=27044 Σby_model=27044 Σby_error=7044 | unmapped agg/stats=730/730 | latency.max=1119192 p95=58407
+    zz_ip4agg_reverify_test.go:191: 30d: totals=157769 ok=146649 fail=11120 | stats.total=157769 | Σattempts=157769 Σby_node=157769 Σby_model=157769 Σby_error=11120 | unmapped agg/stats=1352/1352 | latency.max=2832125 p95=110057
+    zz_ip4agg_reverify_test.go:191: 180d: totals=232263 ok=208630 fail=23633 | stats.total=232263 | Σattempts=232263 Σby_node=232263 Σby_model=232263 Σby_error=23633 | unmapped agg/stats=1391/1391 | latency.max=2832125 p95=118547
+--- PASS: TestIP4RVProdReconciliationAfterFix (2.25s)
+=== RUN   TestIP4RVLiveServedDrift
+    zz_ip4agg_reverify_test.go:227: 吸收后-未成功前: totals=0 unmapped=1 Σattempts=0
+    zz_ip4agg_reverify_test.go:244: 首次成功之后: totals=1 unmapped=1 | Σattempts=2 Σby_node=2 | stats.total=1 stats.unmapped=1
+    zz_ip4agg_reverify_test.go:251: 【残留风险 R-A 复现】everServed 事后增长：Σattempts(2) != totals(1)（扫描把老失败行重判成 mapped，桶仍算未映射）
+    zz_ip4agg_reverify_test.go:254: 【残留风险 R-A 复现】Σby_node(2) != totals(1)
+--- FAIL: TestIP4RVLiveServedDrift (0.00s)
+=== RUN   TestIP4RVDocsDrift
+    zz_ip4agg_reverify_test.go:282: 文档表未收录时: totals=0 unmapped=1 Σattempts=0
+    zz_ip4agg_reverify_test.go:294: 文档表收录之后: totals=0 unmapped=1 Σattempts=1
+    zz_ip4agg_reverify_test.go:296: 【残留风险 R-B 复现】文档表事后变化：Σattempts(1) != totals(0)（桶保留吸收时判定，扫描用当前公式 B 重判）
+--- FAIL: TestIP4RVDocsDrift (0.00s)
+=== RUN   TestIP4RVMemoAndPerf
+    zz_ip4agg_reverify_test.go:304: 性能探针：设 IP4RV_PERF=1 运行（-race 下耗时被放大，阈值不适用）
+--- SKIP: TestIP4RVMemoAndPerf (0.00s)
+=== RUN   TestIP4RVHttpHandlerStillOK
+--- PASS: TestIP4RVHttpHandlerStillOK (0.00s)
+FAIL
+FAIL	github.com/shiyanYX/opencode2api	2.297s
+FAIL

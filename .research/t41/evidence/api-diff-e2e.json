@@ -1,0 +1,455 @@
+{
+ "mode": "e2e",
+ "old": "old",
+ "new": "new",
+ "hour": "2026102010",
+ "problems": [],
+ "notes": [
+  "trends_7d_model: 双向模型集一致（9 个：保留都在、无多余）",
+  "trends_7d_model: 模型序列 15→9，删 6 个=['beam-free', 'jev-1.13-free', 'nemotron-3.5-super-vl-free', 'probe-143148', 'probeL-143230', 'space-bunny']",
+  "trends_180d_model: 双向模型集一致（16 个：保留都在、无多余）",
+  "trends_180d_model: 模型序列 30→16，删 14 个=['beam-free', 'claude-opus-4-5', 'gpt-4o-mini', 'hy3', 'jev-1.13-free', 'mimo-v2.5', 'muse-spark-1.2-contributor-free', 'muse-spark-1.3-contributor-free', 'nemotron-3.5-super-vl-free', 'ox-alpha-free', 'probe-143148', 'probeL-143230', 'space-bunny', 'x-preview-f']",
+  "trends_7d: e2e 聚合趋势请求数 28469→27739（差 730）",
+  "trends_180d: e2e 聚合趋势请求数 233045→231654（差 1391）",
+  "calllog_50: 详细层仅多出 unmapped 键（task-21 已批），其余字段一致",
+  "Q1 一致性（7d）：/api/stats models=9 个；/api/stats/trends?group=model 仍含 9 个，差集=[]"
+ ],
+ "ranges": {
+  "stats_today": {
+   "removed": [
+    "beam-free",
+    "jev-1.13-free",
+    "space-bunny"
+   ],
+   "removed_detail": [
+    {
+     "model": "beam-free",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 24
+    },
+    {
+     "model": "jev-1.13-free",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 24
+    },
+    {
+     "model": "space-bunny",
+     "requests": 728,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 24
+    }
+   ],
+   "kept_n": 8,
+   "old_total": 2787,
+   "new_total": 2059,
+   "removed_requests": 730,
+   "dropped_from_total": 728,
+   "f1_kept_requests": 2
+  },
+  "stats_7d": {
+   "removed": [
+    "beam-free",
+    "jev-1.13-free",
+    "nemotron-3.5-super-vl-free",
+    "probe-143148",
+    "probeL-143230",
+    "space-bunny"
+   ],
+   "removed_detail": [
+    {
+     "model": "beam-free",
+     "requests": 2,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 7
+    },
+    {
+     "model": "jev-1.13-free",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 7
+    },
+    {
+     "model": "nemotron-3.5-super-vl-free",
+     "requests": 6,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 7
+    },
+    {
+     "model": "probe-143148",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 7
+    },
+    {
+     "model": "probeL-143230",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 7
+    },
+    {
+     "model": "space-bunny",
+     "requests": 728,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 7
+    }
+   ],
+   "kept_n": 9,
+   "old_total": 28469,
+   "new_total": 27739,
+   "removed_requests": 739,
+   "dropped_from_total": 730,
+   "f1_kept_requests": 9
+  },
+  "stats_30d": {
+   "removed": [
+    "beam-free",
+    "deepseek-v4-flash-free",
+    "jev-1.13-free",
+    "mimo-v2.5",
+    "nemotron-3.5-super-vl-free",
+    "probe-143148",
+    "probeL-143230",
+    "space-bunny"
+   ],
+   "removed_detail": [
+    {
+     "model": "beam-free",
+     "requests": 2,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 30
+    },
+    {
+     "model": "deepseek-v4-flash-free",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 30
+    },
+    {
+     "model": "jev-1.13-free",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 30
+    },
+    {
+     "model": "mimo-v2.5",
+     "requests": 622,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 30
+    },
+    {
+     "model": "nemotron-3.5-super-vl-free",
+     "requests": 6,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 30
+    },
+    {
+     "model": "probe-143148",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 30
+    },
+    {
+     "model": "probeL-143230",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 30
+    },
+    {
+     "model": "space-bunny",
+     "requests": 728,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 30
+    }
+   ],
+   "kept_n": 10,
+   "old_total": 175198,
+   "new_total": 173846,
+   "removed_requests": 1362,
+   "dropped_from_total": 1352,
+   "f1_kept_requests": 10
+  },
+  "stats_180d": {
+   "removed": [
+    "beam-free",
+    "claude-opus-4-5",
+    "gpt-4o-mini",
+    "hy3",
+    "jev-1.13-free",
+    "mimo-v2.5",
+    "muse-spark-1.2-contributor-free",
+    "muse-spark-1.3-contributor-free",
+    "nemotron-3.5-super-vl-free",
+    "ox-alpha-free",
+    "probe-143148",
+    "probeL-143230",
+    "space-bunny",
+    "x-preview-f"
+   ],
+   "removed_detail": [
+    {
+     "model": "beam-free",
+     "requests": 2,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "claude-opus-4-5",
+     "requests": 4,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "gpt-4o-mini",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "hy3",
+     "requests": 2,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "jev-1.13-free",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "mimo-v2.5",
+     "requests": 624,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "muse-spark-1.2-contributor-free",
+     "requests": 2,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "muse-spark-1.3-contributor-free",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "nemotron-3.5-super-vl-free",
+     "requests": 6,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "ox-alpha-free",
+     "requests": 3,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "probe-143148",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "probeL-143230",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "space-bunny",
+     "requests": 728,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    },
+    {
+     "model": "x-preview-f",
+     "requests": 30,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 180
+    }
+   ],
+   "kept_n": 16,
+   "old_total": 233045,
+   "new_total": 231654,
+   "removed_requests": 1406,
+   "dropped_from_total": 1391,
+   "f1_kept_requests": 15
+  },
+  "stats_bad_range": {
+   "removed": [
+    "beam-free",
+    "jev-1.13-free",
+    "space-bunny"
+   ],
+   "removed_detail": [
+    {
+     "model": "beam-free",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 24
+    },
+    {
+     "model": "jev-1.13-free",
+     "requests": 1,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 24
+    },
+    {
+     "model": "space-bunny",
+     "requests": 728,
+     "ok": 0,
+     "prompt": 0,
+     "completion": 0,
+     "token_sum": 0,
+     "stream_req": 0,
+     "trend_points": 24
+    }
+   ],
+   "kept_n": 8,
+   "old_total": 2787,
+   "new_total": 2059,
+   "removed_requests": 730,
+   "dropped_from_total": 728,
+   "f1_kept_requests": 2
+  }
+ },
+ "norange_sha_old": "78234cdfbee973c8d1d0062885528cc5bedfe13283e7d40ab3c222e05d3b6f1d",
+ "norange_sha_new": "78234cdfbee973c8d1d0062885528cc5bedfe13283e7d40ab3c222e05d3b6f1d"
+}

@@ -1,0 +1,8 @@
+# 性能：生产快照 /tmp/ip4v/fixtures/prod_call_log.jsonl（233,654 行 / 124.6 MB）
+# 并行按行切块扫描（4 核机器，workers=min(GOMAXPROCS,8)=4）；冷=清缓存后首次；热=TTL 内
+PERF today  requests=893     cold=466.205012ms warm=3.927µs  p95(20次)=678ns
+PERF 7d     requests=27774   cold=385.66751ms  warm=4.131µs  p95(20次)=1.118µs
+PERF 30d    requests=159121  cold=453.854794ms warm=5.049µs  p95(20次)=788ns
+PERF 180d   requests=233654  cold=462.787642ms warm=3.732µs  p95(20次)=737ns
+# 目标：热路径 <300ms ⇒ 实测微秒级；p95(1 冷+19 热)=微秒级。
+# 冷路径优化史：单线程 803ms → 按行并行 463ms（4 核）。

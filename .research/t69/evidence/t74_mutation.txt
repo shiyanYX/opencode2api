@@ -1,0 +1,8 @@
+mutation: 去掉 status 参数（回到内存环分支）
+verify exit=1  FAIL行数=4
+  FAIL  首屏明细请求带过滤参数（触发文件分页）  ['http://127.0.0.1:9310/api/call-log?limit=200']
+  FAIL  首屏明细请求 status 值合法  ['http://127.0.0.1:9310/api/call-log?limit=200']
+  FAIL  首屏明细响应来自文件分页（非内存环）  ['memory']
+  FAIL  首屏 next_cursor 非空 → 加载更多可用  已全部加载
+CAUGHT
+exit=0

@@ -1,0 +1,11 @@
+$ python3 web/build.py --check
+OK: static/admin.html 与源一致（157200 字节）
+
+$ go test -run "TestEventsRetainedOnDiskExactlyWhenHasIssue|TestRestartRecoveryPreservesUserVisibleFields" -count=1 ./
+ok  	github.com/shiyanYX/opencode2api	0.026s
+
+$ python3 .research/t69/t74_real_e2e.py http://127.0.0.1:9423 t74pass
+PASS  无 console.error
+
+===== 23/23 PASS =====
+ALL_PASS

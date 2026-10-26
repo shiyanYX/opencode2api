@@ -1,0 +1,157 @@
+2026/10/21 09:27:41 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=42 expected_n=40202 absorbed=40202 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestHandleBackfillOpenErrorKeepsBucketsWhenNotReallyMissing4124091690/001/call_log.jsonl
+2026/10/21 09:27:41 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=7 expected_n=40202 absorbed=40202 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestHandleBackfillOpenErrorKeepsBucketsOnSymlinkLoop2136216208/001/loop
+2026/10/21 09:27:41 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=40203 absorbed=40203 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestHandleBackfillOpenErrorClearsBucketsWhenFileReallyMissing1098507458/001/call_log.jsonl
+2026/10/21 09:27:41 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=4 absorbed=4 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsOutOfOrderLineAddsToClosedHour1106945080/001/call_log.jsonl
+2026/10/21 09:27:41 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=3 expected_n=5 absorbed=5 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsOutOfOrderLineAddsToClosedHour1106945080/001/call_log.jsonl
+2026/10/21 09:27:42 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=186212 expected_n=186217 absorbed=186217 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestBackfillTiming118008319/001/call_log.jsonl
+2026/10/21 09:27:43 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=186212 expected_n=372429 absorbed=372429 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestBackfillTiming118008319/001/call_log.jsonl
+2026/10/21 09:27:43 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=186212 expected_n=558641 absorbed=558641 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestBackfillTiming118008319/001/call_log.jsonl
+2026/10/21 09:27:43 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=186212 expected_n=744853 absorbed=744853 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestBackfillTiming118008319/001/call_log.jsonl
+2026/10/21 09:27:44 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=186212 expected_n=931065 absorbed=931065 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestBackfillTiming118008319/001/call_log.jsonl
+2026/10/21 09:27:44 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=186217 expected_n=931070 absorbed=931070 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestBackfillTiming118008319/001/call_log.jsonl
+2026/10/21 09:27:44 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=186222 expected_n=931075 absorbed=931075 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestBackfillTiming118008319/001/call_log.jsonl
+2026/10/21 09:27:44 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=186227 expected_n=931080 absorbed=931080 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestBackfillTiming118008319/001/call_log.jsonl
+2026/10/21 09:27:44 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=186232 expected_n=931085 absorbed=931085 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestBackfillTiming118008319/001/call_log.jsonl
+2026/10/21 09:27:44 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=186237 expected_n=931090 absorbed=931090 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestBackfillTiming118008319/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=931092 absorbed=931092 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestTodayStatsExcludeRecordJustBeforeWindowStart3064032841/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=931093 absorbed=931093 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestRecordsAfterWindowEndAreExcluded3984980549/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=931094 absorbed=931094 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestRecordsAfterWindowEndAreExcluded3984980549/002/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=931095 absorbed=931095 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestRecordsAfterWindowEndAreExcluded3984980549/003/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=931096 absorbed=931096 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestRecordsAfterWindowEndAreExcluded3984980549/004/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=931097 absorbed=931097 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestRangeResponseExcludesRecordBeforeTodayWindow1962539724/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=502 absorbed=502 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsAbsorbsWholeFile4275392122/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=503 absorbed=503 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsIncrementalAddsToExistingHour1888256922/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=504 absorbed=504 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsIncrementalAddsToExistingHour1888256922/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=505 absorbed=505 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsLeavesTornTailForNextRound3518897656/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=500 expected_n=1005 absorbed=1005 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsConcurrentIsSafe956599973/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=500 expected_n=1005 absorbed=1005 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsConcurrentIsSafe956599973/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=500 expected_n=1005 absorbed=1005 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsConcurrentIsSafe956599973/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=500 expected_n=1005 absorbed=1005 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsConcurrentIsSafe956599973/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=500 expected_n=1005 absorbed=1005 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsConcurrentIsSafe956599973/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=500 expected_n=1005 absorbed=1005 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsConcurrentIsSafe956599973/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=500 expected_n=1005 absorbed=1005 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsConcurrentIsSafe956599973/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=500 expected_n=1005 absorbed=1005 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsConcurrentIsSafe956599973/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=1006 absorbed=1006 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsAfterClearDoesNotResurrect35459974/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=101 absorbed=101 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsCommitsSnapshotSizeNotCurrentSize671143974/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=4 expected_n=104 absorbed=104 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsCommitsSnapshotSizeNotCurrentSize671143974/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=105 absorbed=105 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsSeedsAppendIncrAfterFullAbsorb3095971423/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=106 absorbed=106 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsSeedsAppendIncrAfterFullAbsorb3095971423/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2000 expected_n=2106 absorbed=2106 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsDoesNotHoldLogLockDuringParse2798520381/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2001 expected_n=2107 absorbed=2107 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsDoesNotHoldLogLockDuringParse2798520381/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1000 expected_n=3107 absorbed=3107 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsSecondCallerWaitsInsteadOfSkipping3455704174/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1000 expected_n=3107 absorbed=3107 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsSecondCallerWaitsInsteadOfSkipping3455704174/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=100 expected_n=3207 absorbed=3207 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsRebuildResetsAndRedrains3729441073/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=5 absorbed=7 unabsorbed=2 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsMalformedLinesStillAdvanceParsedTo1357327426/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=5 absorbed=7 unabsorbed=2 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsMalformedLinesStillAdvanceParsedTo1357327426/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=6 absorbed=8 unabsorbed=2 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsDoesNotSeedWhileBytesArivedDuringParse1123724398/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=3 expected_n=8 absorbed=10 unabsorbed=2 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsDoesNotSeedWhileBytesArivedDuringParse1123724398/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=50 expected_n=53 absorbed=53 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsNeverSeedsWhileUnabsorbedBytesRemain4198274805/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=4 absorbed=4 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsTolerantGarbageLineAbsorbedExactlyOnce1828212637/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=4 absorbed=4 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsTolerantGarbageLineAbsorbedExactlyOnce1828212637/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=5 absorbed=5 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsEmptyModelHasZeroSpeed3046083404/001/call_log.jsonl
+2026/10/21 09:27:46 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=6 absorbed=6 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestEnsureBucketsSkipsTTFTWhenSpeedZero1875253772/001/call_log.jsonl
+2026/10/21 09:27:48 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=4 expected_n=3 absorbed=3 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestConservationRebuildIsThrottled4136170045/001/call_log.jsonl
+2026/10/21 09:27:48 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=5 expected_n=3 absorbed=3 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestConservationRebuildIsThrottled4136170045/001/call_log.jsonl
+2026/10/21 09:27:48 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=6 expected_n=3 absorbed=3 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestConservationRebuildIsThrottled4136170045/001/call_log.jsonl
+2026/10/21 09:27:48 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=7 expected_n=3 absorbed=3 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestConservationRebuildIsThrottled4136170045/001/call_log.jsonl
+2026/10/21 09:27:48 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=5 expected_n=3 absorbed=3 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestConservationRebootsAgainAfterBackoffExpires245830244/001/call_log.jsonl
+2026/10/21 09:27:51 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=3 absorbed=3 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestStatsJSONSurvivesOverflowedTTFTSum4030645539/001/call_log.jsonl
+2026/10/21 09:27:51 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=3 absorbed=3 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestStatsJSONSurvivesOverflowedTTFTSum4030645539/001/call_log.jsonl
+2026/10/21 09:28:11 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=3 expected_n=5 absorbed=5 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestTodayRangeExcludesRecordsOutsideRollingWindow2726159876/001/call_log.jsonl
+2026/10/21 09:28:11 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=0 expected_n=5 absorbed=5 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestTodayTrendsAndStatsShareSameBucketLabels72328458/001/call_log.jsonl
+2026/10/21 09:28:11 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=1 expected_n=6 absorbed=6 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestTodayRangeResponseModelsAndTrendsAgree599799091/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=8 absorbed=8 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsExcludesOutOfWindow1131112169/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=8 absorbed=8 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsExcludesOutOfWindow1131112169/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=10 absorbed=10 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsEmptyRangeNormalizesToToday1649830644/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=10 absorbed=10 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsEmptyRangeNormalizesToToday1649830644/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=10 absorbed=10 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsEmptyRangeNormalizesToToday1649830644/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=3 expected_n=4 absorbed=4 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsRequestCountIncludesFailures98473502/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=4 expected_n=8 absorbed=8 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsTotalTokensClosesOnPromptPlusCompletion732623180/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=5 expected_n=13 absorbed=13 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsSpeedMatchesRecordModelSpeedSemantics2854145574/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=5 expected_n=18 absorbed=18 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsReconcilesWithTrendBuckets4230621569/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=5 expected_n=18 absorbed=18 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsReconcilesWithTrendBuckets4230621569/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=5 expected_n=18 absorbed=18 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsReconcilesWithTrendBuckets4230621569/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=5 expected_n=18 absorbed=18 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsReconcilesWithTrendBuckets4230621569/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=5 expected_n=18 absorbed=18 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsReconcilesWithTrendBuckets4230621569/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=5 expected_n=18 absorbed=18 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestModelStatsReconcilesWithTrendBuckets4230621569/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=20 absorbed=20 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestAdminStatsHandlerWithRangeReturnsWindowedStats4221065622/001/call_log.jsonl
+2026/10/21 09:28:35 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=2 expected_n=20 absorbed=20 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestAdminStatsHandlerWithRangeReturnsWindowedStats4221065622/001/call_log.jsonl
+2026/10/21 09:28:38 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=3 expected_n=6 absorbed=6 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestTrendsByModelSumsToAggregate116331164/001/call_log.jsonl
+2026/10/21 09:28:38 WARN calllog: hour buckets inconsistent, stats may be wrong buckets_n=3 expected_n=6 absorbed=6 unabsorbed=0 rebuilds=1 backoff=30s path=/home/jingyx/project/opencode2api-test/.gotmp/TestTrendsByModelSumsToAggregate116331164/001/call_log.jsonl
+--- FAIL: TestIP4RVLiveServedDrift (0.00s)
+    zz_ip4agg_reverify_test.go:227: 吸收后-未成功前: totals=0 unmapped=1 Σattempts=0
+    zz_ip4agg_reverify_test.go:244: 首次成功之后: totals=1 unmapped=1 | Σattempts=2 Σby_node=2 | stats.total=1 stats.unmapped=1
+    zz_ip4agg_reverify_test.go:251: 【残留风险 R-A 复现】everServed 事后增长：Σattempts(2) != totals(1)（扫描把老失败行重判成 mapped，桶仍算未映射）
+    zz_ip4agg_reverify_test.go:254: 【残留风险 R-A 复现】Σby_node(2) != totals(1)
+--- FAIL: TestIP4RVDocsDrift (0.00s)
+    zz_ip4agg_reverify_test.go:282: 文档表未收录时: totals=0 unmapped=1 Σattempts=0
+    zz_ip4agg_reverify_test.go:294: 文档表收录之后: totals=0 unmapped=1 Σattempts=1
+    zz_ip4agg_reverify_test.go:296: 【残留风险 R-B 复现】文档表事后变化：Σattempts(1) != totals(0)（桶保留吸收时判定，扫描用当前公式 B 重判）
+time="2026-10-21T09:29:36.625499051+08:00" level=info msg="Start initial configuration in progress"
+time="2026-10-21T09:29:36.636049665+08:00" level=info msg="Geodata Loader mode: memconservative"
+time="2026-10-21T09:29:36.636081130+08:00" level=info msg="Geosite Matcher implementation: succinct"
+time="2026-10-21T09:29:36.636255364+08:00" level=info msg="Initial configuration complete, total time: 10ms"
+time="2026-10-21T09:29:36.636436806+08:00" level=warning msg="[CacheFile] can't open cache file: open /home/jingyx/.config/mihomo/cache.db: no such file or directory"
+
+=== 表1：按探针目标 × 节点来源 ===
+url                                                  source             n    ok     ok% 失败原因分布
+https://opencode.ai/zen/v1/models                    1                  8     8  100.0% -
+https://opencode.ai/zen/v1/models                    2                  8     5   62.5% timeout=3
+https://opencode.ai/zen/v1/models                    3                  8     5   62.5% timeout=3
+https://opencode.ai/zen/v1/models                    红杏                26     3   11.5% tls=21 eof=2
+https://opencode.ai/zen/v1/models                    飞鸟云               14     0    0.0% timeout=13 tls=1
+https://www.gstatic.com/generate_204                 1                  8     8  100.0% -
+https://www.gstatic.com/generate_204                 2                  8     5   62.5% timeout=3
+https://www.gstatic.com/generate_204                 3                  8     5   62.5% timeout=3
+https://www.gstatic.com/generate_204                 红杏                26     4   15.4% tls=18 eof=4
+https://www.gstatic.com/generate_204                 飞鸟云               14     0    0.0% timeout=13 tls=1
+
+=== 表2：按探针目标 × 协议 ===
+url                                                  protocol       n    ok     ok% 失败原因分布
+https://opencode.ai/zen/v1/models                    anytls         4     3   75.0% eof=1
+https://opencode.ai/zen/v1/models                    hy2           12     0    0.0% timeout=12
+https://opencode.ai/zen/v1/models                    socks5        24    18   75.0% timeout=6
+https://opencode.ai/zen/v1/models                    trojan         2     0    0.0% timeout=1 tls=1
+https://opencode.ai/zen/v1/models                    vless         22     0    0.0% tls=21 eof=1
+https://www.gstatic.com/generate_204                 anytls         4     4  100.0% -
+https://www.gstatic.com/generate_204                 hy2           12     0    0.0% timeout=12
+https://www.gstatic.com/generate_204                 socks5        24    18   75.0% timeout=6
+https://www.gstatic.com/generate_204                 trojan         2     0    0.0% timeout=1 tls=1
+https://www.gstatic.com/generate_204                 vless         22     0    0.0% tls=18 eof=4
+
+=== 表3：2×2 交叉（决定是「节点坏」还是「只对 opencode.ai 不通」）===
+opencode-OK      × gstatic-OK     = 21
+opencode-FAIL    × gstatic-OK     = 1
+opencode-OK      × gstatic-FAIL   = 0
+opencode-FAIL    × gstatic-FAIL   = 42
+
+=== 失败明细（前 25 条，含原始错误）===
+- [飞鸟云] 飞鸟云::新加坡05aws (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::新加坡03aws (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::新加坡01aws (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::美国02aws (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::美国04aws (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::新加坡05aws (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::新加坡01aws (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::新加坡03aws (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::美国02aws (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::美国04aws (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::日本07aws (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::日本03aws (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::日本15aws (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::日本07aws (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::日本03aws (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::日本15aws (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::hy2台湾05 (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": timeout: no recent network activity
+- [飞鸟云] 飞鸟云::每次使用前更新订阅到最新，用不了，换个客户端，重新导入订阅，用手机流量试下。 (trojan) url=https://opencode.ai/zen/v1/models ms=0 cause=tls err=Get "https://opencode.ai/zen/v1/models": 1.1.1.1:8080 connect error: tls: first record does not look like a TLS handshake
+- [飞鸟云] 飞鸟云::每次使用前更新订阅到最新，用不了，换个客户端，重新导入订阅，用手机流量试下。 (trojan) url=https://www.gstatic.com/generate_204 ms=0 cause=tls err=Get "https://www.gstatic.com/generate_204": 1.1.1.1:8080 connect error: tls: first record does not look like a TLS handshake
+- [飞鸟云] 飞鸟云::美国07aws (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": context deadline exceeded
+- [飞鸟云] 飞鸟云::美国07aws (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": context deadline exceeded
+- [飞鸟云] 飞鸟云::hy2台湾05 (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": timeout: no recent network activity
+- [红杏] 红杏::🇯🇵 日本原生 (anytls) url=https://opencode.ai/zen/v1/models ms=0 cause=eof err=Get "https://opencode.ai/zen/v1/models": failed to create session: EOF
+- [飞鸟云] 飞鸟云::hy2台湾03 (hy2) url=https://www.gstatic.com/generate_204 ms=0 cause=timeout err=Get "https://www.gstatic.com/generate_204": net/http: TLS handshake timeout
+- [飞鸟云] 飞鸟云::hy2台湾03 (hy2) url=https://opencode.ai/zen/v1/models ms=0 cause=timeout err=Get "https://opencode.ai/zen/v1/models": net/http: TLS handshake timeout
+  ...（完整明细见 /tmp/t30/probe_causes.json）
+FAIL
+FAIL	github.com/shiyanYX/opencode2api	227.325s
+FAIL

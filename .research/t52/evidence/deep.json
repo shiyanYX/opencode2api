@@ -1,0 +1,461 @@
+{
+ "per_day": {
+  "2026-08-13": {
+   "lines": 102,
+   "bytes": 43648,
+   "events_bytes": 12647,
+   "fail": 5,
+   "ok": 97
+  },
+  "2026-08-14": {
+   "lines": 389,
+   "bytes": 176357,
+   "events_bytes": 59349,
+   "ok": 371,
+   "fail": 18
+  },
+  "2026-08-15": {
+   "lines": 732,
+   "bytes": 317096,
+   "events_bytes": 89132,
+   "fail": 16,
+   "ok": 716
+  },
+  "2026-08-16": {
+   "lines": 1501,
+   "bytes": 647375,
+   "events_bytes": 180757,
+   "ok": 1480,
+   "fail": 21
+  },
+  "2026-08-17": {
+   "lines": 1060,
+   "bytes": 448640,
+   "events_bytes": 120342,
+   "ok": 1058,
+   "fail": 2
+  },
+  "2026-08-18": {
+   "lines": 222,
+   "bytes": 105228,
+   "events_bytes": 37615,
+   "ok": 217,
+   "fail": 5
+  },
+  "2026-08-19": {
+   "lines": 304,
+   "bytes": 141428,
+   "events_bytes": 50829,
+   "fail": 12,
+   "ok": 292
+  },
+  "2026-08-20": {
+   "lines": 272,
+   "bytes": 121626,
+   "events_bytes": 39764,
+   "ok": 267,
+   "fail": 5
+  },
+  "2026-08-21": {
+   "lines": 697,
+   "bytes": 315945,
+   "events_bytes": 106381,
+   "ok": 636,
+   "fail": 61
+  },
+  "2026-08-22": {
+   "lines": 168,
+   "bytes": 72057,
+   "events_bytes": 23286,
+   "ok": 159,
+   "fail": 9
+  },
+  "2026-08-23": {
+   "lines": 615,
+   "bytes": 267251,
+   "events_bytes": 85164,
+   "fail": 19,
+   "ok": 596
+  },
+  "2026-08-24": {
+   "lines": 54,
+   "bytes": 22129,
+   "events_bytes": 5994,
+   "ok": 54
+  },
+  "2026-08-25": {
+   "lines": 163,
+   "bytes": 71806,
+   "events_bytes": 23865,
+   "ok": 149,
+   "fail": 14
+  },
+  "2026-08-26": {
+   "lines": 288,
+   "bytes": 171319,
+   "events_bytes": 90667,
+   "ok": 156,
+   "fail": 132
+  },
+  "2026-08-27": {
+   "lines": 208,
+   "bytes": 92015,
+   "events_bytes": 30736,
+   "fail": 30,
+   "ok": 178
+  },
+  "2026-08-29": {
+   "lines": 27,
+   "bytes": 12409,
+   "events_bytes": 4187,
+   "ok": 26,
+   "fail": 1
+  },
+  "2026-08-30": {
+   "lines": 193,
+   "bytes": 80767,
+   "events_bytes": 21673,
+   "ok": 191,
+   "fail": 2
+  },
+  "2026-08-31": {
+   "lines": 133,
+   "bytes": 55679,
+   "events_bytes": 15037,
+   "ok": 132,
+   "fail": 1
+  },
+  "2026-09-03": {
+   "lines": 559,
+   "bytes": 239071,
+   "events_bytes": 69184,
+   "ok": 544,
+   "fail": 15
+  },
+  "2026-09-04": {
+   "lines": 172,
+   "bytes": 75680,
+   "events_bytes": 23602,
+   "ok": 166,
+   "fail": 6
+  },
+  "2026-09-09": {
+   "lines": 140,
+   "bytes": 58355,
+   "events_bytes": 15744,
+   "ok": 139,
+   "fail": 1
+  },
+  "2026-09-10": {
+   "lines": 612,
+   "bytes": 271192,
+   "events_bytes": 85096,
+   "ok": 592,
+   "fail": 20
+  },
+  "2026-09-11": {
+   "lines": 280,
+   "bytes": 123172,
+   "events_bytes": 38049,
+   "fail": 7,
+   "ok": 273
+  },
+  "2026-09-12": {
+   "lines": 763,
+   "bytes": 332196,
+   "events_bytes": 99263,
+   "ok": 747,
+   "fail": 16
+  },
+  "2026-09-13": {
+   "lines": 254,
+   "bytes": 112730,
+   "events_bytes": 35575,
+   "ok": 245,
+   "fail": 9
+  },
+  "2026-09-14": {
+   "lines": 295,
+   "bytes": 123509,
+   "events_bytes": 33742,
+   "ok": 293,
+   "fail": 2
+  },
+  "2026-09-15": {
+   "lines": 240,
+   "bytes": 104523,
+   "events_bytes": 31046,
+   "ok": 235,
+   "fail": 5
+  },
+  "2026-09-16": {
+   "lines": 1895,
+   "bytes": 1247471,
+   "events_bytes": 606455,
+   "fail": 197,
+   "ok": 1698
+  },
+  "2026-09-17": {
+   "lines": 1680,
+   "bytes": 1341408,
+   "events_bytes": 744102,
+   "ok": 1363,
+   "fail": 317
+  },
+  "2026-09-18": {
+   "lines": 16568,
+   "bytes": 9174349,
+   "events_bytes": 3677201,
+   "ok": 14744,
+   "fail": 1824
+  },
+  "2026-09-19": {
+   "lines": 15188,
+   "bytes": 9699040,
+   "events_bytes": 4989805,
+   "ok": 11013,
+   "fail": 4175
+  },
+  "2026-09-20": {
+   "lines": 12073,
+   "bytes": 7098001,
+   "events_bytes": 3301512,
+   "ok": 9769,
+   "fail": 2304
+  },
+  "2026-09-21": {
+   "lines": 16686,
+   "bytes": 9262745,
+   "events_bytes": 4029243,
+   "fail": 3301,
+   "ok": 13385
+  },
+  "2026-09-22": {
+   "lines": 13065,
+   "bytes": 6749279,
+   "events_bytes": 2286552,
+   "ok": 12541,
+   "fail": 524
+  },
+  "2026-09-23": {
+   "lines": 8297,
+   "bytes": 4234649,
+   "events_bytes": 1424704,
+   "ok": 8131,
+   "fail": 166
+  },
+  "2026-09-24": {
+   "lines": 7215,
+   "bytes": 3839430,
+   "events_bytes": 1383577,
+   "ok": 7003,
+   "fail": 212
+  },
+  "2026-09-25": {
+   "lines": 9772,
+   "bytes": 5239652,
+   "events_bytes": 1900208,
+   "ok": 9564,
+   "fail": 208
+  },
+  "2026-09-26": {
+   "lines": 8586,
+   "bytes": 4354743,
+   "events_bytes": 1407809,
+   "ok": 8525,
+   "fail": 61
+  },
+  "2026-09-27": {
+   "lines": 14996,
+   "bytes": 7702870,
+   "events_bytes": 2644665,
+   "ok": 14783,
+   "fail": 213
+  },
+  "2026-09-28": {
+   "lines": 14288,
+   "bytes": 7254171,
+   "events_bytes": 2459917,
+   "ok": 14127,
+   "fail": 161
+  },
+  "2026-09-29": {
+   "lines": 16871,
+   "bytes": 8668536,
+   "events_bytes": 2958571,
+   "fail": 262,
+   "ok": 16609
+  },
+  "2026-09-30": {
+   "lines": 17232,
+   "bytes": 9208441,
+   "events_bytes": 3253433,
+   "ok": 16650,
+   "fail": 582
+  },
+  "2026-10-01": {
+   "lines": 516,
+   "bytes": 270201,
+   "events_bytes": 79503,
+   "ok": 516
+  },
+  "2026-10-02": {
+   "lines": 281,
+   "bytes": 146496,
+   "events_bytes": 41869,
+   "ok": 281
+  },
+  "2026-10-03": {
+   "lines": 2647,
+   "bytes": 1404943,
+   "events_bytes": 451672,
+   "ok": 2608,
+   "fail": 39
+  },
+  "2026-10-04": {
+   "lines": 3198,
+   "bytes": 1661328,
+   "events_bytes": 549288,
+   "ok": 3147,
+   "fail": 51
+  },
+  "2026-10-05": {
+   "lines": 3391,
+   "bytes": 1681687,
+   "events_bytes": 511872,
+   "ok": 3391
+  },
+  "2026-10-06": {
+   "lines": 1532,
+   "bytes": 806649,
+   "events_bytes": 286535,
+   "ok": 1470,
+   "fail": 62
+  },
+  "2026-10-07": {
+   "lines": 2003,
+   "bytes": 919371,
+   "events_bytes": 261032,
+   "ok": 675,
+   "fail": 1328
+  },
+  "2026-10-08": {
+   "lines": 1691,
+   "bytes": 883277,
+   "events_bytes": 273056,
+   "ok": 1147,
+   "fail": 544
+  },
+  "2026-10-09": {
+   "lines": 466,
+   "bytes": 197648,
+   "events_bytes": 17862,
+   "fail": 18,
+   "ok": 448
+  },
+  "2026-10-10": {
+   "lines": 1849,
+   "bytes": 738183,
+   "events_bytes": 28512,
+   "ok": 1828,
+   "fail": 21
+  },
+  "2026-10-11": {
+   "lines": 615,
+   "bytes": 232507,
+   "events_bytes": 246,
+   "ok": 615
+  },
+  "2026-10-12": {
+   "lines": 1164,
+   "bytes": 523110,
+   "events_bytes": 65719,
+   "ok": 1115,
+   "fail": 49
+  },
+  "2026-10-13": {
+   "lines": 368,
+   "bytes": 147484,
+   "events_bytes": 10780,
+   "ok": 306,
+   "fail": 62
+  },
+  "2026-10-14": {
+   "lines": 1304,
+   "bytes": 588925,
+   "events_bytes": 91300,
+   "fail": 135,
+   "ok": 1169
+  },
+  "2026-10-15": {
+   "lines": 4400,
+   "bytes": 2296159,
+   "events_bytes": 592276,
+   "fail": 378,
+   "ok": 4022
+  },
+  "2026-10-16": {
+   "lines": 6531,
+   "bytes": 2703582,
+   "events_bytes": 186553,
+   "ok": 6410,
+   "fail": 121
+  },
+  "2026-10-17": {
+   "lines": 4687,
+   "bytes": 2719400,
+   "events_bytes": 1007116,
+   "ok": 2930,
+   "fail": 1757
+  },
+  "2026-10-18": {
+   "lines": 7636,
+   "bytes": 4715130,
+   "events_bytes": 2164099,
+   "fail": 4533,
+   "ok": 3103
+  },
+  "2026-10-19": {
+   "lines": 3516,
+   "bytes": 1837079,
+   "events_bytes": 506663,
+   "ok": 2838,
+   "fail": 678
+  },
+  "2026-10-20": {
+   "lines": 794,
+   "bytes": 369284,
+   "events_bytes": 66042,
+   "fail": 301,
+   "ok": 493
+  }
+ },
+ "event_clean_bytes": 31645070,
+ "event_fail_bytes": 14043405,
+ "node_names_redundant": {
+  "total_refs": 230781,
+  "event_nodename_bytes": 9164790,
+  "event_nodename_refs": 233750,
+  "event_nodename_in_top_names": 479836,
+  "event_node_in_top_nodes": 479836
+ },
+ "evtype": {
+  "upstream_error": 38401,
+  "switch": 20695,
+  "connect_error": 28123,
+  "connect_ok": 183462,
+  "stream_interrupt": 178,
+  "region_restriction": 1,
+  "quota_halt": 3320,
+  "freetier_node_confirmed_bad": 24
+ },
+ "detail_bytes_by_type": {
+  "upstream_error": 861738,
+  "switch": 2935114,
+  "connect_error": 3628046,
+  "stream_interrupt": 7557,
+  "region_restriction": 36,
+  "quota_halt": 258564,
+  "freetier_node_confirmed_bad": 1968
+ }
+}

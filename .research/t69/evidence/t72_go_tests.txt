@@ -1,0 +1,13 @@
+$ go test -run "TestEventsRetainedOnDiskExactlyWhenHasIssue|TestRestartRecoveryPreservesUserVisibleFields" -count=1 -v ./
+=== RUN   TestEventsRetainedOnDiskExactlyWhenHasIssue
+--- PASS: TestEventsRetainedOnDiskExactlyWhenHasIssue (0.00s)
+=== RUN   TestRestartRecoveryPreservesUserVisibleFields
+--- PASS: TestRestartRecoveryPreservesUserVisibleFields (0.01s)
+PASS
+ok  	github.com/shiyanYX/opencode2api	0.066s
+
+$ go test -run "TestW03_APINodesNodeAlertShape|TestEventsRetainedOnDiskExactlyWhenHasIssue" -count=1 ./
+ok  	github.com/shiyanYX/opencode2api	0.026s
+
+$ python3 web/build.py --check
+OK: static/admin.html 与源一致（156474 字节）

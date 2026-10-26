@@ -1,0 +1,35 @@
+# task-56 阶段1 实测记录（2026-10-20 15:10~15:25，本机 4 核 / 生产快照 /tmp/t52/call_log.jsonl）
+
+## 0. 输入与构建
+- 快照: /tmp/t52/call_log.jsonl  233,444 行 / 124,520,431 B / sha256 25d6d42e…（见 .research/t52/evidence/snap.sha256）
+- 临时副本: /tmp/t56/repo（repo 拷贝 + 4 个 z_t56_bench*_test.go，均不进仓库）
+- 基准二进制: /tmp/t56/bin/oc2api-baseline（当前 HEAD 代码，供阶段2 invariance 比对）
+
+## 1. 按天切分（split by time.Local day; hourKeyFor 同口径）
+- 61 个日文件（fixture 仅 68 天跨度、且部分天无记录），最大天 9.7 MB（2026-09-19）
+- TestT56SplitEquivalence:
+    files=61 lines=233444 bytes=124286987 buckets=1089
+    single-file scan: 592.7ms (209.7 MB/s)
+    daily-files scan: 485.2ms (256.2 MB/s)
+    ⇒ 逐桶逐字段完全相同（测试断言 *a == *b，任一字节差异即 fail）
+- gzip: 61 文件 raw=124,520,431 → gz=10,808,444 (11.5x)；inflate+parse 全量 median=703.7ms
+
+## 2. 冷启动回填（单文件现状，HTTP 端到端）
+- 服务: /tmp/t56/bin/oc2api-baseline -port 9537 -config /tmp/t41b/fixture/orig/config.json
+- 124MB 单文件: 第1次 /api/stats?range=180d = 668.1 ms（含解析 ~590ms）；第2次 5.7ms；第3次 6.7ms
+- 四个窗口基线（fixture，运行日 2026-10-20）:
+    today total_requests=873  models=8  unmapped=728
+    7d    27,739             models=9  unmapped=730
+    30d   173,846            models=10 unmapped=1352
+    180d  231,654            models=16 unmapped=1391
+- 90 天外推（按当前速率 1.83 MB/天 → 165MB；字段精简后 0.834× → 138MB）:
+    raw 回填 ≈ 0.6~0.75s；gz 回填 ≈ 0.8~1.0s（按 124MB/704ms 线性外推）
+- 180 天 gz 回填 ≈ 1.4~1.6s（276MB raw-equiv）
+
+## 3. /api/call-log 历史查询成本（无索引依据）
+- tailReadLastLines(2000): 小日文件 369KB → 179µs；忙日 9.7MB → 1.95ms
+- 单日全量扫描+过滤: 369KB → 935µs；9.7MB → 29.0ms；9.2MB → 32.4ms
+- 历史查询「倒读 + limit=2000 命中即停 + 命中行全量 json.Unmarshal」:
+    9.7MB 忙日 → 25.3ms（命中 2000 条即停）
+    369KB 小日 → 4.7ms（全文件仅 493 条命中）
+- ⇒ 按天文件单日代价 ≤ ~30ms，90 天全范围最坏 ~1s，有 before/after 时按天定位 O(1)

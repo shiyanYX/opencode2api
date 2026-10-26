@@ -1,0 +1,7 @@
+## D1 修前红：把 callLogFileExists 的 daily 分支还原为「只看 legacy」（overlay 注入，不改工作树）
+
+    calllog_defects_test.go:45: daily 布局（无 legacy）下 trendsFromCallLog(today) 返回 nil → handler 会输出 []
+--- FAIL: TestDailyOnlyDeploymentTrendsNotEmpty (0.00s)
+FAIL
+FAIL	github.com/shiyanYX/opencode2api	0.009s
+FAIL

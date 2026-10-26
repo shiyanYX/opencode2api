@@ -1,0 +1,18 @@
+mutation                                   test                                                 result   rc
+M1 段排序 legacy 放最后                          TestDailySegmentsOrderLegacyFirstThenDaysAscending   CAUGHT   1  --- FAIL: TestDailySegmentsOrderLegacyFirstThenDaysAscending (0.00s) | FAIL
+M2 日切仍写最后一段（不建新天文件）                        TestDailyRolloverNeverWritesBackToOlderSegment       CAUGHT   1  --- FAIL: TestDailyRolloverNeverWritesBackToOlderSegment (0.00s) | FAIL
+M3 events 精简不做深拷贝                          TestDailyDiskTrimDefaultFieldsAndRestore             CAUGHT   1  --- FAIL: TestDailyDiskTrimDefaultFieldsAndRestore (0.00s) | FAIL
+M4 非最后段半行不消费                               TestDailyNonLastSegmentPartialLineConsumed           CAUGHT   1  --- FAIL: TestDailyNonLastSegmentPartialLineConsumed (0.00s) | FAIL
+M5 尾部加载只读最后一段                              TestDailyLoadCallLogTailAcrossSegments               CAUGHT   1  --- FAIL: TestDailyLoadCallLogTailAcrossSegments (0.02s) | FAIL
+M6 删除超期段整段逻辑（不 prune）                      TestRetentionArchiveCompressesOldDaysAndPrunes       CAUGHT   1  --- FAIL: TestRetentionArchiveCompressesOldDaysAndPrunes (0.01s) | FAIL
+M7 before 等值边界变包含（同 ts 组按普通行处理）            TestCallLogHistoryFilters                            CAUGHT   1  --- FAIL: TestCallLogHistoryFilters (0.00s) | FAIL
+M8 读取侧不还原 node_name                        TestDailyDiskTrimDefaultFieldsAndRestore             CAUGHT   1  --- FAIL: TestDailyDiskTrimDefaultFieldsAndRestore (0.00s) | FAIL
+M9 clear 不删日文件                             TestDailyClearRemovesEverySegment                    CAUGHT   1  --- FAIL: TestDailyClearRemovesEverySegment (0.00s) | FAIL
+M10 吸收时 gz 段当明文读                           TestDailyGzSegmentAbsorb                             CAUGHT   1  --- FAIL: TestDailyGzSegmentAbsorb (0.00s) | FAIL
+M11 daily 游标推进用 parsedTo                   TestDailyAppendWritesTodaysFileAndIncr               CAUGHT   1  --- FAIL: TestDailyAppendWritesTodaysFileAndIncr (0.00s) | FAIL
+M12 daily 模式不分派，走单文件吸收                     TestDailyAbsorbReplaysAllSegmentsIdempotently        CAUGHT   1  --- FAIL: TestDailyAbsorbReplaysAllSegmentsIdempotently (0.00s) | FAIL
+M13 [D1] callLogFileExists 忽略 daily 段（缺陷本体） TestDailyOnlyDeploymentTrendsNotEmpty                CAUGHT   1  --- FAIL: TestDailyOnlyDeploymentTrendsNotEmpty (0.00s) | FAIL
+M14 [D2] 同 ts 游标退回 req_id 字符串过滤（缺陷本体）      TestSameTSGroupPaginationNoLoss                      CAUGHT   1  --- FAIL: TestSameTSGroupPaginationNoLoss (0.00s) |     --- FAIL: TestSameTSGroupPaginationNoLoss/li
+M15 [D3] 位置游标 off-by-one（游标行重复返回）          TestProdOrderPaginationCursorUnionEqualsFull         CAUGHT   1  --- FAIL: TestProdOrderPaginationCursorUnionEqualsFull (8.77s) | FAIL
+M16 [D3] 段标识用文件路径（明文→gz 改名后游标失效）           TestCursorSurvivesGzipRename                         CAUGHT   1  --- FAIL: TestCursorSurvivesGzipRename (0.00s) | FAIL
+M17 [D3] 位置游标不产出（Next-Cursor 缺失）           TestProdOrderPaginationCursorUnionEqualsFull         CAUGHT   1  --- FAIL: TestProdOrderPaginationCursorUnionEqualsFull (0.00s) | FAIL

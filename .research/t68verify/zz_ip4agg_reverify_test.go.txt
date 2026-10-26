@@ -1,0 +1,351 @@
+package main
+
+// task-68 第二轮：D1/D2 修复后的独立复验（不复用第一轮的任何断言文件）。
+//
+// 目标：
+//  1. 手写「老格式行」（原始 JSON 删掉 unmapped 键），覆盖三种组合：
+//     ①公式 B 未映射且从未成功 ②公式 B 未映射但曾成功过(everServed) ③显式 unmapped:true 但 status=ok
+//  2. 复验「未映射判据与桶吸收同源」的边界，而不是只重跑第一轮用例；
+//  3. 独立探测实现方登记的残留风险：everServed / 文档表在「吸收之后」发生变化时，
+//     扫描器用当前状态重判老行，而桶保留吸收时的判定 ⇒ 是否重新出现 totals≠Σattempts。
+//
+// 运行：
+//   go test -run 'TestIP4RV' -count=1 -timeout 10m -v .
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// ip4rvWriteRaw 直接写原始 JSON 行（不经 CallRecord 序列化），用于构造无 unmapped 键的老行。
+func ip4rvWriteRaw(t *testing.T, path string, rows ...map[string]any) {
+	t.Helper()
+	var b strings.Builder
+	for _, m := range rows {
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(data)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func ip4rvAppendRaw(t *testing.T, path string, rows ...map[string]any) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	for _, m := range rows {
+		data, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write(append(data, '\n')); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// ip4rvRow 手工构造一行日志。hasUnmapped=false 时**不写** unmapped 键（老格式）。
+func ip4rvRow(ts time.Time, model, status string, durMS int64, nodes []string, hasUnmapped bool, unmapped bool, errMsg string) map[string]any {
+	m := map[string]any{
+		"req_id":        fmt.Sprintf("rv-%s-%d", model, ts.UnixNano()),
+		"ts":            ts.Local().Format(time.RFC3339Nano),
+		"path":          "/v1/chat/completions",
+		"route_mode":    "public",
+		"model":         model,
+		"status":        status,
+		"duration_ms":   durMS,
+		"prompt_tokens": 100,
+	}
+	if len(nodes) > 0 {
+		names := make([]string, len(nodes))
+		fps := make([]string, len(nodes))
+		for i, n := range nodes {
+			names[i] = n
+			fps[i] = "fp-" + n
+		}
+		m["node_names"] = names
+		m["nodes"] = fps
+	}
+	if errMsg != "" {
+		m["err_msg"] = errMsg
+	}
+	if hasUnmapped {
+		m["unmapped"] = unmapped
+	}
+	return m
+}
+
+func ip4rvAttempts(a aggAttempts) int64 { return a.A0 + a.A1 + a.A2 + a.A3Plus }
+
+// TestIP4RVOldFormatUnmappedThreeCombos 三种组合的手写老行/显式行组合。
+func TestIP4RVOldFormatUnmappedThreeCombos(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	dir := t.TempDir()
+	p := filepath.Join(dir, callLogFileName)
+	ip4rvWriteRaw(t, p,
+		// ① 老行 + 公式 B 判未映射 + 从未成功 ⇒ 必须完全排除（含分位）
+		ip4rvRow(now.Add(-1*time.Hour), "wild-never-x", "fail", 500, []string{"n1"}, false, false, ""),
+		// ② 老行 + 公式 B 判未映射，但同一窗口里有一条成功记录 ⇒ everServed 翻转成 mapped
+		ip4rvRow(now.Add(-2*time.Hour), "wild-served-x", "fail", 400, []string{"n1"}, false, false, ""),
+		ip4rvRow(now.Add(-2*time.Hour+time.Minute), "wild-served-x", "ok", 60, []string{"n1"}, true, false, ""),
+		// ③ 显式 unmapped:true 但 status=ok ⇒ 成功即证明可服务，必须算 mapped（唯一例外）
+		ip4rvRow(now.Add(-3*time.Hour), "wild-okflag-x", "ok", 40, []string{"n1"}, true, true, ""),
+		// 对照：老行但公式 B 判 mapped（-free 后缀）⇒ 不得被误排除
+		ip4rvRow(now.Add(-4*time.Hour), "m-plain-free", "fail", 50, []string{"n1"}, false, false, ""),
+	)
+	ip4UseStore(t, p, "")
+
+	agg := aggregateResponseFor("today")
+	st := statsRangeResponseFor("today")
+	att := ip4rvAttempts(agg.Attempts)
+	var nodeSum, errSum int64
+	for _, n := range agg.ByNode {
+		nodeSum += n.Requests
+	}
+	for _, e := range agg.ByError {
+		errSum += e.Count
+	}
+	t.Logf("totals.requests=%d ok=%d fail=%d | Σattempts=%d Σby_node=%d Σby_error=%d | unmapped agg=%d stats=%d | latency.max=%.0f | by_model=%+v",
+		agg.Totals.Requests, agg.Totals.OK, agg.Totals.Fail, att, nodeSum, errSum,
+		agg.Unmapped.Count, st.UnmappedRequests.Count, agg.Latency.MaxMs, agg.ByModel)
+
+	// 期望：4 条 mapped（②的 fail+ok、③ok、对照 fail） + 1 条未映射（①）
+	if agg.Totals.Requests != 4 || agg.Totals.OK != 2 || agg.Totals.Fail != 2 {
+		t.Errorf("totals: got requests=%d ok=%d fail=%d want 4/2/2", agg.Totals.Requests, agg.Totals.OK, agg.Totals.Fail)
+	}
+	if agg.Totals.Requests != st.TotalRequests {
+		t.Errorf("totals.requests(%d) != stats.total_requests(%d)", agg.Totals.Requests, st.TotalRequests)
+	}
+	if agg.Unmapped.Count != 1 || st.UnmappedRequests.Count != 1 {
+		t.Errorf("unmapped: agg=%d stats=%d want 1/1（只有 ① 应算未映射）", agg.Unmapped.Count, st.UnmappedRequests.Count)
+	}
+	if att != agg.Totals.Requests {
+		t.Errorf("Σattempts(%d) != totals.requests(%d)", att, agg.Totals.Requests)
+	}
+	if nodeSum != agg.Totals.Requests {
+		t.Errorf("Σby_node(%d) != totals.requests(%d)", nodeSum, agg.Totals.Requests)
+	}
+	if errSum != agg.Totals.Fail {
+		t.Errorf("Σby_error(%d) != totals.fail(%d)", errSum, agg.Totals.Fail)
+	}
+	// ①的 500ms 不得成为分位/最大值样本
+	if agg.Latency.MaxMs != 400 {
+		t.Errorf("latency.max_ms=%.0f want 400（①的 500ms 必须排除，最大应为 ② fail 的 400）", agg.Latency.MaxMs)
+	}
+	// by_model：② 2 条、③ 1 条、对照 1 条、① 不出现
+	got := map[string]aggModelRow{}
+	for _, r := range agg.ByModel {
+		got[r.Model] = r
+	}
+	if _, ok := got["wild-never-x"]; ok {
+		t.Errorf("①wild-never-x 不应进 by_model：%+v", got["wild-never-x"])
+	}
+	if r := got["wild-served-x"]; r.Requests != 2 || r.OK != 1 || r.Fail != 1 {
+		t.Errorf("②wild-served-x: got %+v want requests=2 ok=1 fail=1（everServed 应把老失败行翻成 mapped）", r)
+	}
+	if r := got["wild-okflag-x"]; r.Requests != 1 || r.OK != 1 {
+		t.Errorf("③wild-okflag-x: got %+v want requests=1 ok=1（显式 unmapped+ok 例外）", r)
+	}
+	if r := got["m-plain-free"]; r.Requests != 1 || r.Fail != 1 {
+		t.Errorf("对照 m-plain-free: got %+v want requests=1 fail=1（-free 老行不得被误排除）", r)
+	}
+}
+
+// TestIP4RVProdReconciliationAfterFix 用生产快照把三条对账恒等式逐窗口再钉一遍（D1 修后）。
+func TestIP4RVProdReconciliationAfterFix(t *testing.T) {
+	prod := ip4ProdPath()
+	if _, err := os.Stat(prod); err != nil {
+		t.Skipf("生产快照不存在（%s）", prod)
+	}
+	ip4UseStore(t, prod, "")
+	for _, rng := range []string{"today", "7d", "30d", "180d"} {
+		aggregateCacheReset()
+		agg := aggregateResponseFor(rng)
+		st := statsRangeResponseFor(rng)
+		att := ip4rvAttempts(agg.Attempts)
+		var nodeSum, errSum, modelSum int64
+		for _, n := range agg.ByNode {
+			nodeSum += n.Requests
+		}
+		for _, e := range agg.ByError {
+			errSum += e.Count
+		}
+		for _, m := range agg.ByModel {
+			modelSum += m.Requests
+		}
+		t.Logf("%s: totals=%d ok=%d fail=%d | stats.total=%d | Σattempts=%d Σby_node=%d Σby_model=%d Σby_error=%d | unmapped agg/stats=%d/%d | latency.max=%.0f p95=%.0f",
+			rng, agg.Totals.Requests, agg.Totals.OK, agg.Totals.Fail, st.TotalRequests,
+			att, nodeSum, modelSum, errSum, agg.Unmapped.Count, st.UnmappedRequests.Count,
+			agg.Latency.MaxMs, agg.Latency.P95Ms)
+		if att != agg.Totals.Requests {
+			t.Errorf("%s: Σattempts(%d) != totals(%d)", rng, att, agg.Totals.Requests)
+		}
+		if nodeSum != agg.Totals.Requests {
+			t.Errorf("%s: Σby_node(%d) != totals(%d)", rng, nodeSum, agg.Totals.Requests)
+		}
+		if errSum != agg.Totals.Fail {
+			t.Errorf("%s: Σby_error(%d) != fail(%d)（修前 180d 是 25,024 vs 23,633）", rng, errSum, agg.Totals.Fail)
+		}
+		if modelSum != agg.Totals.Requests {
+			t.Errorf("%s: Σby_model(%d) != totals(%d)", rng, modelSum, agg.Totals.Requests)
+		}
+		if agg.Unmapped.Count != st.UnmappedRequests.Count {
+			t.Errorf("%s: unmapped(%d) != stats.unmapped_requests(%d)", rng, agg.Unmapped.Count, st.UnmappedRequests.Count)
+		}
+		if agg.Latency.MaxMs == 99999999 {
+			t.Errorf("%s: latency.max 仍出现 99,999,999（未映射泄漏未修）", rng)
+		}
+	}
+}
+
+// TestIP4RVLiveServedDrift 残留风险 R-A 的独立复现：
+// 吸收之后模型才首次成功 ⇒ 桶把老失败行永久算未映射，但扫描器用「当前 servedModels」重判成 mapped。
+func TestIP4RVLiveServedDrift(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	dir := t.TempDir()
+	p := filepath.Join(dir, callLogFileName)
+	// 老失败行：此时 wild-late-x 从未成功 ⇒ 被吸收为未映射
+	ip4rvWriteRaw(t, p, ip4rvRow(now.Add(-1*time.Hour), "wild-late-x", "fail", 500, []string{"n1"}, false, false, ""))
+	ip4UseStore(t, p, "")
+
+	agg0 := aggregateResponseFor("today")
+	t.Logf("吸收后-未成功前: totals=%d unmapped=%d Σattempts=%d", agg0.Totals.Requests, agg0.Unmapped.Count, ip4rvAttempts(agg0.Attempts))
+	if agg0.Totals.Requests != 0 || agg0.Unmapped.Count != 1 {
+		t.Fatalf("夹具自检：应 totals=0 unmapped=1，实际 %d/%d", agg0.Totals.Requests, agg0.Unmapped.Count)
+	}
+
+	// 运行期首次成功（新格式行，unmapped:false）：桶追加这条 ok；老失败行仍留在 unmappedBuckets
+	ip4rvAppendRaw(t, p, ip4rvRow(now.Add(-30*time.Minute), "wild-late-x", "ok", 60, []string{"n1"}, true, false, ""))
+	ensureBucketsUpToDate()
+	aggregateCacheReset()
+	agg := aggregateResponseFor("today")
+	st := statsRangeResponseFor("today")
+
+	att := ip4rvAttempts(agg.Attempts)
+	var nodeSum int64
+	for _, n := range agg.ByNode {
+		nodeSum += n.Requests
+	}
+	t.Logf("首次成功之后: totals=%d unmapped=%d | Σattempts=%d Σby_node=%d | stats.total=%d stats.unmapped=%d",
+		agg.Totals.Requests, agg.Unmapped.Count, att, nodeSum, st.TotalRequests, st.UnmappedRequests.Count)
+
+	if agg.Totals.Requests != 1 || agg.Unmapped.Count != 1 {
+		t.Fatalf("夹具自检：桶应 totals=1（ok）unmapped=1（老失败行），实际 %d/%d", agg.Totals.Requests, agg.Unmapped.Count)
+	}
+	if att != agg.Totals.Requests {
+		t.Errorf("【残留风险 R-A 复现】everServed 事后增长：Σattempts(%d) != totals(%d)（扫描把老失败行重判成 mapped，桶仍算未映射）", att, agg.Totals.Requests)
+	}
+	if nodeSum != agg.Totals.Requests {
+		t.Errorf("【残留风险 R-A 复现】Σby_node(%d) != totals(%d)", nodeSum, agg.Totals.Requests)
+	}
+}
+
+// TestIP4RVDocsDrift 残留风险 R-B 的独立复现：免费模型文档表在吸收之后变化。
+// 公式 B 只依赖当前目录，桶在吸收时判定、扫描在查询时判定 ⇒ 两侧可能分叉。
+func TestIP4RVDocsDrift(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	dir := t.TempDir()
+	p := filepath.Join(dir, callLogFileName)
+	ip4rvWriteRaw(t, p, ip4rvRow(now.Add(-1*time.Hour), "wild-doc-x", "fail", 500, []string{"n1"}, false, false, ""))
+	t56Reset(t, p, "")
+
+	// 吸收时的文档表：不含 wild-doc-x ⇒ 公式 B 判未映射
+	freeModelDocsMu.Lock()
+	oldDocs, oldTime := freeModelDocsCache, freeModelDocsTime
+	freeModelDocsCache = map[string]bool{"some-other-free": true}
+	freeModelDocsTime = time.Now()
+	freeModelDocsMu.Unlock()
+	t.Cleanup(func() {
+		freeModelDocsMu.Lock()
+		freeModelDocsCache, freeModelDocsTime = oldDocs, oldTime
+		freeModelDocsMu.Unlock()
+	})
+	ensureBucketsUpToDate()
+	aggregateCacheReset()
+
+	before := aggregateResponseFor("today")
+	t.Logf("文档表未收录时: totals=%d unmapped=%d Σattempts=%d", before.Totals.Requests, before.Unmapped.Count, ip4rvAttempts(before.Attempts))
+	if before.Totals.Requests != 0 || before.Unmapped.Count != 1 {
+		t.Fatalf("夹具自检：应 totals=0 unmapped=1，实际 %d/%d", before.Totals.Requests, before.Unmapped.Count)
+	}
+
+	// 文档刷新后把该模型收进免费表（公式 B 变为 mapped），但桶不会重判这行
+	freeModelDocsMu.Lock()
+	freeModelDocsCache = map[string]bool{"some-other-free": true, "wild-doc-x": true}
+	freeModelDocsMu.Unlock()
+	aggregateCacheReset()
+	after := aggregateResponseFor("today")
+	att := ip4rvAttempts(after.Attempts)
+	t.Logf("文档表收录之后: totals=%d unmapped=%d Σattempts=%d", after.Totals.Requests, after.Unmapped.Count, att)
+	if att != after.Totals.Requests {
+		t.Errorf("【残留风险 R-B 复现】文档表事后变化：Σattempts(%d) != totals(%d)（桶保留吸收时判定，扫描用当前公式 B 重判）", att, after.Totals.Requests)
+	}
+}
+
+// TestIP4RVMemoAndPerf 记忆化后的冷/热扫描耗时与一致性（D1 修复声称 233k 行只算 ~18 次公式 B）。
+func TestIP4RVMemoAndPerf(t *testing.T) {
+	// -race 会把扫描放大 ~10 倍，绝对耗时阈值在竞争检测下不成立；性能探针改为显式开启。
+	if os.Getenv("IP4RV_PERF") != "1" {
+		t.Skip("性能探针：设 IP4RV_PERF=1 运行（-race 下耗时被放大，阈值不适用）")
+	}
+	prod := ip4ProdPath()
+	if _, err := os.Stat(prod); err != nil {
+		t.Skipf("生产快照不存在（%s）", prod)
+	}
+	ip4UseStore(t, prod, "")
+	for _, rng := range []string{"7d", "180d"} {
+		aggregateCacheReset()
+		t0 := time.Now()
+		cold := aggregateResponseFor(rng)
+		d := time.Since(t0)
+		t1 := time.Now()
+		hot := aggregateResponseFor(rng)
+		dHot := time.Since(t1)
+		if cold.Totals.Requests != hot.Totals.Requests {
+			t.Errorf("%s: 冷/热不一致 %d vs %d", rng, cold.Totals.Requests, hot.Totals.Requests)
+		}
+		t.Logf("%s: 冷=%v 热=%v requests=%d", rng, d, dHot, cold.Totals.Requests)
+		if d > 900*time.Millisecond {
+			t.Errorf("%s: 记忆化后冷扫描 %v 显著超出修复前量级（326~584ms）", rng, d)
+		}
+	}
+}
+
+// TestIP4RVHttpHandlerStillOK 修后 handler 契约未变。
+func TestIP4RVHttpHandlerStillOK(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	ip4UseStore(t, func() string {
+		dir := t.TempDir()
+		p := filepath.Join(dir, callLogFileName)
+		ip4rvWriteRaw(t, p, ip4rvRow(now.Add(-time.Hour), "m-h-free", "ok", 100, []string{"n1"}, true, false, ""))
+		return p
+	}(), "")
+	req := httptest.NewRequest(http.MethodGet, "/api/logs/aggregate?range=30d", nil)
+	rr := httptest.NewRecorder()
+	adminAggregateHandler(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var out aggregateResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if out.Range != "30d" || len(out.Timeseries) != 30 {
+		t.Errorf("range=%q buckets=%d want 30d/30", out.Range, len(out.Timeseries))
+	}
+}

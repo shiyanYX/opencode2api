@@ -1,0 +1,6 @@
+=== RUN   TestZZIP4VDefectL3TrendsEmpty
+--- PASS: TestZZIP4VDefectL3TrendsEmpty (0.00s)
+=== RUN   TestZZIP4VDefectPaginationDupTS
+--- PASS: TestZZIP4VDefectPaginationDupTS (0.00s)
+PASS
+ok  	github.com/shiyanYX/opencode2api	0.016s

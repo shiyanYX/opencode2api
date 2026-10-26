@@ -1,0 +1,79 @@
+2026/10/20 19:47:50 INFO probe_round_canary filter=available probed=216 failed=216 canary_probed=0 canary_failed=0 canary_rate=0 canary_used=false verdict=blip_unverified consecutive=0
+2026/10/20 19:47:50 WARN probe_round_global_blip filter=available probed=216 failed=216 consecutive=1 canary_probed=0 canary_failed=0 canary_rate=0 canary_used=false verified=false action=整轮失败不予采信（疑似本机出口/网络问题）
+2026/10/20 19:47:50 INFO probe_round_canary filter=available probed=216 failed=216 canary_probed=0 canary_failed=0 canary_rate=0 canary_used=false verdict=blip_unverified consecutive=1
+2026/10/20 19:47:50 WARN probe_round_global_blip filter=available probed=216 failed=216 consecutive=2 canary_probed=0 canary_failed=0 canary_rate=0 canary_used=false verified=false action=整轮失败不予采信（疑似本机出口/网络问题）
+2026/10/20 19:47:50 INFO probe_round_canary filter=available probed=216 failed=216 canary_probed=0 canary_failed=0 canary_rate=0 canary_used=false verdict=blip_unverified consecutive=2
+2026/10/20 19:47:50 WARN probe_round_global_blip filter=available probed=216 failed=216 consecutive=3 canary_probed=0 canary_failed=0 canary_rate=0 canary_used=false verified=false action=整轮失败不予采信（疑似本机出口/网络问题）
+2026/10/20 19:47:50 ERROR probe_round_global_blip_persistent consecutive=3 hint=连续多轮抖动：节点不会被判死，但本机网络/出口可能长期异常，需人工检查
+2026/10/20 19:47:50 INFO probe_round_canary filter=available probed=216 failed=216 canary_probed=0 canary_failed=0 canary_rate=0 canary_used=false verdict=escalate consecutive=3
+2026/10/20 19:47:50 WARN probe_round_global_blip_escalated filter=available probed=216 failed=216 consecutive=4 canary_probed=0 canary_failed=0 canary_rate=0 judged=10 skipped=206 cap=10 action=无对照组可用（上一轮没有任何成功节点）：本轮起限量判死，防整池一次性判死也防永不判死
+2026/10/20 19:47:50 INFO node health probe failed (streak, not dead yet) node=t30-12 fp=02d0c2a8e50d7d6be5b822207caad98b streak=1 threshold=2 error="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded"
+2026/10/20 19:47:50 INFO node health probe failed (streak, not dead yet) node=t30-155 fp=034385bb612f0131fd84e40a8e9449a2 streak=1 threshold=2 error="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded"
+2026/10/20 19:47:50 INFO node health probe failed (streak, not dead yet) node=t30-148 fp=04154141abe8d1626035e97ecf11d0d8 streak=1 threshold=2 error="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded"
+2026/10/20 19:47:50 INFO node health probe failed (streak, not dead yet) node=t30-180 fp=051db6ae76e9db5204aa173a81fa2e9e streak=1 threshold=2 error="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded"
+2026/10/20 19:47:50 INFO node health probe failed (streak, not dead yet) node=t30-92 fp=05aefd65761c64f8e24bd29e04dce8f8 streak=1 threshold=2 error="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded"
+2026/10/20 19:47:50 INFO node health probe failed (streak, not dead yet) node=t30-6 fp=05f22a2e941b64dee669bce8e9472766 streak=1 threshold=2 error="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded"
+2026/10/20 19:47:50 INFO node health probe failed (streak, not dead yet) node=t30-16 fp=078ab2978f06ea075085600338795743 streak=1 threshold=2 error="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded"
+2026/10/20 19:47:50 INFO node health probe failed (streak, not dead yet) node=t30-121 fp=07c9d9bbd96c49b52f6725064ab4302a streak=1 threshold=2 error="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded"
+2026/10/20 19:47:50 INFO node health probe failed (streak, not dead yet) node=t30-111 fp=0b391f2c4e067ef150bba55784aa8dbe streak=1 threshold=2 error="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded"
+2026/10/20 19:47:50 INFO node health probe failed (streak, not dead yet) node=t30-181 fp=0ca5589eabe05079612bfc75da07e4bc streak=1 threshold=2 error="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded"
+2026/10/20 19:47:50 INFO probe_round_canary filter=available probed=216 failed=216 canary_probed=0 canary_failed=0 canary_rate=0 canary_used=false verdict=escalate consecutive=4
+2026/10/20 19:47:50 WARN probe_round_global_blip_escalated filter=available probed=216 failed=216 consecutive=5 canary_probed=0 canary_failed=0 canary_rate=0 judged=10 skipped=206 cap=10 action=无对照组可用（上一轮没有任何成功节点）：本轮起限量判死，防整池一次性判死也防永不判死
+2026/10/20 19:47:50 INFO node marked dead by health check node=t30-12 fp=02d0c2a8e50d7d6be5b822207caad98b reason="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded" until=2026-10-20T20:02:50+08:00
+2026/10/20 19:47:50 INFO node marked dead by health check node=t30-155 fp=034385bb612f0131fd84e40a8e9449a2 reason="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded" until=2026-10-20T20:02:50+08:00
+2026/10/20 19:47:50 INFO node marked dead by health check node=t30-148 fp=04154141abe8d1626035e97ecf11d0d8 reason="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded" until=2026-10-20T20:02:50+08:00
+2026/10/20 19:47:50 INFO node marked dead by health check node=t30-180 fp=051db6ae76e9db5204aa173a81fa2e9e reason="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded" until=2026-10-20T20:02:50+08:00
+2026/10/20 19:47:50 INFO node marked dead by health check node=t30-92 fp=05aefd65761c64f8e24bd29e04dce8f8 reason="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded" until=2026-10-20T20:02:50+08:00
+2026/10/20 19:47:50 INFO node marked dead by health check node=t30-6 fp=05f22a2e941b64dee669bce8e9472766 reason="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded" until=2026-10-20T20:02:50+08:00
+2026/10/20 19:47:50 INFO node marked dead by health check node=t30-16 fp=078ab2978f06ea075085600338795743 reason="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded" until=2026-10-20T20:02:50+08:00
+2026/10/20 19:47:50 INFO node marked dead by health check node=t30-121 fp=07c9d9bbd96c49b52f6725064ab4302a reason="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded" until=2026-10-20T20:02:50+08:00
+2026/10/20 19:47:50 INFO node marked dead by health check node=t30-111 fp=0b391f2c4e067ef150bba55784aa8dbe reason="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded" until=2026-10-20T20:02:50+08:00
+2026/10/20 19:47:50 INFO node marked dead by health check node=t30-181 fp=0ca5589eabe05079612bfc75da07e4bc reason="probe: Get \"https://opencode.ai/zen/v1/models\": context deadline exceeded" until=2026-10-20T20:02:50+08:00
+PASS
+==================
+WARNING: DATA RACE
+Read at 0x00c0002aa788 by goroutine 1101:
+  github.com/shiyanYX/opencode2api.(*nodePool).saveState()
+      /tmp/t56/repo/proxy_node.go:1347 +0x1ea
+  github.com/shiyanYX/opencode2api.(*nodePool).markProbeDead.func1()
+      /tmp/t56/repo/proxy_node.go:1141 +0x84
+
+Previous write at 0x00c0002aa788 by goroutine 11:
+  github.com/shiyanYX/opencode2api.TestT30CriterionCPoolEmptyReachability()
+      /tmp/t56/repo/zz_t30_alert_safety_test.go:274 +0x754
+  testing.tRunner()
+      /home/jingyx/.local/opt/go/src/testing/testing.go:2036 +0x21c
+  testing.(*T).Run.gowrap1()
+      /home/jingyx/.local/opt/go/src/testing/testing.go:2101 +0x38
+
+Goroutine 1101 (running) created at:
+  github.com/shiyanYX/opencode2api.(*nodePool).markProbeDead()
+      /tmp/t56/repo/proxy_node.go:1141 +0x82a
+  github.com/shiyanYX/opencode2api.(*nodePool).checkFiltered()
+      /tmp/t56/repo/proxy_node.go:1087 +0x1d16
+  github.com/shiyanYX/opencode2api.(*nodePool).checkAvailable()
+      /tmp/t56/repo/proxy_node.go:930 +0x3cf
+  github.com/shiyanYX/opencode2api.TestT30CriterionCPoolEmptyReachability()
+      /tmp/t56/repo/zz_t30_alert_safety_test.go:257 +0x3af
+  testing.tRunner()
+      /home/jingyx/.local/opt/go/src/testing/testing.go:2036 +0x21c
+  testing.(*T).Run.gowrap1()
+      /home/jingyx/.local/opt/go/src/testing/testing.go:2101 +0x38
+
+Goroutine 11 (finished) created at:
+  testing.(*T).Run()
+      /home/jingyx/.local/opt/go/src/testing/testing.go:2101 +0xb12
+  testing.runTests.func1()
+      /home/jingyx/.local/opt/go/src/testing/testing.go:2585 +0x84
+  testing.tRunner()
+      /home/jingyx/.local/opt/go/src/testing/testing.go:2036 +0x21c
+  testing.runTests()
+      /home/jingyx/.local/opt/go/src/testing/testing.go:2583 +0x9e9
+  testing.(*M).Run()
+      /home/jingyx/.local/opt/go/src/testing/testing.go:2443 +0xf4b
+  main.main()
+      _testmain.go:724 +0x164
+==================
+Found 1 data race(s)
+FAIL	github.com/shiyanYX/opencode2api	1.083s
+FAIL

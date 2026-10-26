@@ -1,0 +1,114 @@
+dev-server 已在 http://127.0.0.1:9310
+PASS  页面标题为「日志」
+PASS  三个 tab 存在
+PASS  分析档默认可见
+PASS  分析档 4 个 Stat
+PASS  构建产物含 CL_ISSUE_TYPES 常量
+PASS  CL_ISSUE_TYPES 与后端 HasIssue 集合逐项一致
+PASS  CL_ISSUE_TYPES 只定义一次
+PASS  Stat 请求数 == fixture
+PASS  Stat 成功率 == fixture
+PASS  Stat 失败数 == fixture
+PASS  Stat 未映射 == fixture
+PASS  趋势图是内联 SVG
+PASS  趋势图柱子数 == timeseries 桶数
+PASS  趋势图零外部资源
+PASS  hover 柱子出现数值 tooltip
+PASS  tooltip 数值与柱子 data-tip 同源
+PASS  延迟卡含 p50 值 1.4 s
+PASS  延迟卡含 p95 值 9.8 s
+PASS  延迟卡含 p99 值 21.0 s
+PASS  延迟卡含 max 值 2.0 min
+PASS  缓存卡显示 20s TTL
+PASS  缓存卡显示 generated_at
+PASS  分布默认按模型
+PASS  模型分布行数 == by_model
+PASS  节点分布行数 == by_node
+PASS  错误分布行数 == by_error
+PASS  模型维度表行数 == by_model
+PASS  模型表含首个模型名
+PASS  节点维度表行数 == by_node
+PASS  错误分类表行数 == by_error
+PASS  异常卡「有问题记录」== 按 HasIssue 判据复算
+PASS  异常卡「异常事件数」== 按 CL_ISSUE_TYPES 复算
+PASS  异常卡按小时表行数 == 样本小时数
+PASS  异常卡注明与后端同判据
+PASS  range=7d Stat 请求数
+PASS  range=7d Stat 成功率
+PASS  range=7d Stat 失败数
+PASS  range=7d Stat 未映射
+PASS  range=7d 趋势桶数
+PASS  range=30d Stat 请求数
+PASS  range=30d Stat 成功率
+PASS  range=30d Stat 失败数
+PASS  range=30d Stat 未映射
+PASS  range=30d 趋势桶数
+PASS  range=180d Stat 请求数
+PASS  range=180d Stat 成功率
+PASS  range=180d Stat 失败数
+PASS  range=180d Stat 未映射
+PASS  range=180d 趋势桶数
+PASS  明细首屏 200 行（limit=200）
+PASS  明细首屏 req_id 无重复
+PASS  明细计数文案显示已加载 200
+PASS  加载更多 → 400 行
+PASS  两页合并 req_id 无重复
+PASS  再次加载 → 全部 450 行
+PASS  全部加载后计数含 450
+PASS  无更多时按钮禁用
+PASS  状态筛选 fail → 全部 fail
+PASS  模型筛选下拉有模型
+PASS  模型筛选生效
+PASS  节点筛选下拉有节点
+PASS  节点筛选生效
+PASS  错误类筛选下拉有类别
+PASS  错误类筛选生效
+PASS  关键字搜索生效
+PASS  行展开显示原始字段
+PASS  明细『有问题』行数 == HasIssue 复算
+PASS  明细异常事件总数 == CL_ISSUE_TYPES 复算
+PASS  徽标文案只用旧面板映射
+PASS  存在 status=ok 但 events 有问题的行（纯 events 判据路径）
+PASS  筛选「有问题」行数 == HasIssue 复算
+PASS  筛选「有问题」全部 data-issue=1
+PASS  筛选「仅异常切换」行数 == events 命中复算
+PASS  筛选「仅异常切换」每行 issue-events > 0
+PASS  筛选「仅异常切换」仍包含 status=ok 的行
+PASS  运行日志历史回填 500 条
+PASS  SSE 已建立（EventSource 实例）
+PASS  级别筛选 ERROR 生效
+PASS  全部级别取消 → 0 行
+PASS  级别恢复全选
+PASS  运行日志搜索生效
+PASS  暂停按钮变「继续」
+PASS  暂停状态徽章可见
+PASS  运行日志行展开 key=value
+PASS  导出触发 /api/logs/export
+PASS  清屏后 0 行
+PASS  离开日志页后 EventSource 已关闭
+PASS  离开日志页后 closed == opened
+PASS  离开日志页后每个 EventSource 都处于 CLOSED(2)
+PASS  离开后 SSE 不再重连（请求数不增长）
+PASS  连开三次日志页 mounts == 3
+PASS  三次 mount 只建 3 个 EventSource
+PASS  三次切走全部关闭
+PASS  三次 EventSource 全部 CLOSED(2)
+PASS  最终无遗留 EventSource
+PASS  零外部请求
+PASS  无 pageerror
+PASS  无 console.error
+PASS  1440px / an 档无横向溢出
+PASS  1440px / dt 档无横向溢出
+PASS  1440px / rt 档无横向溢出
+PASS  390px / an 档无横向溢出
+PASS  390px / dt 档无横向溢出
+PASS  390px / rt 档无横向溢出
+PASS  320px / an 档无横向溢出
+PASS  320px / dt 档无横向溢出
+PASS  320px / rt 档无横向溢出
+PASS  主题切换生效
+PASS  浅色主题无横向溢出
+
+===== 109/109 PASS =====
+ALL_PASS
+exit=0

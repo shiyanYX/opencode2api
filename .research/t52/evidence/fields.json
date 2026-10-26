@@ -1,0 +1,210 @@
+{
+ "fields": {
+  "req_id": {
+   "n": 233444,
+   "bytes": 5369212,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "ts": {
+   "n": 233444,
+   "bytes": 8401534,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "path": {
+   "n": 233444,
+   "bytes": 6741724,
+   "empty": 0,
+   "null": 0,
+   "vals": {
+    "\"/v1/chat/completions\"": 229925,
+    "\"/v1/messages\"": 3519
+   }
+  },
+  "model": {
+   "n": 233444,
+   "bytes": 5751918,
+   "empty": 0,
+   "null": 0,
+   "vals": {
+    "\"mimo-v2.5-free\"": 182460,
+    "\"space-bunny-free\"": 37993,
+    "\"deepseek-v4-flash-free\"": 4566,
+    "\"mimo-v2.6-flash-free\"": 3675,
+    "\"deepseek-v4.1-flash-free\"": 1502,
+    "\"x-preview-f-free\"": 1419,
+    "\"space-bunny\"": 728,
+    "\"mimo-v2.5\"": 624,
+    "\"step-5-preview-free\"": 346,
+    "\"nemotron-3-ultra-free\"": 34,
+    "\"x-preview-f\"": 30,
+    "\"glm-5.3-flash-free\"": 14
+   }
+  },
+  "stream": {
+   "n": 33075,
+   "bytes": 429975,
+   "empty": 0,
+   "null": 0,
+   "vals": {
+    "true": 33075
+   }
+  },
+  "route_mode": {
+   "n": 233444,
+   "bytes": 4902306,
+   "empty": 0,
+   "null": 0,
+   "vals": {
+    "\"public\"": 233436,
+    "\"auto\"": 7,
+    "\"go\"": 1
+   }
+  },
+  "nodes": {
+   "n": 222273,
+   "bytes": 10460237,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "events": {
+   "n": 207251,
+   "bytes": 45688475,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "status": {
+   "n": 233444,
+   "bytes": 3084808,
+   "empty": 0,
+   "null": 0,
+   "vals": {
+    "\"ok\"": 208426,
+    "\"fail\"": 25018
+   }
+  },
+  "duration_ms": {
+   "n": 230160,
+   "bytes": 4272431,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "err_msg": {
+   "n": 25018,
+   "bytes": 725854,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "prompt_tokens": {
+   "n": 207629,
+   "bytes": 4300453,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "completion_tokens": {
+   "n": 207628,
+   "bytes": 4779137,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "cache_read_tokens": {
+   "n": 200295,
+   "bytes": 4888039,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "node_names": {
+   "n": 211545,
+   "bytes": 9264992,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "ttft_ms": {
+   "n": 40201,
+   "bytes": 568482,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "output_speed": {
+   "n": 40201,
+   "bytes": 1302135,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "dial_ms": {
+   "n": 997,
+   "bytes": 13527,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  },
+  "final_status": {
+   "n": 4210,
+   "bytes": 75780,
+   "empty": 0,
+   "null": 0,
+   "vals": {
+    "200": 3300,
+    "400": 682,
+    "502": 193,
+    "410": 20,
+    "403": 10,
+    "500": 3,
+    "404": 1,
+    "401": 1
+   }
+  },
+  "unmapped": {
+   "n": 81,
+   "bytes": 1296,
+   "empty": 0,
+   "null": 0,
+   "vals": {}
+  }
+ },
+ "nested_events": {
+  "type": {
+   "n": 274204,
+   "bytes": 5366553,
+   "empty": 0,
+   "null": 0
+  },
+  "node": {
+   "n": 246086,
+   "bytes": 10089526,
+   "empty": 0,
+   "null": 0
+  },
+  "detail": {
+   "n": 90742,
+   "bytes": 7693023,
+   "empty": 0,
+   "null": 0
+  },
+  "at": {
+   "n": 274204,
+   "bytes": 9868429,
+   "empty": 0,
+   "null": 0
+  },
+  "node_name": {
+   "n": 233750,
+   "bytes": 8931040,
+   "empty": 0,
+   "null": 0
+  }
+ }
+}

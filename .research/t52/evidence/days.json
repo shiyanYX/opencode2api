@@ -1,0 +1,500 @@
+{
+ "days": {
+  "2026-08-13": {
+   "lines": 102,
+   "bytes": 43648,
+   "ok": 97,
+   "fail": 5,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-14": {
+   "lines": 389,
+   "bytes": 176357,
+   "ok": 371,
+   "fail": 18,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-15": {
+   "lines": 732,
+   "bytes": 317096,
+   "ok": 716,
+   "fail": 16,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-16": {
+   "lines": 1501,
+   "bytes": 647375,
+   "ok": 1480,
+   "fail": 21,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-17": {
+   "lines": 1060,
+   "bytes": 448640,
+   "ok": 1058,
+   "fail": 2,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-18": {
+   "lines": 222,
+   "bytes": 105228,
+   "ok": 217,
+   "fail": 5,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-19": {
+   "lines": 304,
+   "bytes": 141428,
+   "ok": 292,
+   "fail": 12,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-20": {
+   "lines": 272,
+   "bytes": 121626,
+   "ok": 267,
+   "fail": 5,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-21": {
+   "lines": 697,
+   "bytes": 315945,
+   "ok": 636,
+   "fail": 61,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-22": {
+   "lines": 168,
+   "bytes": 72057,
+   "ok": 159,
+   "fail": 9,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-23": {
+   "lines": 615,
+   "bytes": 267251,
+   "ok": 596,
+   "fail": 19,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-24": {
+   "lines": 54,
+   "bytes": 22129,
+   "ok": 54,
+   "fail": 0,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-25": {
+   "lines": 163,
+   "bytes": 71806,
+   "ok": 149,
+   "fail": 14,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-26": {
+   "lines": 288,
+   "bytes": 171319,
+   "ok": 156,
+   "fail": 132,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-27": {
+   "lines": 208,
+   "bytes": 92015,
+   "ok": 178,
+   "fail": 30,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-29": {
+   "lines": 27,
+   "bytes": 12409,
+   "ok": 26,
+   "fail": 1,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-30": {
+   "lines": 193,
+   "bytes": 80767,
+   "ok": 191,
+   "fail": 2,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-08-31": {
+   "lines": 133,
+   "bytes": 55679,
+   "ok": 132,
+   "fail": 1,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-03": {
+   "lines": 559,
+   "bytes": 239071,
+   "ok": 544,
+   "fail": 15,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-04": {
+   "lines": 172,
+   "bytes": 75680,
+   "ok": 166,
+   "fail": 6,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-09": {
+   "lines": 140,
+   "bytes": 58355,
+   "ok": 139,
+   "fail": 1,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-10": {
+   "lines": 612,
+   "bytes": 271192,
+   "ok": 592,
+   "fail": 20,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-11": {
+   "lines": 280,
+   "bytes": 123172,
+   "ok": 273,
+   "fail": 7,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-12": {
+   "lines": 763,
+   "bytes": 332196,
+   "ok": 747,
+   "fail": 16,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-13": {
+   "lines": 254,
+   "bytes": 112730,
+   "ok": 245,
+   "fail": 9,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-14": {
+   "lines": 295,
+   "bytes": 123509,
+   "ok": 293,
+   "fail": 2,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-15": {
+   "lines": 240,
+   "bytes": 104523,
+   "ok": 235,
+   "fail": 5,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-16": {
+   "lines": 1895,
+   "bytes": 1247471,
+   "ok": 1698,
+   "fail": 197,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-17": {
+   "lines": 1680,
+   "bytes": 1341408,
+   "ok": 1363,
+   "fail": 317,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-18": {
+   "lines": 16568,
+   "bytes": 9174349,
+   "ok": 14744,
+   "fail": 1824,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-19": {
+   "lines": 15188,
+   "bytes": 9699040,
+   "ok": 11013,
+   "fail": 4175,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-20": {
+   "lines": 12073,
+   "bytes": 7098001,
+   "ok": 9769,
+   "fail": 2304,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-21": {
+   "lines": 16686,
+   "bytes": 9262745,
+   "ok": 13385,
+   "fail": 3301,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-22": {
+   "lines": 13065,
+   "bytes": 6749279,
+   "ok": 12541,
+   "fail": 524,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-23": {
+   "lines": 8297,
+   "bytes": 4234649,
+   "ok": 8131,
+   "fail": 166,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-24": {
+   "lines": 7215,
+   "bytes": 3839430,
+   "ok": 7003,
+   "fail": 212,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-25": {
+   "lines": 9772,
+   "bytes": 5239652,
+   "ok": 9564,
+   "fail": 208,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-26": {
+   "lines": 8586,
+   "bytes": 4354743,
+   "ok": 8525,
+   "fail": 61,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-27": {
+   "lines": 14996,
+   "bytes": 7702870,
+   "ok": 14783,
+   "fail": 213,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-28": {
+   "lines": 14288,
+   "bytes": 7254171,
+   "ok": 14127,
+   "fail": 161,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-29": {
+   "lines": 16871,
+   "bytes": 8668536,
+   "ok": 16609,
+   "fail": 262,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-09-30": {
+   "lines": 17232,
+   "bytes": 9208441,
+   "ok": 16650,
+   "fail": 582,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-01": {
+   "lines": 516,
+   "bytes": 270201,
+   "ok": 516,
+   "fail": 0,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-02": {
+   "lines": 281,
+   "bytes": 146496,
+   "ok": 281,
+   "fail": 0,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-03": {
+   "lines": 2647,
+   "bytes": 1404943,
+   "ok": 2608,
+   "fail": 39,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-04": {
+   "lines": 3198,
+   "bytes": 1661328,
+   "ok": 3147,
+   "fail": 51,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-05": {
+   "lines": 3391,
+   "bytes": 1681687,
+   "ok": 3391,
+   "fail": 0,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-06": {
+   "lines": 1532,
+   "bytes": 806649,
+   "ok": 1470,
+   "fail": 62,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-07": {
+   "lines": 2003,
+   "bytes": 919371,
+   "ok": 675,
+   "fail": 1328,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-08": {
+   "lines": 1691,
+   "bytes": 883277,
+   "ok": 1147,
+   "fail": 544,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-09": {
+   "lines": 466,
+   "bytes": 197648,
+   "ok": 448,
+   "fail": 18,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-10": {
+   "lines": 1849,
+   "bytes": 738183,
+   "ok": 1828,
+   "fail": 21,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-11": {
+   "lines": 615,
+   "bytes": 232507,
+   "ok": 615,
+   "fail": 0,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-12": {
+   "lines": 1164,
+   "bytes": 523110,
+   "ok": 1115,
+   "fail": 49,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-13": {
+   "lines": 368,
+   "bytes": 147484,
+   "ok": 306,
+   "fail": 62,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-14": {
+   "lines": 1304,
+   "bytes": 588925,
+   "ok": 1169,
+   "fail": 135,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-15": {
+   "lines": 4400,
+   "bytes": 2296159,
+   "ok": 4022,
+   "fail": 378,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-16": {
+   "lines": 6531,
+   "bytes": 2703582,
+   "ok": 6410,
+   "fail": 121,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-17": {
+   "lines": 4687,
+   "bytes": 2719400,
+   "ok": 2930,
+   "fail": 1757,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-18": {
+   "lines": 7636,
+   "bytes": 4715130,
+   "ok": 3103,
+   "fail": 4533,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-19": {
+   "lines": 3516,
+   "bytes": 1837079,
+   "ok": 2838,
+   "fail": 678,
+   "events_bytes": 0,
+   "models": {}
+  },
+  "2026-10-20": {
+   "lines": 794,
+   "bytes": 369284,
+   "ok": 493,
+   "fail": 301,
+   "events_bytes": 0,
+   "models": {}
+  }
+ }
+}

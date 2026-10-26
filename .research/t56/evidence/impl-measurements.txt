@@ -1,0 +1,37 @@
+== task-56 阶段2 实现实测（2026-10-20，分支 test，工作区 /home/jingyx/project/opencode2api-test）==
+
+[环境]
+Go:      go1.26.5
+宿主:     linux/amd64
+夹具:    /tmp/t56/day（生产快照按 time.Local 切分的 61 个日文件，124,520,431 B / 233,444 行）
+二进制:  /tmp/t56/bin/oc2api-daily（当前工作区代码构建）
+
+[1] 四窗口不变性（T8 硬门禁，go test -run TestT56FourWindowInvariance）
+  L1 单文件          124,520,431 B  冷启动 574.6 ms  absorbed=233,444 桶=1,089
+  L2 legacy+最后一天              冷启动 485.9 ms  absorbed=233,444
+  L3 纯日文件(61 个)              冷启动 580.7 ms  absorbed=233,444 桶=1,089
+  today/7d/30d/180d 四窗口 + trends + unmapped_requests：三布局 JSON 逐字节相等
+  守恒: ΣN=233,444 == absorbed 233,444 − unabsorbed 0
+  baseline（阶段1，旧单文件 HTTP 首查）: 668 ms
+
+[2] HTTP 冷启动（daily 模式二进制，首查 ?range=180d）
+  L2（legacy 124MB + 当日文件）: cold 0.68 s / warm 0.00 s
+  L3（纯 61 个日文件）:          cold 0.46 s / warm 0.00 s
+  两布局响应 sha256 相同: d2de8c235a9a8bc6822a3bfee2ae04afbe3eff25f4fa1ae5f73be60e293af611
+
+[3] 磁盘投影（.research/t56/evidence/disk_projection.txt 全文）
+  现状 124.52 MB / 233,444 行；最近 14 天 1.348 MB/天
+  新格式最近 14 天 1.129 MB/天（−16.2%）
+  最近 7 天 gzip: 原格式 9.61× / 新格式 8.28×
+  90  天保留投影: 124.5(legacy) + 7.9(热) + 11.3(gz) = 143.7 MB（封顶）
+  180 天保留投影: 124.5(legacy) + 7.9(热) + 23.6(gz) = 156.0 MB（封顶）
+  对照：现状无上限，1.348 MB/天 ⇒ 一年约 492 MB（不含 legacy）
+
+[4] 变异测试（.research/t56/evidence/mutation_results.txt，12/12 被抓）
+  见报告 §6。
+
+[5] 回归
+  go vet ./                       : PASS
+  gofmt -l（我改的文件）            : 无输出
+  go test -count=1 ./             : ok 191.952s
+  go test -race -count=1 -timeout 45m ./ : 见报告（耗时约 20+ 分钟）

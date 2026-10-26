@@ -1,0 +1,27 @@
+PASS  真后端登录成功
+PASS  真二进制嵌入的是修复后 admin.html
+PASS  首屏明细请求带 status 过滤参数
+PASS  首屏加载 200 行
+PASS  首屏 next_cursor 非空（加载更多可用）
+PASS  首屏 req_id 无重复
+PASS  第一次加载更多 200→400
+PASS  第二页新增与第一页零交集
+PASS  第二页严格新增 200 条
+PASS  第二次加载更多 400→600
+PASS  第三页新增与前两页零交集
+PASS  UI 三次分页并集无重复
+PASS  仍有更多（23 万条历史可达，按钮仍可用）
+PASS  计数文案随加载增长
+PASS  后端第 1 次查询走文件分页且返回游标
+PASS  后端第 2 次查询走文件分页且返回游标
+PASS  后端第 3 次查询走文件分页且返回游标
+PASS  UI 三页并集 == 后端同条件三次查询并集
+PASS  后端三页并集本身无重复
+PASS  失败档请求带 status=fail（服务端筛选，未绕过）
+PASS  失败档展示全部 fail
+PASS  无 pageerror
+PASS  无 console.error
+
+===== 23/23 PASS =====
+ALL_PASS
+exit=0

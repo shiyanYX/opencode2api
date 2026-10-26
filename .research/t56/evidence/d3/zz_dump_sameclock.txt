@@ -1,0 +1,24 @@
+## ZZ_MODE=dump 同钟对拍（新实现 L1/L2/L3 + HEAD 旧实现 L1，背靠背生成）
+990b3117490950ce576e979679e2cc95  /tmp/t56/zz4/prod_L1_new.txt
+990b3117490950ce576e979679e2cc95  /tmp/t56/zz4/prod_L1_old.txt
+990b3117490950ce576e979679e2cc95  /tmp/t56/zz4/prod_L2_new.txt
+659545628ac8dfbb53f43f20b2fa2432  /tmp/t56/zz4/prod_L2_old.txt
+990b3117490950ce576e979679e2cc95  /tmp/t56/zz4/prod_L3_new.txt
+620272586e1b1a54f61cd2722e8a6d3f  /tmp/t56/zz4/prod_L3_old.txt
+c71d2246fe648c7fecb513af8a41a3e6  /tmp/t56/zz4/syn_L1_new.txt
+c71d2246fe648c7fecb513af8a41a3e6  /tmp/t56/zz4/syn_L1_old.txt
+c71d2246fe648c7fecb513af8a41a3e6  /tmp/t56/zz4/syn_L2_new.txt
+8948570ed9c4172303fa5cc69648fb1e  /tmp/t56/zz4/syn_L2_old.txt
+c71d2246fe648c7fecb513af8a41a3e6  /tmp/t56/zz4/syn_L3_new.txt
+620272586e1b1a54f61cd2722e8a6d3f  /tmp/t56/zz4/syn_L3_old.txt
+
+== prod ==
+new L1==L2
+new L1==L3
+old L1 == new L1
+== syn ==
+new L1==L2
+new L1==L3
+old L1 == new L1
+
+旧实现 L2/L3 与 L1 不等 = 修复前缺陷形态（D1：L3 trends 空）

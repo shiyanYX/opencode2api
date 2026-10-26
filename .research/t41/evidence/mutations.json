@@ -1,0 +1,246 @@
+{
+ "baseline": {
+  "exit": 0,
+  "fail": [],
+  "pass": [],
+  "skip": [],
+  "timed_out": false,
+  "seconds": 9.4,
+  "tail": "ok  \tgithub.com/shiyanYX/opencode2api\t5.166s\n"
+ },
+ "mutations": [
+  {
+   "id": "M1",
+   "title": "everServed 短路恒假（判定与回填快照两处都忽略历史成功）",
+   "expect": "red",
+   "patched": {
+    "calllog.go": "688ab474e395"
+   },
+   "applied": true,
+   "exit": 1,
+   "timed_out": false,
+   "seconds": 19.9,
+   "fail": [
+    "TestT39LiveSuccessFlipsRecordAndIsMonotone"
+   ],
+   "new_fail": [
+    "TestT39LiveSuccessFlipsRecordAndIsMonotone"
+   ],
+   "tail": "",
+   "red": true
+  },
+  {
+   "id": "M2",
+   "title": "everServed 恒真（所有非空模型名直接算 mapped）",
+   "expect": "red",
+   "patched": {
+    "main.go": "1e220fdecf54"
+   },
+   "applied": true,
+   "exit": 1,
+   "timed_out": false,
+   "seconds": 16.9,
+   "fail": [
+    "TestT39DegradesSafelyWhenLogUnreadable",
+    "TestT39LiveSuccessFlipsRecordAndIsMonotone",
+    "TestUnmappedPredicateUnknownNames"
+   ],
+   "new_fail": [
+    "TestT39DegradesSafelyWhenLogUnreadable",
+    "TestT39LiveSuccessFlipsRecordAndIsMonotone",
+    "TestUnmappedPredicateUnknownNames"
+   ],
+   "tail": "",
+   "red": true
+  },
+  {
+   "id": "M3",
+   "title": "只写不读历史（回填时把 everServed 置空，老行只按公式 B 判）",
+   "expect": "red",
+   "patched": {
+    "calllog.go": "c33ddab7c6b3"
+   },
+   "applied": true,
+   "exit": 1,
+   "timed_out": false,
+   "seconds": 12.8,
+   "fail": [
+    "TestT39EverServedBareNameKeepsHistoryInOverview",
+    "TestT39OrderIndependenceAcrossRestart",
+    "TestT39RealLogOverviewCriterion"
+   ],
+   "new_fail": [
+    "TestT39EverServedBareNameKeepsHistoryInOverview",
+    "TestT39OrderIndependenceAcrossRestart",
+    "TestT39RealLogOverviewCriterion"
+   ],
+   "tail": "",
+   "red": true
+  },
+  {
+   "id": "M4",
+   "title": "删掉 `-free` 后缀分支（公式 B 只剩文档表一支）",
+   "expect": "red",
+   "patched": {
+    "main.go": "1c95c24d019e"
+   },
+   "applied": true,
+   "exit": 0,
+   "timed_out": false,
+   "seconds": 10.5,
+   "fail": [],
+   "new_fail": [],
+   "tail": "ok  \tgithub.com/shiyanYX/opencode2api\t4.277s\n",
+   "red": true,
+   "full_suite": {
+    "exit": 1,
+    "fail": [
+     "TestT23DecisionMatrix",
+     "TestT23RealLogBackfillEqualsDirect",
+     "TestT23RealLogHardGate",
+     "TestT23ReverseRisk",
+     "TestT30CriterionCPoolEmptyReachability",
+     "TestT30GateNowJudgesFixedSubsetDead"
+    ],
+    "new_fail": [
+     "TestT23DecisionMatrix",
+     "TestT23RealLogBackfillEqualsDirect",
+     "TestT23RealLogHardGate",
+     "TestT23ReverseRisk",
+     "TestT30CriterionCPoolEmptyReachability",
+     "TestT30GateNowJudgesFixedSubsetDead"
+    ],
+    "seconds": 152.8,
+    "new_fail_excluding_known": [
+     "TestT23DecisionMatrix",
+     "TestT23RealLogBackfillEqualsDirect",
+     "TestT23RealLogHardGate",
+     "TestT23ReverseRisk"
+    ]
+   }
+  },
+  {
+   "id": "M5",
+   "title": "F1 过滤恒真（去掉 OK 判据 → 等于不过滤，零成功模型照样出现在两个出口）",
+   "expect": "red",
+   "patched": {
+    "calllog.go": "5e938cf9d51f"
+   },
+   "applied": true,
+   "exit": 1,
+   "timed_out": false,
+   "seconds": 18.7,
+   "fail": [
+    "TestAdminStatsHandlerWithRangeReturnsWindowedStats",
+    "TestT39OnlyModelsAndTrendsDifferFromUnfiltered",
+    "TestT39OverviewEmptyAndAllFailWindowsSafe",
+    "TestT39OverviewHidesZeroSuccessModels",
+    "TestT39RealLogOverviewCriterion",
+    "TestT39TrendsEndpointSameCriterion"
+   ],
+   "new_fail": [
+    "TestAdminStatsHandlerWithRangeReturnsWindowedStats",
+    "TestT39OnlyModelsAndTrendsDifferFromUnfiltered",
+    "TestT39OverviewEmptyAndAllFailWindowsSafe",
+    "TestT39OverviewHidesZeroSuccessModels",
+    "TestT39RealLogOverviewCriterion",
+    "TestT39TrendsEndpointSameCriterion"
+   ],
+   "tail": "",
+   "red": true
+  },
+  {
+   "id": "M6",
+   "title": "F1 过滤恒假（两个出口都传空 keep → 所有模型被删光）",
+   "expect": "red",
+   "patched": {
+    "main.go": "e950e05eef89"
+   },
+   "applied": true,
+   "exit": 1,
+   "timed_out": false,
+   "seconds": 13.5,
+   "fail": [
+    "TestAdminStatsHandlerWithRangeReturnsWindowedStats",
+    "TestT39OnlyModelsAndTrendsDifferFromUnfiltered",
+    "TestT39OverviewFilterKeepsTotalsAndRateIntact",
+    "TestT39OverviewHidesZeroSuccessModels",
+    "TestT39OverviewKeepsModelWithSingleSuccessAmongManyFails",
+    "TestT39RealLogOverviewCriterion",
+    "TestT39TrendsEndpointSameCriterion",
+    "TestTodayRangeResponseModelsAndTrendsAgree"
+   ],
+   "new_fail": [
+    "TestAdminStatsHandlerWithRangeReturnsWindowedStats",
+    "TestT39OnlyModelsAndTrendsDifferFromUnfiltered",
+    "TestT39OverviewFilterKeepsTotalsAndRateIntact",
+    "TestT39OverviewHidesZeroSuccessModels",
+    "TestT39OverviewKeepsModelWithSingleSuccessAmongManyFails",
+    "TestT39RealLogOverviewCriterion",
+    "TestT39TrendsEndpointSameCriterion",
+    "TestTodayRangeResponseModelsAndTrendsAgree"
+   ],
+   "tail": "",
+   "red": true
+  },
+  {
+   "id": "M7",
+   "title": "F1 半实现 A：只过滤 models，漏掉 /api/stats 的 trends_by_model",
+   "expect": "red",
+   "patched": {
+    "main.go": "b97946ca9ca8"
+   },
+   "applied": true,
+   "exit": 1,
+   "timed_out": false,
+   "seconds": 10.3,
+   "fail": [
+    "TestAdminStatsHandlerWithRangeReturnsWindowedStats",
+    "TestT39OnlyModelsAndTrendsDifferFromUnfiltered",
+    "TestT39OverviewHidesZeroSuccessModels",
+    "TestT39RealLogOverviewCriterion"
+   ],
+   "new_fail": [
+    "TestAdminStatsHandlerWithRangeReturnsWindowedStats",
+    "TestT39OnlyModelsAndTrendsDifferFromUnfiltered",
+    "TestT39OverviewHidesZeroSuccessModels",
+    "TestT39RealLogOverviewCriterion"
+   ],
+   "tail": "",
+   "red": true
+  },
+  {
+   "id": "M8",
+   "title": "F1 半实现 B（Q1）：/api/stats 已过滤，但 /api/stats/trends?group=model 出口未过滤",
+   "expect": "red",
+   "patched": {
+    "main.go": "a10b2774eb2b"
+   },
+   "applied": true,
+   "exit": 1,
+   "timed_out": false,
+   "seconds": 14.5,
+   "fail": [
+    "TestT39RealLogOverviewCriterion",
+    "TestT39TrendsEndpointSameCriterion"
+   ],
+   "new_fail": [
+    "TestT39RealLogOverviewCriterion",
+    "TestT39TrendsEndpointSameCriterion"
+   ],
+   "tail": "",
+   "red": true
+  }
+ ],
+ "problems": [],
+ "run_filter": "T39|Unmapped|StatsRange|ModelStats|Trends|TodayRange|Window",
+ "skip": "TestT29PlainIsByteIdenticalToEmbeddedPanel（因并发面板任务，不在本次验收范围）",
+ "expected_baseline_fails": [
+  "TestT30GateNowJudgesFixedSubsetDead",
+  "TestT30CriterionCPoolEmptyReachability"
+ ],
+ "expected_baseline_fails_excluded": [
+  "TestT30CriterionCPoolEmptyReachability",
+  "TestT30GateNowJudgesFixedSubsetDead"
+ ]
+}

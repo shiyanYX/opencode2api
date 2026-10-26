@@ -1,0 +1,60 @@
+{
+ "nofilter": {
+  "stats_norange": {
+   "status": 200,
+   "sha256": "78234cdfbee973c8d1d0062885528cc5bedfe13283e7d40ab3c222e05d3b6f1d",
+   "bytes": 32,
+   "models": null
+  },
+  "heatmap_180d": {
+   "status": 200,
+   "sha256": "f7bdd2757ff811c7c94f1c3e4d8fe2eff793f3561642ddcc55a932c486e62d7f",
+   "bytes": 26260,
+   "models": null
+  },
+  "heatmap_7d": {
+   "status": 200,
+   "sha256": "31d8dc43c452ea811c2b98b74fb17c0fe8c88d45713497675dd81ea004af73e4",
+   "bytes": 1153,
+   "models": null
+  },
+  "model_trends_180d": {
+   "status": 200,
+   "sha256": "13d705bd697029f52a312c5fb730f1b5b19b67e409e37550a357ea9c9e488d93",
+   "bytes": 665010,
+   "models": 22
+  }
+ },
+ "new": {
+  "stats_norange": {
+   "status": 200,
+   "sha256": "78234cdfbee973c8d1d0062885528cc5bedfe13283e7d40ab3c222e05d3b6f1d",
+   "bytes": 32,
+   "models": null
+  },
+  "heatmap_180d": {
+   "status": 200,
+   "sha256": "f7bdd2757ff811c7c94f1c3e4d8fe2eff793f3561642ddcc55a932c486e62d7f",
+   "bytes": 26260,
+   "models": null
+  },
+  "heatmap_7d": {
+   "status": 200,
+   "sha256": "31d8dc43c452ea811c2b98b74fb17c0fe8c88d45713497675dd81ea004af73e4",
+   "bytes": 1153,
+   "models": null
+  },
+  "model_trends_180d": {
+   "status": 200,
+   "sha256": "be95ee2c39b331ce8bd0ed552a7484ce5cffe84ab980abcc61480a78dba45cdb",
+   "bytes": 483030,
+   "models": 16
+  }
+ },
+ "same": {
+  "stats_norange": true,
+  "heatmap_180d": true,
+  "heatmap_7d": true,
+  "model_trends_180d": false
+ }
+}

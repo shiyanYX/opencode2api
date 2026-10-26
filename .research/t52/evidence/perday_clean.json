@@ -1,0 +1,556 @@
+{
+ "2026-08-13": {
+  "lines": 102,
+  "bytes": 43648,
+  "ev": 12647,
+  "issue_lines": 5,
+  "issue_ev": 2365,
+  "clean_lines": 97,
+  "clean_ev": 10282
+ },
+ "2026-08-14": {
+  "lines": 389,
+  "bytes": 176357,
+  "ev": 59349,
+  "clean_lines": 332,
+  "clean_ev": 35192,
+  "issue_lines": 57,
+  "issue_ev": 24157
+ },
+ "2026-08-15": {
+  "lines": 732,
+  "bytes": 317096,
+  "ev": 89132,
+  "issue_lines": 21,
+  "issue_ev": 10211,
+  "clean_lines": 711,
+  "clean_ev": 78921
+ },
+ "2026-08-16": {
+  "lines": 1501,
+  "bytes": 647375,
+  "ev": 180757,
+  "clean_lines": 1472,
+  "clean_ev": 163392,
+  "issue_lines": 29,
+  "issue_ev": 17365
+ },
+ "2026-08-17": {
+  "lines": 1060,
+  "bytes": 448640,
+  "ev": 120342,
+  "clean_lines": 1049,
+  "clean_ev": 116439,
+  "issue_lines": 11,
+  "issue_ev": 3903
+ },
+ "2026-08-18": {
+  "lines": 222,
+  "bytes": 105228,
+  "ev": 37615,
+  "clean_lines": 195,
+  "clean_ev": 21645,
+  "issue_lines": 27,
+  "issue_ev": 15970
+ },
+ "2026-08-19": {
+  "lines": 304,
+  "bytes": 141428,
+  "ev": 50829,
+  "issue_lines": 43,
+  "issue_ev": 21858,
+  "clean_lines": 261,
+  "clean_ev": 28971
+ },
+ "2026-08-20": {
+  "lines": 272,
+  "bytes": 121626,
+  "ev": 39764,
+  "clean_lines": 250,
+  "clean_ev": 27750,
+  "issue_lines": 22,
+  "issue_ev": 12014
+ },
+ "2026-08-21": {
+  "lines": 697,
+  "bytes": 315945,
+  "ev": 106381,
+  "clean_lines": 603,
+  "clean_ev": 66933,
+  "issue_lines": 94,
+  "issue_ev": 39448
+ },
+ "2026-08-22": {
+  "lines": 168,
+  "bytes": 72057,
+  "ev": 23286,
+  "clean_lines": 140,
+  "clean_ev": 15540,
+  "issue_lines": 28,
+  "issue_ev": 7746
+ },
+ "2026-08-23": {
+  "lines": 615,
+  "bytes": 267251,
+  "ev": 85164,
+  "issue_lines": 46,
+  "issue_ev": 22005,
+  "clean_lines": 569,
+  "clean_ev": 63159
+ },
+ "2026-08-24": {
+  "lines": 54,
+  "bytes": 22129,
+  "ev": 5994,
+  "clean_lines": 54,
+  "clean_ev": 5994
+ },
+ "2026-08-25": {
+  "lines": 163,
+  "bytes": 71806,
+  "ev": 23865,
+  "clean_lines": 147,
+  "clean_ev": 16275,
+  "issue_lines": 16,
+  "issue_ev": 7590
+ },
+ "2026-08-26": {
+  "lines": 288,
+  "bytes": 171319,
+  "ev": 90667,
+  "issue_lines": 198,
+  "issue_ev": 80677,
+  "clean_lines": 90,
+  "clean_ev": 9990
+ },
+ "2026-08-27": {
+  "lines": 208,
+  "bytes": 92015,
+  "ev": 30736,
+  "issue_lines": 30,
+  "issue_ev": 10877,
+  "clean_lines": 178,
+  "clean_ev": 19859
+ },
+ "2026-08-29": {
+  "lines": 27,
+  "bytes": 12409,
+  "ev": 4187,
+  "issue_lines": 4,
+  "issue_ev": 1634,
+  "clean_lines": 23,
+  "clean_ev": 2553
+ },
+ "2026-08-30": {
+  "lines": 193,
+  "bytes": 80767,
+  "ev": 21673,
+  "clean_lines": 190,
+  "clean_ev": 21090,
+  "issue_lines": 3,
+  "issue_ev": 583
+ },
+ "2026-08-31": {
+  "lines": 133,
+  "bytes": 55679,
+  "ev": 15037,
+  "clean_lines": 132,
+  "clean_ev": 14652,
+  "issue_lines": 1,
+  "issue_ev": 385
+ },
+ "2026-09-03": {
+  "lines": 559,
+  "bytes": 239071,
+  "ev": 69184,
+  "clean_lines": 526,
+  "clean_ev": 58386,
+  "issue_lines": 33,
+  "issue_ev": 10798
+ },
+ "2026-09-04": {
+  "lines": 172,
+  "bytes": 75680,
+  "ev": 23602,
+  "clean_lines": 159,
+  "clean_ev": 17649,
+  "issue_lines": 13,
+  "issue_ev": 5953
+ },
+ "2026-09-09": {
+  "lines": 140,
+  "bytes": 58355,
+  "ev": 15744,
+  "clean_lines": 139,
+  "clean_ev": 15429,
+  "issue_lines": 1,
+  "issue_ev": 315
+ },
+ "2026-09-10": {
+  "lines": 612,
+  "bytes": 271192,
+  "ev": 85096,
+  "clean_lines": 583,
+  "clean_ev": 64713,
+  "issue_lines": 29,
+  "issue_ev": 20383
+ },
+ "2026-09-11": {
+  "lines": 280,
+  "bytes": 123172,
+  "ev": 38049,
+  "issue_lines": 12,
+  "issue_ev": 8301,
+  "clean_lines": 268,
+  "clean_ev": 29748
+ },
+ "2026-09-12": {
+  "lines": 763,
+  "bytes": 332196,
+  "ev": 99263,
+  "clean_lines": 731,
+  "clean_ev": 81141,
+  "issue_lines": 32,
+  "issue_ev": 18122
+ },
+ "2026-09-13": {
+  "lines": 254,
+  "bytes": 112730,
+  "ev": 35575,
+  "clean_lines": 238,
+  "clean_ev": 26418,
+  "issue_lines": 16,
+  "issue_ev": 9157
+ },
+ "2026-09-14": {
+  "lines": 295,
+  "bytes": 123509,
+  "ev": 33742,
+  "clean_lines": 291,
+  "clean_ev": 32301,
+  "issue_lines": 4,
+  "issue_ev": 1441
+ },
+ "2026-09-15": {
+  "lines": 240,
+  "bytes": 104523,
+  "ev": 31046,
+  "clean_lines": 232,
+  "clean_ev": 25752,
+  "issue_lines": 8,
+  "issue_ev": 5294
+ },
+ "2026-09-16": {
+  "lines": 1895,
+  "bytes": 1247471,
+  "ev": 606455,
+  "issue_lines": 406,
+  "issue_ev": 387653,
+  "clean_lines": 1489,
+  "clean_ev": 218802
+ },
+ "2026-09-17": {
+  "lines": 1680,
+  "bytes": 1341408,
+  "ev": 744102,
+  "clean_lines": 1171,
+  "clean_ev": 175961,
+  "issue_lines": 509,
+  "issue_ev": 568141
+ },
+ "2026-09-18": {
+  "lines": 16568,
+  "bytes": 9174349,
+  "ev": 3677201,
+  "clean_lines": 14002,
+  "clean_ev": 2055860,
+  "issue_lines": 2566,
+  "issue_ev": 1621341
+ },
+ "2026-09-19": {
+  "lines": 15188,
+  "bytes": 9699040,
+  "ev": 4989805,
+  "clean_lines": 10297,
+  "clean_ev": 1532189,
+  "issue_lines": 4891,
+  "issue_ev": 3457616
+ },
+ "2026-09-20": {
+  "lines": 12073,
+  "bytes": 7098001,
+  "ev": 3301512,
+  "clean_lines": 9060,
+  "clean_ev": 1253691,
+  "issue_lines": 3013,
+  "issue_ev": 2047821
+ },
+ "2026-09-21": {
+  "lines": 16686,
+  "bytes": 9262745,
+  "ev": 4029243,
+  "issue_lines": 4029,
+  "issue_ev": 2207365,
+  "clean_lines": 12657,
+  "clean_ev": 1821878
+ },
+ "2026-09-22": {
+  "lines": 13065,
+  "bytes": 6749279,
+  "ev": 2286552,
+  "clean_lines": 12455,
+  "clean_ev": 1872814,
+  "issue_lines": 610,
+  "issue_ev": 413738
+ },
+ "2026-09-23": {
+  "lines": 8297,
+  "bytes": 4234649,
+  "ev": 1424704,
+  "clean_lines": 8070,
+  "clean_ev": 1214490,
+  "issue_lines": 227,
+  "issue_ev": 210214
+ },
+ "2026-09-24": {
+  "lines": 7215,
+  "bytes": 3839430,
+  "ev": 1383577,
+  "clean_lines": 6800,
+  "clean_ev": 1024555,
+  "issue_lines": 415,
+  "issue_ev": 359022
+ },
+ "2026-09-25": {
+  "lines": 9772,
+  "bytes": 5239652,
+  "ev": 1900208,
+  "clean_lines": 9176,
+  "clean_ev": 1375698,
+  "issue_lines": 596,
+  "issue_ev": 524510
+ },
+ "2026-09-26": {
+  "lines": 8586,
+  "bytes": 4354743,
+  "ev": 1407809,
+  "clean_lines": 8409,
+  "clean_ev": 1264104,
+  "issue_lines": 177,
+  "issue_ev": 143705
+ },
+ "2026-09-27": {
+  "lines": 14996,
+  "bytes": 7702870,
+  "ev": 2644665,
+  "clean_lines": 14406,
+  "clean_ev": 2163738,
+  "issue_lines": 590,
+  "issue_ev": 480927
+ },
+ "2026-09-28": {
+  "lines": 14288,
+  "bytes": 7254171,
+  "ev": 2459917,
+  "clean_lines": 13831,
+  "clean_ev": 2076807,
+  "issue_lines": 457,
+  "issue_ev": 383110
+ },
+ "2026-09-29": {
+  "lines": 16871,
+  "bytes": 8668536,
+  "ev": 2958571,
+  "issue_lines": 614,
+  "issue_ev": 506388,
+  "clean_lines": 16257,
+  "clean_ev": 2452183
+ },
+ "2026-09-30": {
+  "lines": 17232,
+  "bytes": 9208441,
+  "ev": 3253433,
+  "clean_lines": 16348,
+  "clean_ev": 2455998,
+  "issue_lines": 884,
+  "issue_ev": 797435
+ },
+ "2026-10-01": {
+  "lines": 516,
+  "bytes": 270201,
+  "ev": 79503,
+  "clean_lines": 510,
+  "clean_ev": 76016,
+  "issue_lines": 6,
+  "issue_ev": 3487
+ },
+ "2026-10-02": {
+  "lines": 281,
+  "bytes": 146496,
+  "ev": 41869,
+  "clean_lines": 281,
+  "clean_ev": 41869
+ },
+ "2026-10-03": {
+  "lines": 2647,
+  "bytes": 1404943,
+  "ev": 451672,
+  "clean_lines": 2569,
+  "clean_ev": 384024,
+  "issue_lines": 78,
+  "issue_ev": 67648
+ },
+ "2026-10-04": {
+  "lines": 3198,
+  "bytes": 1661328,
+  "ev": 549288,
+  "clean_lines": 3104,
+  "clean_ev": 467034,
+  "issue_lines": 94,
+  "issue_ev": 82254
+ },
+ "2026-10-05": {
+  "lines": 3391,
+  "bytes": 1681687,
+  "ev": 511872,
+  "clean_lines": 3387,
+  "clean_ev": 509457,
+  "issue_lines": 4,
+  "issue_ev": 2415
+ },
+ "2026-10-06": {
+  "lines": 1532,
+  "bytes": 806649,
+  "ev": 286535,
+  "clean_lines": 1432,
+  "clean_ev": 213767,
+  "issue_lines": 100,
+  "issue_ev": 72768
+ },
+ "2026-10-07": {
+  "lines": 2003,
+  "bytes": 919371,
+  "ev": 261032,
+  "issue_lines": 1331,
+  "issue_ev": 260579,
+  "clean_lines": 672,
+  "clean_ev": 453
+ },
+ "2026-10-08": {
+  "lines": 1691,
+  "bytes": 883277,
+  "ev": 273056,
+  "clean_lines": 1143,
+  "clean_ev": 0,
+  "issue_lines": 548,
+  "issue_ev": 273056
+ },
+ "2026-10-09": {
+  "lines": 466,
+  "bytes": 197648,
+  "ev": 17862,
+  "issue_lines": 25,
+  "issue_ev": 17862,
+  "clean_lines": 441,
+  "clean_ev": 0
+ },
+ "2026-10-10": {
+  "lines": 1849,
+  "bytes": 738183,
+  "ev": 28512,
+  "clean_lines": 1820,
+  "clean_ev": 0,
+  "issue_lines": 29,
+  "issue_ev": 28512
+ },
+ "2026-10-11": {
+  "lines": 615,
+  "bytes": 232507,
+  "ev": 246,
+  "clean_lines": 614,
+  "clean_ev": 0,
+  "issue_lines": 1,
+  "issue_ev": 246
+ },
+ "2026-10-12": {
+  "lines": 1164,
+  "bytes": 523110,
+  "ev": 65719,
+  "clean_lines": 1101,
+  "clean_ev": 0,
+  "issue_lines": 63,
+  "issue_ev": 65719
+ },
+ "2026-10-13": {
+  "lines": 368,
+  "bytes": 147484,
+  "ev": 10780,
+  "clean_lines": 306,
+  "clean_ev": 0,
+  "issue_lines": 62,
+  "issue_ev": 10780
+ },
+ "2026-10-14": {
+  "lines": 1304,
+  "bytes": 588925,
+  "ev": 91300,
+  "issue_lines": 190,
+  "issue_ev": 91300,
+  "clean_lines": 1114,
+  "clean_ev": 0
+ },
+ "2026-10-15": {
+  "lines": 4400,
+  "bytes": 2296159,
+  "ev": 592276,
+  "issue_lines": 627,
+  "issue_ev": 592276,
+  "clean_lines": 3773,
+  "clean_ev": 0
+ },
+ "2026-10-16": {
+  "lines": 6531,
+  "bytes": 2703582,
+  "ev": 186553,
+  "clean_lines": 6336,
+  "clean_ev": 0,
+  "issue_lines": 195,
+  "issue_ev": 186553
+ },
+ "2026-10-17": {
+  "lines": 4687,
+  "bytes": 2719400,
+  "ev": 1007116,
+  "clean_lines": 2694,
+  "clean_ev": 0,
+  "issue_lines": 1993,
+  "issue_ev": 1007116
+ },
+ "2026-10-18": {
+  "lines": 7636,
+  "bytes": 4715130,
+  "ev": 2164099,
+  "issue_lines": 4641,
+  "issue_ev": 2164099,
+  "clean_lines": 2995,
+  "clean_ev": 0
+ },
+ "2026-10-19": {
+  "lines": 3516,
+  "bytes": 1837079,
+  "ev": 506663,
+  "clean_lines": 2695,
+  "clean_ev": 0,
+  "issue_lines": 821,
+  "issue_ev": 506663
+ },
+ "2026-10-20": {
+  "lines": 794,
+  "bytes": 369284,
+  "ev": 66042,
+  "issue_lines": 302,
+  "issue_ev": 66042,
+  "clean_lines": 492,
+  "clean_ev": 0
+ }
+}

@@ -1,0 +1,109 @@
+{
+ "today(hours)": {
+  "total": 2952,
+  "ok": 2176,
+  "excluded": 728,
+  "excl_ok": 0,
+  "kept_total": 2224,
+  "base_rate": 73.71273712737127,
+  "fixed_rate": 97.84172661870504,
+  "models_now": 11,
+  "models_kept": 10,
+  "zero_ok_kept": {
+   "beam-free": 1,
+   "jev-1.13-free": 1
+  },
+  "excluded_by_model": {
+   "space-bunny": 728
+  },
+  "E_only_excluded": 730,
+  "E_only_kept": 2222,
+  "E_only_rate": 97.92979297929793,
+  "E_only_excl_ok": 0
+ },
+ "7d(日历日)": {
+  "total": 28469,
+  "ok": 20576,
+  "excluded": 730,
+  "excl_ok": 0,
+  "kept_total": 27739,
+  "base_rate": 72.2751062559275,
+  "fixed_rate": 74.17715130321929,
+  "models_now": 15,
+  "models_kept": 12,
+  "zero_ok_kept": {
+   "beam-free": 2,
+   "jev-1.13-free": 1,
+   "nemotron-3.5-super-vl-free": 6
+  },
+  "excluded_by_model": {
+   "probe-143148": 1,
+   "probeL-143230": 1,
+   "space-bunny": 728
+  },
+  "E_only_excluded": 739,
+  "E_only_kept": 27730,
+  "E_only_rate": 74.20122610890732,
+  "E_only_excl_ok": 0
+ },
+ "30d(日历日)": {
+  "total": 175198,
+  "ok": 159441,
+  "excluded": 1352,
+  "excl_ok": 0,
+  "kept_total": 173846,
+  "base_rate": 91.00617586958755,
+  "fixed_rate": 91.71393072029267,
+  "models_now": 18,
+  "models_kept": 14,
+  "zero_ok_kept": {
+   "beam-free": 2,
+   "deepseek-v4-flash-free": 1,
+   "jev-1.13-free": 1,
+   "nemotron-3.5-super-vl-free": 6
+  },
+  "excluded_by_model": {
+   "mimo-v2.5": 622,
+   "probe-143148": 1,
+   "probeL-143230": 1,
+   "space-bunny": 728
+  },
+  "E_only_excluded": 1361,
+  "E_only_kept": 173837,
+  "E_only_rate": 91.71867899238943,
+  "E_only_excl_ok": 0
+ },
+ "180d(日历日)": {
+  "total": 233045,
+  "ok": 208037,
+  "excluded": 1391,
+  "excl_ok": 0,
+  "kept_total": 231654,
+  "base_rate": 89.26902529554378,
+  "fixed_rate": 89.80505408928833,
+  "models_now": 30,
+  "models_kept": 22,
+  "zero_ok_kept": {
+   "beam-free": 2,
+   "jev-1.13-free": 1,
+   "muse-spark-1.2-contributor-free": 2,
+   "muse-spark-1.3-contributor-free": 1,
+   "nemotron-3.5-super-vl-free": 6,
+   "ox-alpha-free": 3
+  },
+  "excluded_by_model": {
+   "mimo-v2.5": 624,
+   "hy3": 2,
+   "claude-opus-4-5": 4,
+   "x-preview-f": 30,
+   "gpt-4o-mini": 1,
+   "probe-143148": 1,
+   "probeL-143230": 1,
+   "space-bunny": 728
+  },
+  "E_only_excluded": 1406,
+  "E_only_kept": 231639,
+  "E_only_rate": 89.81086949952297,
+  "E_only_excl_ok": 0
+ }
+}

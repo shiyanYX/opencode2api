@@ -1,0 +1,120 @@
+{
+  "range": "today",
+  "window": {
+    "start": "2026-10-20T01:00:00+08:00",
+    "end": "2026-10-21T01:00:00+08:00"
+  },
+  "generated_at": "2026-10-21T00:40:00+08:00",
+  "totals": {
+    "requests": 4,
+    "ok": 2,
+    "fail": 2,
+    "success_rate": 0.5
+  },
+  "latency": {
+    "p50_ms": 1200,
+    "p95_ms": 30000,
+    "p99_ms": 30000,
+    "max_ms": 30000,
+    "ttft_p50_ms": 120,
+    "ttft_p95_ms": 300
+  },
+  "timeseries": [
+    {
+      "ts": "2026-10-20T21:00",
+      "ok": 0,
+      "fail": 0,
+      "requests": 0
+    },
+    {
+      "ts": "2026-10-20T22:00",
+      "ok": 2,
+      "fail": 2,
+      "requests": 4
+    },
+    {
+      "ts": "2026-10-20T23:00",
+      "ok": 0,
+      "fail": 0,
+      "requests": 0
+    }
+  ],
+  "by_model": [
+    {
+      "model": "deepseek-v4-flash-free",
+      "requests": 2,
+      "ok": 1,
+      "fail": 1,
+      "success_rate": 0.5,
+      "p95_ms": 4800,
+      "prompt_tokens": 240,
+      "completion_tokens": 160,
+      "total_tokens": 400
+    },
+    {
+      "model": "space-bunny-free",
+      "requests": 2,
+      "ok": 1,
+      "fail": 1,
+      "success_rate": 0.5,
+      "p95_ms": 30000,
+      "prompt_tokens": 240,
+      "completion_tokens": 160,
+      "total_tokens": 400
+    }
+  ],
+  "by_node": [
+    {
+      "name": "node-b",
+      "requests": 2,
+      "ok": 1,
+      "fail": 1,
+      "success_rate": 0.5,
+      "avg_ms": 2750
+    },
+    {
+      "name": "node-a",
+      "requests": 1,
+      "ok": 1,
+      "fail": 0,
+      "success_rate": 1,
+      "avg_ms": 1200
+    },
+    {
+      "name": "node-c",
+      "requests": 1,
+      "ok": 0,
+      "fail": 1,
+      "success_rate": 0,
+      "avg_ms": 30000
+    }
+  ],
+  "by_error": [
+    {
+      "kind": "timeout",
+      "count": 1,
+      "sample": "status=fail"
+    },
+    {
+      "kind": "upstream_4xx",
+      "count": 1,
+      "sample": "upstream http 429 quota_signal"
+    }
+  ],
+  "attempts": {
+    "a0": 0,
+    "a1": 3,
+    "a2": 1,
+    "a3plus": 0
+  },
+  "phases": {
+    "queue_avg_ms": 30,
+    "ttft_avg_ms": 210,
+    "gen_avg_ms": 9040
+  },
+  "unmapped": {
+    "count": 0,
+    "by_model": []
+  },
+  "node_agg_by": "node_name"
+}

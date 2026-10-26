@@ -1,0 +1,12 @@
+--- FAIL: TestIP4RVLiveServedDrift (0.00s)
+    zz_ip4agg_reverify_test.go:227: 吸收后-未成功前: totals=0 unmapped=1 Σattempts=0
+    zz_ip4agg_reverify_test.go:244: 首次成功之后: totals=1 unmapped=1 | Σattempts=2 Σby_node=2 | stats.total=1 stats.unmapped=1
+    zz_ip4agg_reverify_test.go:251: 【残留风险 R-A 复现】everServed 事后增长：Σattempts(2) != totals(1)（扫描把老失败行重判成 mapped，桶仍算未映射）
+    zz_ip4agg_reverify_test.go:254: 【残留风险 R-A 复现】Σby_node(2) != totals(1)
+--- FAIL: TestIP4RVDocsDrift (0.00s)
+    zz_ip4agg_reverify_test.go:282: 文档表未收录时: totals=0 unmapped=1 Σattempts=0
+    zz_ip4agg_reverify_test.go:294: 文档表收录之后: totals=0 unmapped=1 Σattempts=1
+    zz_ip4agg_reverify_test.go:296: 【残留风险 R-B 复现】文档表事后变化：Σattempts(1) != totals(0)（桶保留吸收时判定，扫描用当前公式 B 重判）
+FAIL
+FAIL	github.com/shiyanYX/opencode2api	74.806s
+FAIL

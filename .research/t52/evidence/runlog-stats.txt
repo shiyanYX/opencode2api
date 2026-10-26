@@ -1,0 +1,34 @@
+行数=373747 字节=73671118 平均B/行=197.1
+首行: time=2026-10-06T21:12:02.046+08:00 level=WARN msg="node health probe failed" node=3::ES-64.137.96.74:6641 error="Get \"https://ope
+末行: time=2026-10-20T12:56:32.714+08:00 level=INFO msg=upstream_attempt request_id=ir14z3o2r2fd try_model=mimo-v2.6-flash-free surface=
+最早 2026-10-06T21:12:02.046+08:00 最新 2026-10-20T12:56:32.714+08:00 带time行数 373747
+
+--- level 分布 ---
+INFO     n= 311430 bytes=  61075472 占比= 82.9% B/行= 196.1
+WARN     n=  43370 bytes=   8798416 占比= 11.9% B/行= 202.9
+ERROR    n=  18882 bytes=   3782698 占比=  5.1% B/行= 200.3
+DEBUG    n=     65 bytes=     14532 占比=  0.0% B/行= 223.6
+
+--- msg 体积 Top20 ---
+request_plan                                  n=  37034 bytes=  13372504 占比= 18.2% B/行= 361.1
+upstream_attempt                              n=  49215 bytes=   9990922 占比= 13.6% B/行= 203.0
+node marked dead by health check              n=  31618 bytes=   8161315 占比= 11.1% B/行= 258.1
+node health probe failed                      n=  33872 bytes=   7659579 占比= 10.4% B/行= 226.1
+request_done                                  n=  43502 bytes=   7232611 占比=  9.8% B/行= 166.3
+config hot-reloaded                           n=  67763 bytes=   6708537 占比=  9.1% B/行=  99.0
+upstream_result                               n=  37000 bytes=   6267114 占比=  8.5% B/行= 169.4
+request_result                                n=  19389 bytes=   4322956 占比=  5.9% B/行= 223.0
+upstream error                                n=  16060 bytes=   3437289 占比=  4.7% B/行= 214.0
+stream_result                                 n=   7717 bytes=   2309988 占比=  3.1% B/行= 299.3
+node state changed                            n=   5821 bytes=   1615805 占比=  2.2% B/行= 277.6
+free models fetch failed                      n=   6456 bytes=    683606 占比=  0.9% B/行= 105.9
+free models loaded                            n=   4183 bytes=    334640 占比=  0.5% B/行=  80.0
+using cached free models                      n=   3065 bytes=    263590 占比=  0.4% B/行=  86.0
+subscription refresh failed                   n=   1959 bytes=    248793 占比=  0.3% B/行= 127.0
+all fetch attempts failed, using fallback     n=   2152 bytes=    241934 占比=  0.3% B/行= 112.4
+free models docs fetch failed, using fallback (not fatal) n=    913 bytes=    176667 占比=  0.2% B/行= 193.5
+go catalog auto-refreshed                     n=   1647 bytes=    143289 占比=  0.2% B/行=  87.0
+models auto-refreshed                         n=   1624 bytes=    134792 占比=  0.2% B/行=  83.0
+node health check done                        n=   1264 bytes=    128854 占比=  0.2% B/行= 101.9
+
+msg 种类数=57

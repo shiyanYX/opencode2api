@@ -1,0 +1,25 @@
+=== 修前红：把 D1 回退与 D2 per-model max 退回修复前行为（/tmp/t67/red 副本），跑新增用例 ===
+=== RUN   TestAggregateOldRowsUnmappedExcludedFromScanDims
+=== RUN   TestAggregateOldRowsUnmappedExcludedFromScanDims/today
+    log_aggregate_test.go:932: [today] Σattempts=4 != totals.requests=3（老行未映射泄漏进 attempts）
+=== RUN   TestAggregateOldRowsUnmappedExcludedFromScanDims/7d
+    log_aggregate_test.go:932: [7d] Σattempts=6 != totals.requests=4（老行未映射泄漏进 attempts）
+=== RUN   TestAggregateOldRowsUnmappedExcludedFromScanDims/30d
+    log_aggregate_test.go:932: [30d] Σattempts=8 != totals.requests=5（老行未映射泄漏进 attempts）
+=== RUN   TestAggregateOldRowsUnmappedExcludedFromScanDims/180d
+    log_aggregate_test.go:932: [180d] Σattempts=10 != totals.requests=6（老行未映射泄漏进 attempts）
+--- FAIL: TestAggregateOldRowsUnmappedExcludedFromScanDims (0.00s)
+    --- FAIL: TestAggregateOldRowsUnmappedExcludedFromScanDims/today (0.00s)
+    --- FAIL: TestAggregateOldRowsUnmappedExcludedFromScanDims/7d (0.00s)
+    --- FAIL: TestAggregateOldRowsUnmappedExcludedFromScanDims/30d (0.00s)
+    --- FAIL: TestAggregateOldRowsUnmappedExcludedFromScanDims/180d (0.00s)
+=== RUN   TestAggregateProdSnapshotReconciliation
+    log_aggregate_test.go:1001: [today] totals=367 attempts=367 by_node=9 by_error=2 fail=8 max=119974 unmapped=0 stats_unmapped=0
+    log_aggregate_test.go:997: [7d] Σattempts=27774 != totals.requests=27044（老行未映射泄漏进 attempts）
+--- FAIL: TestAggregateProdSnapshotReconciliation (1.38s)
+=== RUN   TestAggregatePerModelP95UnboundedOwnMax
+    log_aggregate_test.go:1037: m-a-free p95=900000，期望 700000（被别的模型的 max 污染？）
+--- FAIL: TestAggregatePerModelP95UnboundedOwnMax (0.00s)
+FAIL
+FAIL	github.com/shiyanYX/opencode2api	1.442s
+FAIL
