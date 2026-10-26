@@ -7329,20 +7329,23 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 
 // nodeAdminView API 视图：只读字段 + 当前/手动标记 + 健康探测结果。
 type nodeAdminView struct {
-	Name          string `json:"name"`
-	Protocol      string `json:"protocol"`
-	Address       string `json:"address"`
-	Port          int    `json:"port"`
-	Fingerprint   string `json:"fingerprint"`
-	State         string `json:"state"`
-	MarkedAt      string `json:"marked_at,omitempty"`
-	CooldownUntil string `json:"cooldown_until,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
-	LastUsedAt    string `json:"last_used_at,omitempty"`
-	LatencyMs     int64  `json:"latency_ms,omitempty"`
-	LastProbeAt   string `json:"last_probe_at,omitempty"`
-	Active        bool   `json:"active"`
-	Manual        bool   `json:"manual"`
+	Name          string  `json:"name"`
+	Protocol      string  `json:"protocol"`
+	Address       string  `json:"address"`
+	Port          int     `json:"port"`
+	Fingerprint   string  `json:"fingerprint"`
+	State         string  `json:"state"`
+	MarkedAt      string  `json:"marked_at,omitempty"`
+	CooldownUntil *string `json:"cooldown_until"` // null = 无冷却（裁定 5：零值后端归一化）
+	LastError     *string `json:"last_error"`     // null = 无错误（task-67 契约：string|null）
+	LastUsedAt    string  `json:"last_used_at,omitempty"`
+	LatencyMs     int64   `json:"latency_ms,omitempty"`
+	LastProbeAt   *string `json:"last_probe_at"` // null = 从未探测（裁定 5：零值后端归一化）
+	Active        bool    `json:"active"`
+	Manual        bool    `json:"manual"`
+
+	// task-67：打分字段（字段名是前端契约，见 docs/research/node-scoring-spec.md §5.1）
+	nodeScoreView
 }
 
 func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
@@ -7350,6 +7353,9 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		pick, manual := proxyPool.pickState()
 		nodes := proxyPool.snapshot()
+		// task-67：打分（纯内存 O(节点数)，219 节点 <1ms；不需要缓存层）
+		scoringNow := time.Now()
+		_, scoreByFP := nodeScoringSnapshot(nodes, scoringNow)
 		activeName, manualName := "", ""
 		out := make([]nodeAdminView, 0, len(nodes))
 		health := map[string]int{"available": 0, "exhausted": 0, "dead": 0}
@@ -7363,21 +7369,28 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 			v := nodeAdminView{
 				Name: n.Name, Protocol: n.Protocol, Address: n.Address, Port: n.Port,
 				Fingerprint: n.Fingerprint, State: n.State.String(),
-				LastError: n.LastError, Active: n.Fingerprint == pick,
+				Active: n.Fingerprint == pick,
 				Manual: n.Fingerprint == manual, LatencyMs: n.LatencyMs,
+				nodeScoreView: scoreByFP[n.Fingerprint],
+			}
+			if n.LastError != "" {
+				e := n.LastError
+				v.LastError = &e
 			}
 			health[v.State]++
 			if !n.MarkedAt.IsZero() {
 				v.MarkedAt = n.MarkedAt.Format(time.RFC3339)
 			}
 			if !n.CooldownUntil.IsZero() {
-				v.CooldownUntil = n.CooldownUntil.Format(time.RFC3339)
+				t := n.CooldownUntil.Format(time.RFC3339)
+				v.CooldownUntil = &t
 			}
 			if !n.LastUsedAt.IsZero() {
 				v.LastUsedAt = n.LastUsedAt.Format(time.RFC3339)
 			}
 			if !n.LastProbeAt.IsZero() {
-				v.LastProbeAt = n.LastProbeAt.Format(time.RFC3339)
+				t := n.LastProbeAt.Format(time.RFC3339)
+				v.LastProbeAt = &t
 			}
 			out = append(out, v)
 		}
@@ -7393,6 +7406,12 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 			"nodes":           out,
 			"subscriptions":   subManager.snapshot(),
 			"node_alert":      nodeAlerts.snapshot(),
+			// task-67：打分快照元信息（前端显示「分数更新于 X」）
+			"computed_at": scoringNow.Format(time.RFC3339),
+			"scoring": map[string]any{
+				"version": scoringVersion,
+				"params":  scoringParamsView(defaultScoringParams),
+			},
 		})
 	case http.MethodPost:
 		var payload struct {
@@ -7608,6 +7627,18 @@ func adminStatsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// adminAggregateHandler 是 GET /api/logs/aggregate 的入口（task-67）。
+// 方法/参数校验后交给 aggregateResponseFor（带 TTL 缓存 + singleflight）。
+func adminAggregateHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	out := aggregateResponseFor(r.URL.Query().Get("range"))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
 // adminTrendsHandler 用量趋势：按 range=today|7d|30d|180d 返回聚簇时间序列（来自调用日志）。
 // group=model 时额外按模型分组，供前端做模型维度筛选；不带该参数时行为与原先完全一致。
 func adminTrendsHandler(w http.ResponseWriter, r *http.Request) {
@@ -7708,6 +7739,8 @@ func main() {
 		slog.Warn("failed to save config", "path", configPath, "error", err)
 	}
 	initCallLog(configPath)
+	// task-67：节点打分（加载 scoring_state.json + 回填历史调用日志 + 后台轮询）
+	initNodeScoring(configPath)
 	// 调用日志保留策略（gzip 归档 + 按天删除），仅 daily 模式；每小时一次。
 	startCallLogArchiver()
 
@@ -7775,6 +7808,7 @@ func main() {
 	mux.HandleFunc("/api/config", loggingMiddleware(requireAuth(adminConfigHandler)))
 	mux.HandleFunc("/api/nodes", loggingMiddleware(requireAuth(adminNodesHandler)))
 	mux.HandleFunc("/api/stats", loggingMiddleware(requireAuth(adminStatsHandler)))
+	mux.HandleFunc("/api/logs/aggregate", loggingMiddleware(requireAuth(adminAggregateHandler)))
 	mux.HandleFunc("/api/stats/trends", loggingMiddleware(requireAuth(adminTrendsHandler)))
 	mux.HandleFunc("/api/logs", loggingMiddleware(requireAuth(adminLogsHandler)))
 	mux.HandleFunc("/api/logs/stream", loggingMiddleware(requireAuth(adminLogsHandler)))
