@@ -107,6 +107,15 @@ type ProxyNode struct {
 	// 只有连续 probeFailStreakThreshold 次失败才判 dead —— 一次网络抖动不该丢掉一个 IP
 	// （2026-10-19 生产：一轮抖动让 86 个节点同时被判死、70 分钟不恢复）。
 	ProbeFailStreak int `json:"-"`
+	// ---- probation（冷却到期后的试探态，I3） ----
+	// ProbationUntil 是本次试探证据的截止时间；到期仍无证据则回 exhausted。
+	ProbationUntil time.Time `json:"-"`
+	// ProbationTried 表示这轮 probation 的唯一一次证据请求是否已被选中发出。
+	ProbationTried bool `json:"-"`
+	// ProbationFailures 是连续 probation 失败次数，用于指数退避（60s→120s→300s→…→30min）。
+	ProbationFailures int `json:"-"`
+	// LastAttemptKind 最近一次被选中的用途（normal | probation），供观测/测试读取。
+	LastAttemptKind string `json:"-"`
 	// GateState 推理闸门状态（unknown | ok | rejected），归 T3 所有。
 	// T1 的 confirm-then-mark 只写 "rejected"：该出口被上游按 IP 拒绝。
 	// 当 gateReviveRequiresProbe=true 时，rejected 节点不接受「冷却到期」的时间复活，
@@ -198,14 +207,25 @@ func computeFingerprint(n *ProxyNode) string {
 // ======================= 持久化状态 =======================
 
 type nodeRuntimeState struct {
-	State         string    `json:"state"`
-	MarkedAt      time.Time `json:"marked_at,omitempty"`
-	CooldownUntil time.Time `json:"cooldown_until,omitempty"`
-	LastError     string    `json:"last_error,omitempty"`
-	LastUsedAt    time.Time `json:"last_used_at,omitempty"`
-	LatencyMs     int64     `json:"latency_ms,omitempty"`
-	LastProbeAt   time.Time `json:"last_probe_at,omitempty"`
-	GateState     string    `json:"gate_state,omitempty"`
+	State             string    `json:"state"`
+	MarkedAt          time.Time `json:"marked_at,omitempty"`
+	CooldownUntil     time.Time `json:"cooldown_until,omitempty"`
+	LastError         string    `json:"last_error,omitempty"`
+	LastUsedAt        time.Time `json:"last_used_at,omitempty"`
+	LatencyMs         int64     `json:"latency_ms,omitempty"`
+	LastProbeAt       time.Time `json:"last_probe_at,omitempty"`
+	GateState         string    `json:"gate_state,omitempty"`
+	ProbationUntil    time.Time `json:"probation_until,omitempty"`
+	ProbationTried    bool      `json:"probation_tried,omitempty"`
+	ProbationFailures int       `json:"probation_failures,omitempty"`
+}
+
+// modelQuotaEntry 是 per (fingerprint, model) 的配额冷却记录。
+// 429 只应影响该 model 的资格，不影响节点对其他 model 的可用性（设计 §4.2）。
+type modelQuotaEntry struct {
+	Until    time.Time
+	Reason   string
+	MarkedAt time.Time
 }
 
 var zeroTime time.Time
@@ -249,6 +269,10 @@ type nodePool struct {
 	poolAttempts   map[string]time.Time
 	poolHaltUntil  time.Time
 	lastCandidates int // 最近一次 pick 的候选数（switch 事件埋点，近似并发安全）
+
+	// modelQuota 是 per (指纹, model) 的配额冷却表：429 只让该 model 的该出口暂不可用。
+	// 键为 fp+"\x00"+model，避免拼接歧义。
+	modelQuota map[string]modelQuotaEntry
 }
 
 const (
@@ -262,7 +286,33 @@ const (
 	pool403Min    = 8
 	pool403Max    = 24
 	poolHaltFor   = 10 * time.Minute
+
+	// probation（I3）：冷却到期只进试探态，证据成功才 available。
+	defaultProbationDuration = 10 * time.Minute
+	// probationMaxConcurrent 限制全池同时在途的试探数，防止一次到期潮把池子同时打出去。
+	probationMaxConcurrent = 4
+	probationBackoffMax    = 30 * time.Minute
 )
+
+// probationBackoff 返回 probation 连续失败后的冷却时长：60s → 120s → 300s → 翻倍至 30min。
+func probationBackoff(failures int) time.Duration {
+	switch {
+	case failures <= 1:
+		return 60 * time.Second
+	case failures == 2:
+		return 120 * time.Second
+	case failures == 3:
+		return 300 * time.Second
+	}
+	d := 300 * time.Second
+	for i := 3; i < failures; i++ {
+		d *= 2
+		if d >= probationBackoffMax {
+			return probationBackoffMax
+		}
+	}
+	return d
+}
 
 type sub403State struct {
 	strikes     int
@@ -371,6 +421,7 @@ func newProxyPool(statePath string) *nodePool {
 		sub403:            make(map[string]*sub403State),
 		pool403:           make(map[string]time.Time),
 		poolAttempts:      make(map[string]time.Time),
+		modelQuota:        make(map[string]modelQuotaEntry),
 		exhaustedCooldown: time.Hour,
 		deadCooldown:      time.Minute,
 		statePath:         statePath,
@@ -395,44 +446,93 @@ func (p *nodePool) effectiveDeadCooldown() time.Duration {
 	return time.Minute
 }
 
-// eligible 判断节点当前是否参与路由选路。仅 available 可用：
-//   - exhausted：配额冷却到期后由 sweepExpiredLocked 定时恢复（翻回 available）；
+// eligible 判断节点当前是否参与路由选路：
+//   - available：正常可用；
+//   - probation：可以再放行一次证据请求（ProbationTried 用掉后就不再选）；
+//   - exhausted：冷却到期后由 sweepExpiredLocked 转 probation（绝不直接 available）；
 //   - dead：只由探测成功（recordProbeSuccess）事件恢复，冷却时间不参与判定。
 func (p *nodePool) eligible(n *ProxyNode, now time.Time) bool {
-	if n.State != NodeAvailable {
+	switch n.State {
+	case NodeProbation:
+		if n.ProbationTried {
+			return false
+		}
+		if !n.ProbationUntil.IsZero() && now.After(n.ProbationUntil) {
+			return false
+		}
+		// 全池在途试探额度：已发出、尚未得到成功/失败结论的 probation 节点数。
+		if p.probationInFlightLocked() >= probationMaxConcurrent {
+			return false
+		}
+	case NodeAvailable:
+		// 继续走下面的订阅隔离判断。
+	default:
 		return false
 	}
 	// T2：订阅级 403 熔断。隔离只影响选路，不改节点状态/分数（可恢复、可解释）。
 	return !p.subQuarantinedLocked(n.Name, now)
 }
 
-// sweepExpiredLocked 把冷却已过期的 exhausted 节点翻回 available 并清空标记
-// （定时恢复：配额冷却到期即恢复，面板徽标/计数与路由选路保持一致）。
+// probationInFlightLocked 统计「已发出证据请求、结果尚未落定」的 probation 节点。
+// 调用方至少持有读锁。
+func (p *nodePool) probationInFlightLocked() int {
+	count := 0
+	for _, n := range p.nodes {
+		if n.State == NodeProbation && n.ProbationTried {
+			count++
+		}
+	}
+	return count
+}
+
+// sweepExpiredLocked 处理时间驱动的状态迁移：
+//   - exhausted 冷却到期 ⇒ probation（只给一次证据机会，不得直接 available）；
+//   - probation 到期仍无证据 ⇒ 按指数退避回 exhausted。
+//
 // dead 节点不受影响：其恢复由探测成功驱动（事件恢复）。
 // 调用方必须持有写锁；仅在确有翻转时异步持久化一次。
 func (p *nodePool) sweepExpiredLocked(now time.Time) {
 	dirty := false
 	for _, n := range p.nodes {
-		if n.State != NodeExhausted {
-			continue
+		switch n.State {
+		case NodeExhausted:
+			// C3 复活契约：被上游按出口 IP 拒绝的节点不接受「冷却到期」的时间复活。
+			// 降级开关默认 false（T3 的闸门探针未上线时退化为旧的 5h 冷却，避免永久封禁）。
+			if gateReviveRequiresProbe && n.GateState == GateStateRejected {
+				continue
+			}
+			if n.CooldownUntil.IsZero() || !now.After(n.CooldownUntil) {
+				continue
+			}
+			slog.Info("node entered probation after cooldown",
+				"node", n.Name, "fp", n.Fingerprint,
+				"reason_before", n.LastError,
+				"until", n.CooldownUntil.Format(time.RFC3339),
+				"probation_until", now.Add(defaultProbationDuration).Format(time.RFC3339))
+			n.State = NodeProbation
+			n.ProbationUntil = now.Add(defaultProbationDuration)
+			n.ProbationTried = false
+			n.CooldownUntil = time.Time{}
+			dirty = true
+		case NodeProbation:
+			if n.ProbationUntil.IsZero() || now.Before(n.ProbationUntil) {
+				continue
+			}
+			// 超时未拿到证据（或结果未回写）：不得恢复为 available，重新冷却。
+			n.ProbationFailures++
+			cooldown := probationBackoff(n.ProbationFailures)
+			slog.Info("node probation expired without evidence",
+				"node", n.Name, "fp", n.Fingerprint,
+				"failures", n.ProbationFailures,
+				"cooldown", cooldown.String())
+			n.State = NodeExhausted
+			n.MarkedAt = now
+			n.CooldownUntil = now.Add(cooldown)
+			n.LastError = "probation:no_evidence"
+			n.ProbationUntil = time.Time{}
+			n.ProbationTried = false
+			dirty = true
 		}
-		// C3 复活契约：被上游按出口 IP 拒绝的节点不接受「冷却到期」的时间复活。
-		// 降级开关默认 false（T3 的闸门探针未上线时退化为旧的 5h 冷却，避免永久封禁）。
-		if gateReviveRequiresProbe && n.GateState == GateStateRejected {
-			continue
-		}
-		if n.CooldownUntil.IsZero() || !now.After(n.CooldownUntil) {
-			continue
-		}
-		slog.Info("node auto-recovered from exhausted",
-			"node", n.Name, "fp", n.Fingerprint,
-			"reason_before", n.LastError,
-			"until", n.CooldownUntil.Format(time.RFC3339))
-		n.State = NodeAvailable
-		n.MarkedAt = time.Time{}
-		n.CooldownUntil = time.Time{}
-		n.LastError = ""
-		dirty = true
 	}
 	if dirty {
 		p.saveWG.Add(1)
@@ -816,6 +916,17 @@ func (p *nodePool) markUsedLocked(n *ProxyNode, now time.Time) {
 		return
 	}
 	n.LastUsedAt = now
+	if n.State == NodeProbation {
+		// probation 只放行一次证据请求：选中即视为用掉，并留下可观测标记。
+		n.ProbationTried = true
+		n.LastAttemptKind = "probation"
+		slog.Info("node_probation_trial",
+			"node", n.Name, "fp", n.Fingerprint,
+			"probation_until", n.ProbationUntil.Format(time.RFC3339),
+			"probation_failures", n.ProbationFailures)
+		return
+	}
+	n.LastAttemptKind = "normal"
 }
 
 // consumeNode 获取当前节点（不换）。等价 pick(false) 但保持返回值语义。
@@ -873,10 +984,13 @@ const freeTierRejectedReason = "freetier:confirmed_ip_rejected"
 // gateReviveRequiresProbe 的前置条件）。
 func (p *nodePool) mark(fp string, st NodeState, reason string) bool {
 	p.mu.Lock()
-	ok := p.markLocked(fp, st, reason, GateStateUnknown)
+	ok, changed := p.markLocked(fp, st, reason, GateStateUnknown)
 	p.mu.Unlock()
 	if !ok {
 		return false
+	}
+	if !changed {
+		return true
 	}
 	p.saveWG.Add(1)
 	go func() { defer p.saveWG.Done(); p.saveState() }()
@@ -884,12 +998,22 @@ func (p *nodePool) mark(fp string, st NodeState, reason string) bool {
 }
 
 // markLocked 在已持有写锁的前提下执行标记；gate 为要写入的 gate_state。
-func (p *nodePool) markLocked(fp string, st NodeState, reason, gate string) bool {
+// 返回 (节点存在, 是否发生变更)。同一 (fp, reason) 在冷却期内重复 mark 是幂等的：
+// 不改状态、不后推 CooldownUntil、不刷新 MarkedAt、不重复写 state changed 日志。
+func (p *nodePool) markLocked(fp string, st NodeState, reason, gate string) (found, changed bool) {
 	now := time.Now()
 	n := p.byID[fp]
 	if n == nil {
-		return false
+		return false, false
 	}
+	// I4：冷却期内的同一 (fp, reason) 重复写入直接丢弃。必须放在锁内，保持原子。
+	if n.State == st && n.LastError == reason &&
+		!n.CooldownUntil.IsZero() && now.Before(n.CooldownUntil) {
+		return true, false
+	}
+	// probation 的 429/quota 失败走指数退避，而不是普通 exhausted 冷却。
+	probationFailure := n.State == NodeProbation && st == NodeExhausted
+
 	n.State = st
 	n.MarkedAt = now
 	n.LastError = reason
@@ -897,12 +1021,20 @@ func (p *nodePool) markLocked(fp string, st NodeState, reason, gate string) bool
 	n.ProbeFailStreak = 0 // 显式状态变更后重新计数，避免跨状态累积
 	switch st {
 	case NodeExhausted:
-		n.CooldownUntil = now.Add(p.effectiveExhaustedCooldown())
+		if probationFailure {
+			n.ProbationFailures++
+			n.CooldownUntil = now.Add(probationBackoff(n.ProbationFailures))
+		} else {
+			n.CooldownUntil = now.Add(p.effectiveExhaustedCooldown())
+		}
 	case NodeDead:
 		n.CooldownUntil = now.Add(p.effectiveDeadCooldown())
 	default:
 		n.CooldownUntil = zeroTime
 	}
+	// 状态已落定： probation 字段不再生效（成功路径由 recordNodeSuccess 清理）。
+	n.ProbationUntil = zeroTime
+	n.ProbationTried = false
 	if p.activeID == fp {
 		p.activeID = ""
 	}
@@ -912,8 +1044,9 @@ func (p *nodePool) markLocked(fp string, st NodeState, reason, gate string) bool
 	}
 	slog.Info("node state changed",
 		"node", n.Name, "fp", fp, "state", st.String(),
-		"reason", reason, "until", n.CooldownUntil.Format(time.RFC3339))
-	return true
+		"reason", reason, "until", n.CooldownUntil.Format(time.RFC3339),
+		"probation_failures", n.ProbationFailures)
+	return true, true
 }
 
 func (p *nodePool) unmark(fp string) bool {
@@ -996,7 +1129,7 @@ func (p *nodePool) freeTierMarkAllowed() (bool, string) {
 // ★ 状态与 gate_state 在同一次加锁内完成，避免「先标状态、再补字段」中间态。
 func (p *nodePool) markFreeTierRejected(fp string) bool {
 	p.mu.Lock()
-	ok := p.markLocked(fp, NodeExhausted, freeTierRejectedReason, GateStateRejected)
+	ok, _ := p.markLocked(fp, NodeExhausted, freeTierRejectedReason, GateStateRejected)
 	p.mu.Unlock()
 	if !ok {
 		return false
@@ -1540,14 +1673,97 @@ func (p *nodePool) recordProbeSuccess(fp string, ms int64) {
 	n.ProbeFailStreak = 0 // 探测成功即清零，避免历史抖动累积成误判
 	// task-67：探测历史环形缓冲（20 轮，落盘 scoring_state.json）+ 24h/7d 计数
 	nodeScoring.observeProbeResult(fp, n.Name, true, ms, "", n.State.String(), time.Now())
-	if n.State == NodeDead {
+	switch n.State {
+	case NodeDead:
 		n.State = NodeAvailable
 		n.MarkedAt = time.Time{}
 		n.CooldownUntil = time.Time{}
 		n.LastError = ""
+	case NodeProbation:
+		// 探测成功也是 evidence：probation 可以转 available（设计 §4.1）。
+		p.promoteProbationLocked(n)
 	}
 	p.saveWG.Add(1)
 	go func() { defer p.saveWG.Done(); p.saveState() }()
+}
+
+// recordNodeSuccess 记录一次真实请求成功。probation 节点拿到证据即转 available；
+// 其他状态的成功不改生命周期（dead 只由探测恢复，exhausted 只由时间+证据恢复）。
+func (p *nodePool) recordNodeSuccess(fp string) bool {
+	p.mu.Lock()
+	n := p.byID[fp]
+	if n == nil {
+		p.mu.Unlock()
+		return false
+	}
+	changed := false
+	if n.State == NodeProbation {
+		p.promoteProbationLocked(n)
+		changed = true
+	}
+	p.mu.Unlock()
+	if changed {
+		p.saveWG.Add(1)
+		go func() { defer p.saveWG.Done(); p.saveState() }()
+	}
+	return true
+}
+
+// promoteProbationLocked 把拿到证据的 probation 节点提升为 available，并清空试探字段。
+// 调用方必须持有写锁。
+func (p *nodePool) promoteProbationLocked(n *ProxyNode) {
+	slog.Info("node probation succeeded",
+		"node", n.Name, "fp", n.Fingerprint,
+		"probation_failures", n.ProbationFailures)
+	n.State = NodeAvailable
+	n.MarkedAt = time.Time{}
+	n.CooldownUntil = time.Time{}
+	n.LastError = ""
+	n.LastAttemptKind = "normal"
+	n.ProbationUntil = time.Time{}
+	n.ProbationTried = false
+	n.ProbationFailures = 0
+}
+
+// ======================= per (model, node) 配额 =======================
+
+func modelQuotaKey(fp, model string) string {
+	return fp + "\x00" + strings.ToLower(strings.TrimSpace(model))
+}
+
+// markModelQuota 记录某 (节点, 模型) 的配额冷却；只影响该 model，不写节点整体状态。
+func (p *nodePool) markModelQuota(fp, model, reason string, until time.Time) {
+	if fp == "" || model == "" {
+		return
+	}
+	now := time.Now()
+	if until.IsZero() || !until.After(now) {
+		until = now.Add(p.effectiveExhaustedCooldown())
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.modelQuota == nil {
+		p.modelQuota = make(map[string]modelQuotaEntry)
+	}
+	p.modelQuota[modelQuotaKey(fp, model)] = modelQuotaEntry{Until: until, Reason: reason, MarkedAt: now}
+}
+
+// modelQuotaCooling 报告该 (节点, 模型) 是否仍在配额冷却期内。
+func (p *nodePool) modelQuotaCooling(fp, model string, now time.Time) bool {
+	if fp == "" || model == "" {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.modelQuota[modelQuotaKey(fp, model)]
+	if !ok {
+		return false
+	}
+	if !now.Before(e.Until) {
+		// 到期记录懒清理（仍需写锁，这里只读判断即可；残留条目无副作用）。
+		return false
+	}
+	return true
 }
 
 // currentFp 返回当前生效指纹（无锁读用，仅日志/统计）。
@@ -1649,6 +1865,10 @@ func (p *nodePool) setNodes(nodes []*ProxyNode) {
 			n.LatencyMs = prev.LatencyMs
 			n.LastProbeAt = prev.LastProbeAt
 			n.GateState = prev.GateState
+			n.ProbationUntil = prev.ProbationUntil
+			n.ProbationTried = prev.ProbationTried
+			n.ProbationFailures = prev.ProbationFailures
+			n.LastAttemptKind = prev.LastAttemptKind
 		}
 		next = append(next, n)
 		byID[n.Fingerprint] = n
@@ -1700,6 +1920,56 @@ func (p *nodePool) hasEligibleNode() bool {
 	return false
 }
 
+// previewExclusionVerdict 只读地统计可路由节点，供 429 漂移闸门在【发送前】判定
+// 「全排除」并计算 would_be_egress。它不修改 sticky / active / rrIndex / lastCandidates，
+// 因此不会污染 pick(false) 的粘滞语义；只做与选路一致的冷却清扫。
+//
+// 返回：first = 本应选中的出口（当前 active 未被排除时优先，复刻粘滞语义）；
+// eligible = 区域匹配的可路由节点数；unblocked = 其中未被 exclude 的节点数。
+// eligible > 0 && unblocked == 0 即「池里有可用节点，但全被 429 排除」。
+func (p *nodePool) previewExclusionVerdict(requiredRegion string, exclude map[string]bool) (first string, eligible, unblocked int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := time.Now()
+	p.sweepExpiredLocked(now)
+	activeUnblocked := ""
+	firstUnblocked := ""
+	for _, n := range p.nodes {
+		if !p.eligible(n, now) {
+			continue
+		}
+		if requiredRegion != "" && n.Region != requiredRegion {
+			continue
+		}
+		eligible++
+		if len(exclude) > 0 && exclude[nodeEgressKey(n.Fingerprint)] {
+			continue
+		}
+		unblocked++
+		if firstUnblocked == "" {
+			firstUnblocked = nodeEgressKey(n.Fingerprint)
+		}
+		if n.Fingerprint == p.activeID {
+			activeUnblocked = nodeEgressKey(n.Fingerprint)
+		}
+	}
+	switch {
+	case activeUnblocked != "":
+		return activeUnblocked, eligible, unblocked
+	case firstUnblocked != "":
+		return firstUnblocked, eligible, unblocked
+	default:
+		return "none_available", eligible, unblocked
+	}
+}
+
+// previewExclusionCounts 是 previewExclusionVerdict 的计数版（main 在 egress.Get
+// 回退直连后复核用）。
+func (p *nodePool) previewExclusionCounts(requiredRegion string, exclude map[string]bool) (eligible, unblocked int) {
+	_, eligible, unblocked = p.previewExclusionVerdict(requiredRegion, exclude)
+	return eligible, unblocked
+}
+
 // waitStateSaves 等待所有异步状态写入完成（测试清理用）。
 func (p *nodePool) waitStateSaves() {
 	p.saveWG.Wait()
@@ -1732,14 +2002,17 @@ func (p *nodePool) saveState() {
 	st := persistentState{Version: proxyStateVersion, Nodes: map[string]nodeRuntimeState{}}
 	for _, n := range p.nodes {
 		st.Nodes[n.Fingerprint] = nodeRuntimeState{
-			State:         n.State.String(),
-			MarkedAt:      n.MarkedAt,
-			CooldownUntil: n.CooldownUntil,
-			LastError:     n.LastError,
-			LastUsedAt:    n.LastUsedAt,
-			LatencyMs:     n.LatencyMs,
-			LastProbeAt:   n.LastProbeAt,
-			GateState:     n.GateState,
+			State:             n.State.String(),
+			MarkedAt:          n.MarkedAt,
+			CooldownUntil:     n.CooldownUntil,
+			LastError:         n.LastError,
+			LastUsedAt:        n.LastUsedAt,
+			LatencyMs:         n.LatencyMs,
+			LastProbeAt:       n.LastProbeAt,
+			GateState:         n.GateState,
+			ProbationUntil:    n.ProbationUntil,
+			ProbationTried:    n.ProbationTried,
+			ProbationFailures: n.ProbationFailures,
 		}
 	}
 	p.mu.RUnlock()
@@ -1795,12 +2068,18 @@ func (p *nodePool) restoreStateLocked() int {
 		}
 		state := nodeStateFromString(rs.State)
 		trimmed := strings.ToLower(strings.TrimSpace(rs.State))
-		if trimmed != "" && trimmed != "available" && trimmed != "dead" && trimmed != "exhausted" {
+		if trimmed != "" && trimmed != "available" && trimmed != "dead" && trimmed != "exhausted" && trimmed != "probation" {
 			slog.Warn("proxy state entry has unknown state (treated as available)",
 				"node", n.Name, "fp", n.Fingerprint, "state", rs.State)
 		}
 		if state == NodeExhausted && rs.CooldownUntil.IsZero() {
 			slog.Warn("proxy state entry ignored: exhausted without cooldown_until",
+				"node", n.Name, "fp", n.Fingerprint)
+			continue
+		}
+		// probation 没有截止时间就无法收敛，等同于坏数据：跳过（保持 available）。
+		if state == NodeProbation && rs.ProbationUntil.IsZero() {
+			slog.Warn("proxy state entry ignored: probation without probation_until",
 				"node", n.Name, "fp", n.Fingerprint)
 			continue
 		}
@@ -1812,6 +2091,9 @@ func (p *nodePool) restoreStateLocked() int {
 		n.LatencyMs = rs.LatencyMs
 		n.LastProbeAt = rs.LastProbeAt
 		n.GateState = rs.GateState
+		n.ProbationUntil = rs.ProbationUntil
+		n.ProbationTried = rs.ProbationTried
+		n.ProbationFailures = rs.ProbationFailures
 		applied++
 	}
 	return applied
