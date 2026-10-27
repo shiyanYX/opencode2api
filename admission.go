@@ -22,6 +22,7 @@ type Candidate struct {
 	Egress string
 	Sub    string
 	Model  string
+	Region string // 节点区域；direct 为空
 	Direct bool
 }
 

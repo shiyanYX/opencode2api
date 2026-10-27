@@ -1773,6 +1773,13 @@ func (p *nodePool) currentFp() string {
 	return p.activeID
 }
 
+// manualFp 返回面板手动指定的优先节点指纹（只读，不切换）。
+func (p *nodePool) manualFp() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.manualPick
+}
+
 // nameOf 返回节点指纹对应的显示名（未命中返回空串）。
 // 供调用日志等把指纹翻译成可读节点名，便于外部快速定位问题节点。
 func (p *nodePool) nameOf(fp string) string {

@@ -79,7 +79,7 @@ func bunClientFor(base *http.Client) *http.Client {
 // 兜底：见 quota.go 的重判逻辑）。
 func bunEgressResult(r EgressResult) EgressResult {
 	if c := bunClientFor(r.Client); c != nil {
-		return EgressResult{Client: c, NodeFP: r.NodeFP, Direct: r.Direct, key: r.key, eg: r.eg}
+		return EgressResult{Client: c, NodeFP: r.NodeFP, Direct: r.Direct, key: r.key, eg: r.eg, v5: r.v5}
 	}
 	return r
 }

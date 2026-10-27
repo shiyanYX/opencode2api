@@ -11,6 +11,7 @@ package main
 //   - EgressResult: 持有选中客户端 + Invalidate() 失效上下文
 
 import (
+	"context"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,10 @@ type EgressRequest struct {
 	ForceSwitch    bool
 	BodyMap        map[string]any // sticky key 推导用
 	RequiredRegion string         // "" = 无区域限制
+	// Model 是 v5 force 选路的 pair 维度；旧路径忽略。
+	Model string
+	// Context 仅用于 v5_fallback 事件；旧路径忽略，可空。
+	Context context.Context
 	// ExcludeEgress 是本次选路必须排除的出口键（EgressKey，如 node:<fp>/direct）。
 	// 429 漂移守卫按 model 传入已 429 的出口集合，避免换节点又撞回同一批出口。
 	ExcludeEgress map[string]bool
@@ -39,7 +44,11 @@ type EgressResult struct {
 
 	key string        // sticky key，Invalidate() 用
 	eg  *EgressClient // 反向引用
+	v5  *Attempt      // force 下由 Admission 取得的租约；旧路径为 nil
 }
+
+// V5 返回 force 选路取得的租约。旧路径/shadow 为 nil。
+func (r EgressResult) V5() *Attempt { return r.v5 }
 
 // EgressKeyDirect 是「真·直连出口」在按出口分桶时的桶键。
 // 上游按出口 IP 分桶限流，所以桶的身份必须能唯一指出「哪个出口」，
@@ -128,6 +137,28 @@ func (eg *EgressClient) Get(r EgressRequest) EgressResult {
 	paidDirect := eg.paidDirect
 	eg.cfgMu.RUnlock()
 	if tier == TierPaid && paidDirect {
+		return EgressResult{Client: eg.direct, Direct: true}
+	}
+
+	// v5 force：节点选择完全交给 Admission。放在付费直连快速路径之后，
+	// 未命中时仍按既定语义回退真直连。
+	if v5Enabled() == v5Force {
+		ctx := r.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if at, ok := v5AdmitContext(ctx, r.Model, r.RequiredRegion, r.ExcludeEgress); ok {
+			if at.Direct {
+				return EgressResult{Client: eg.direct, Direct: true, v5: at}
+			}
+			fp := v5NodeFP(at.Egress)
+			if fp != "" {
+				if c := proxyPool.getClient(fp); c != nil {
+					return EgressResult{Client: c, NodeFP: fp, v5: at}
+				}
+			}
+			v5DropAttempt(at)
+		}
 		return EgressResult{Client: eg.direct, Direct: true}
 	}
 

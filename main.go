@@ -2875,8 +2875,10 @@ func noteAttemptTransportError(ctx context.Context, pool *nodePool, nodeFp strin
 func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) ([]byte, int, http.Header, error) {
 	// 配额熔断闸门：节点池无可用节点且直连出口已被上游 429 限流时，
 	// 直接返回 429，不再访问上游（见 quota_halt.go）。
-	if halted, haltBody := quotaHaltGuard.gate(auth); halted {
-		return quotaHaltResponse(ctx, modelID, haltBody)
+	if !v5LegacyGatesBypassed() {
+		if halted, haltBody := quotaHaltGuard.gate(auth); halted {
+			return quotaHaltResponse(ctx, modelID, haltBody)
+		}
 	}
 	initOCSession()
 
@@ -2897,7 +2899,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 
 	// 查找模型的区域限制
 	requiredRegion := lookupModelRegion(modelID)
-	if requiredRegion != "" {
+	if !v5LegacyGatesBypassed() && requiredRegion != "" {
 		log.Info("model_region_restriction", "model", modelID, "region", requiredRegion)
 		// 检查是否有该区域的可用节点
 		if egress.NodesActive() {
@@ -2943,7 +2945,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
 		// T2：池级 403 halt 期间不再换节点、不再发新 attempt，fail-fast。
-		if proxyPool.poolHalted(time.Now()) {
+		if !v5LegacyGatesBypassed() && proxyPool.poolHalted(time.Now()) {
 			fp := proxyPool.currentFp()
 			wouldBe := EgressKeyDirect
 			if fp != "" {
@@ -2961,10 +2963,13 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 				"elapsed_ms", time.Since(upstreamLoopStart).Milliseconds())
 			break
 		}
-		blockedEgress := shapeDriftBlockedEgress(modelID, time.Now())
-		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
+		var blockedEgress map[string]bool
+		if !v5LegacyGatesBypassed() {
+			blockedEgress = shapeDriftBlockedEgress(modelID, time.Now())
+		}
+		egResult := egress.Get(EgressRequest{Auth: auth, Model: modelID, Context: ctx, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
 		switchCandidates := proxyPool.lastSwitchCandidates()
-		if proxyPool.poolHalted(time.Now()) {
+		if !v5LegacyGatesBypassed() && proxyPool.poolHalted(time.Now()) {
 			// 另一个请求可能在本次 egress.Get 期间刚触发 halt：不能再直连/发请求。
 			callLogSwitchEvent(ctx, egResult.NodeFP, "pool_halt", "pool_halt", 0)
 			callLogSuppressedAttempt(ctx, modelID, egResult.NodeFP, "pool_halt", egResult.EgressKey(), nil)
@@ -2976,7 +2981,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		if !useGoEndpoint {
 			egResult = bunEgressResult(egResult)
 		}
-		if trialSwitchPending {
+		if !v5LegacyGatesBypassed() && trialSwitchPending {
 			shapeDriftSetTrialEgress(modelID, egResult.EgressKey(), time.Now())
 			trialSwitchPending = false
 		}
@@ -2985,7 +2990,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			// 节点全部在冷却/判死：本次尝试实际落到了直连，节点侧尝试没有发出。
 			callLogSuppressedAttempt(ctx, modelID, "", "node_cooldown", EgressKeyDirect, nil)
 		}
-		if blockedEgress[egResult.EgressKey()] {
+		if !v5LegacyGatesBypassed() && blockedEgress[egResult.EgressKey()] {
 			// 选路把所有已知 429 出口都排除了；宁可 fail-fast 也不能烧新 IP。
 			egResult.Invalidate()
 			callLogEvent(ctx, "shape_drift", egResult.NodeFP, "all_egress_blocked")
@@ -2996,7 +3001,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		if nodeFp != "" {
 			proxyPool.noteAttempt(nodeFp, time.Now())
 		}
-		if nodeFp == "" && proxyPool.allSubsQuarantined(time.Now()) {
+		if nodeFp == "" && !v5LegacyGatesBypassed() && proxyPool.allSubsQuarantined(time.Now()) {
 			callLogSwitchEvent(ctx, "", "all_subscriptions_quarantined", "sub_quarantine", 0)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("all subscriptions quarantined after 403")
 		}
@@ -3155,7 +3160,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			proxyPool.note403(nodeFp, time.Now())
 		}
 		// T2 硬约束：halt 期间不 mark、不换节点；本请求若在飞行中撞上 halt，也立即失败。
-		if proxyPool.poolHalted(time.Now()) {
+		if !v5LegacyGatesBypassed() && proxyPool.poolHalted(time.Now()) {
 			callLogSwitchEvent(ctx, nodeFp, "pool_halt", "pool_halt", switchCandidates)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
 		}
@@ -3278,8 +3283,11 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			// 说明是【网关形态被拒】而不是【出口配额耗尽】——继续切节点只会把
 			// 坏形态请求散布到更多 IP（每 IP 挨 N 次就当日封禁，实测 ~16 次量级）。
 			// 确认漂移后本次请求按原错误返回，不再消耗出口。见 shape_drift.go。
-			drift := shapeDriftObserve429(modelID, egResult.EgressKey(), quotaReason, time.Now())
-			if drift.Confirmed || drift.Trial {
+			drift := shapeDriftDecision{}
+			if !v5LegacyGatesBypassed() {
+				drift = shapeDriftObserve429(modelID, egResult.EgressKey(), quotaReason, time.Now())
+			}
+			if !v5LegacyGatesBypassed() && (drift.Confirmed || drift.Trial) {
 				reason := "confirmed"
 				if drift.Trial {
 					reason = "half_open_trial"
@@ -3337,7 +3345,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 
 		// 出口已回退直连、上游仍 429：剩余重试都打在同一个 IP 上，只会空转。
 		// 立即停止重试并对该【具体出口】进入熔断（见 quota_halt.go）。
-		if egResult.Direct && resp.StatusCode == http.StatusTooManyRequests && auth.tier() == TierFree {
+		if !v5LegacyGatesBypassed() && egResult.Direct && resp.StatusCode == http.StatusTooManyRequests && auth.tier() == TierFree {
 			// 按出口分桶：桶身份来自 EgressResult（NodeFP/Direct），不是全局一个 bool。
 			// 同时记一次失败 ⇒ 该出口的恢复滞回计数清零。
 			egressKey := egResult.EgressKey()
@@ -3405,12 +3413,14 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID string, auth UpstreamAuth) (io.ReadCloser, int, http.Header, error) {
 	// 配额熔断闸门：节点池无可用节点且直连出口已被上游 429 限流时，
 	// 直接返回 429，不再访问上游（见 quota_halt.go）。
-	if halted, haltBody := quotaHaltGuard.gate(auth); halted {
-		body, status, header, err := quotaHaltResponse(ctx, modelID, haltBody)
-		if err != nil {
-			return nil, status, header, err
+	if !v5LegacyGatesBypassed() {
+		if halted, haltBody := quotaHaltGuard.gate(auth); halted {
+			body, status, header, err := quotaHaltResponse(ctx, modelID, haltBody)
+			if err != nil {
+				return nil, status, header, err
+			}
+			return io.NopCloser(bytes.NewReader(body)), status, header, nil
 		}
-		return io.NopCloser(bytes.NewReader(body)), status, header, nil
 	}
 	initOCSession()
 
@@ -3430,7 +3440,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 
 	// 查找模型的区域限制
 	requiredRegion := lookupModelRegion(modelID)
-	if requiredRegion != "" {
+	if !v5LegacyGatesBypassed() && requiredRegion != "" {
 		log.Info("model_region_restriction", "model", modelID, "region", requiredRegion)
 		// 检查是否有该区域的可用节点
 		if egress.NodesActive() {
@@ -3474,7 +3484,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
 		// T2：池级 403 halt 期间不再换节点、不再发新 attempt，fail-fast。
-		if proxyPool.poolHalted(time.Now()) {
+		if !v5LegacyGatesBypassed() && proxyPool.poolHalted(time.Now()) {
 			fp := proxyPool.currentFp()
 			wouldBe := EgressKeyDirect
 			if fp != "" {
@@ -3492,10 +3502,13 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 				"elapsed_ms", time.Since(upstreamLoopStart).Milliseconds())
 			break
 		}
-		blockedEgress := shapeDriftBlockedEgress(modelID, time.Now())
-		egResult := egress.Get(EgressRequest{Auth: auth, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
+		var blockedEgress map[string]bool
+		if !v5LegacyGatesBypassed() {
+			blockedEgress = shapeDriftBlockedEgress(modelID, time.Now())
+		}
+		egResult := egress.Get(EgressRequest{Auth: auth, Model: modelID, Context: ctx, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
 		switchCandidates := proxyPool.lastSwitchCandidates()
-		if proxyPool.poolHalted(time.Now()) {
+		if !v5LegacyGatesBypassed() && proxyPool.poolHalted(time.Now()) {
 			// 另一个请求可能在本次 egress.Get 期间刚触发 halt：不能再直连/发请求。
 			callLogSwitchEvent(ctx, egResult.NodeFP, "pool_halt", "pool_halt", 0)
 			callLogSuppressedAttempt(ctx, modelID, egResult.NodeFP, "pool_halt", egResult.EgressKey(), nil)
@@ -3505,7 +3518,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		if !useGoEndpoint {
 			egResult = bunEgressResult(egResult)
 		}
-		if trialSwitchPending {
+		if !v5LegacyGatesBypassed() && trialSwitchPending {
 			shapeDriftSetTrialEgress(modelID, egResult.EgressKey(), time.Now())
 			trialSwitchPending = false
 		}
@@ -3514,7 +3527,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			// 节点全部在冷却/判死：本次尝试实际落到了直连，节点侧尝试没有发出。
 			callLogSuppressedAttempt(ctx, modelID, "", "node_cooldown", EgressKeyDirect, nil)
 		}
-		if blockedEgress[egResult.EgressKey()] {
+		if !v5LegacyGatesBypassed() && blockedEgress[egResult.EgressKey()] {
 			// 选路把所有已知 429 出口都排除了；宁可 fail-fast 也不能烧新 IP。
 			egResult.Invalidate()
 			callLogEvent(ctx, "shape_drift", egResult.NodeFP, "all_egress_blocked")
@@ -3525,7 +3538,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		if nodeFp != "" {
 			proxyPool.noteAttempt(nodeFp, time.Now())
 		}
-		if nodeFp == "" && proxyPool.allSubsQuarantined(time.Now()) {
+		if nodeFp == "" && !v5LegacyGatesBypassed() && proxyPool.allSubsQuarantined(time.Now()) {
 			callLogSwitchEvent(ctx, "", "all_subscriptions_quarantined", "sub_quarantine", 0)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("all subscriptions quarantined after 403")
 		}
@@ -3664,7 +3677,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			proxyPool.note403(nodeFp, time.Now())
 		}
 		// T2 硬约束：halt 期间不 mark、不换节点；本请求若在飞行中撞上 halt，也立即失败。
-		if proxyPool.poolHalted(time.Now()) {
+		if !v5LegacyGatesBypassed() && proxyPool.poolHalted(time.Now()) {
 			callLogSwitchEvent(ctx, nodeFp, "pool_halt", "pool_halt", switchCandidates)
 			return nil, http.StatusServiceUnavailable, nil, fmt.Errorf("proxy pool halted after 403 storm")
 		}
@@ -3785,8 +3798,11 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			callLogEvent(ctx, "upstream_error", nodeFp, fmt.Sprintf("http %d quota_signal", resp.StatusCode))
 			// 形态漂移守卫（同非流式，见 shape_drift.go）：多出口同窗 429
 			// 一致出现 → 停配额切换，按原错误返回，不烧更多出口。
-			drift := shapeDriftObserve429(modelID, egResult.EgressKey(), quotaReason, time.Now())
-			if drift.Confirmed || drift.Trial {
+			drift := shapeDriftDecision{}
+			if !v5LegacyGatesBypassed() {
+				drift = shapeDriftObserve429(modelID, egResult.EgressKey(), quotaReason, time.Now())
+			}
+			if !v5LegacyGatesBypassed() && (drift.Confirmed || drift.Trial) {
 				reason := "confirmed"
 				if drift.Trial {
 					reason = "half_open_trial"
@@ -3842,7 +3858,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 
 		// 出口已回退直连、上游仍 429：剩余重试都打在同一个 IP 上，只会空转。
 		// 立即停止重试并对该【具体出口】进入熔断（见 quota_halt.go）。
-		if egResult.Direct && resp.StatusCode == http.StatusTooManyRequests && auth.tier() == TierFree {
+		if !v5LegacyGatesBypassed() && egResult.Direct && resp.StatusCode == http.StatusTooManyRequests && auth.tier() == TierFree {
 			// 按出口分桶：桶身份来自 EgressResult（NodeFP/Direct），不是全局一个 bool。
 			// 同时记一次失败 ⇒ 该出口的恢复滞回计数清零。
 			egressKey := egResult.EgressKey()

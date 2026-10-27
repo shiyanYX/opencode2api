@@ -83,6 +83,9 @@ var (
 	v5RTMu sync.Mutex
 	v5RT   *v5Runtime
 
+	v5FallbackMu   sync.Mutex
+	v5FallbackLast = map[string]time.Time{}
+
 	// v5CandidatesHook 仅测试注入，生产为 nil。影子测试需要一个不依赖
 	// proxyPool 全局状态的候选集；不能在请求路径上留下可变 hook。
 	v5CandidatesHook func(string) []Candidate
@@ -93,6 +96,9 @@ func resetV5ForTest() {
 	v5RT = nil
 	v5RTMu.Unlock()
 	v5CandidatesHook = nil
+	v5FallbackMu.Lock()
+	v5FallbackLast = map[string]time.Time{}
+	v5FallbackMu.Unlock()
 }
 
 func v5GetRuntime() *v5Runtime {
@@ -142,6 +148,7 @@ func v5Candidates(model string) []Candidate {
 			Egress: nodeEgressKey(n.Fingerprint),
 			Sub:    subKeyOf(n.Name),
 			Model:  model,
+			Region: n.Region,
 		})
 	}
 	out = append(out, Candidate{Egress: EgressKeyDirect, Direct: true, Model: model})
@@ -155,7 +162,7 @@ func v5CandidatesFrom(model string, nodes []*ProxyNode, hasClient func(*ProxyNod
 		if n == nil || n.Fingerprint == "" || hasClient == nil || !hasClient(n) {
 			continue
 		}
-		out = append(out, Candidate{Egress: nodeEgressKey(n.Fingerprint), Sub: subKeyOf(n.Name), Model: model})
+		out = append(out, Candidate{Egress: nodeEgressKey(n.Fingerprint), Sub: subKeyOf(n.Name), Model: model, Region: n.Region})
 	}
 	out = append(out, Candidate{Egress: EgressKeyDirect, Direct: true, Model: model})
 	return out
@@ -213,6 +220,20 @@ func v5ObserveUpstream(ctx context.Context, modelID string, eg EgressResult, sta
 
 	class := classifyV5(status, errBody, err, attemptVer, pinnedOCVersion)
 	actual := eg.EgressKey()
+
+	if mode == v5Force {
+		if at := eg.V5(); at != nil {
+			rt.adm.Observe(at, class)
+		}
+		rt.mu.Lock()
+		rt.requests++
+		rt.byClass[string(class)]++
+		rt.mu.Unlock()
+		if class != "other" {
+			v5AppendOutcome(ctx, modelID, actual, class)
+		}
+		return
+	}
 
 	rt.mu.Lock()
 	rt.requests++
@@ -296,6 +317,93 @@ func v5AppendOutcome(ctx context.Context, model, actual string, class OutcomeCla
 		At:     time.Now().Format("2006-01-02T15:04:05.000Z07:00"),
 		Actual: actual,
 		Class:  string(class),
+	})
+	cr.mu.Unlock()
+}
+
+// v5LegacyGatesBypassed 是 force 下旁路旧闸门的唯一判定。
+func v5LegacyGatesBypassed() bool { return v5Enabled() == v5Force }
+
+// v5DropAttempt 归还一个未真正发出的租约；once 确保与 Observe 不会双重归还。
+func v5DropAttempt(at *Attempt) {
+	if at == nil {
+		return
+	}
+	at.once.Do(func() {
+		if at.release != nil {
+			at.release()
+		}
+	})
+}
+
+// v5Admit 保留给测试/旧调用方的三参入口；Get 使用带 context 的版本以落 fallback 事件。
+func v5Admit(model, region string, exclude map[string]bool) (*Attempt, bool) {
+	return v5AdmitContext(context.Background(), model, region, exclude)
+}
+
+func v5AdmitContext(ctx context.Context, model, region string, exclude map[string]bool) (*Attempt, bool) {
+	rt := v5GetRuntime()
+	if rt == nil {
+		v5Fallback(ctx, model, "disabled")
+		return nil, false
+	}
+
+	ex := make(map[string]bool, len(exclude)+1)
+	for k, v := range exclude {
+		ex[k] = v
+	}
+	for _, c := range v5Candidates(model) {
+		if c.Egress == "" {
+			continue
+		}
+		if region != "" && (c.Direct || c.Egress == EgressKeyDirect || c.Region != region) {
+			ex[c.Egress] = true
+		}
+	}
+
+	prefer := ""
+	if fp := proxyPool.manualFp(); fp != "" {
+		prefer = nodeEgressKey(fp)
+	} else if fp := proxyPool.currentFp(); fp != "" {
+		prefer = nodeEgressKey(fp)
+	}
+
+	at, reason := rt.adm.AdmitPreferred(model, ex, prefer)
+	if at == nil {
+		v5Fallback(ctx, model, reason)
+		return nil, false
+	}
+	return at, true
+}
+
+// v5Fallback 记录“force 选路无租约、本次回退直连”。同一 reason 每分钟最多一条。
+func v5Fallback(ctx context.Context, model, reason string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if reason == "" {
+		reason = "no_candidate"
+	}
+	now := time.Now()
+	v5FallbackMu.Lock()
+	if last, ok := v5FallbackLast[reason]; ok && now.Sub(last) < time.Minute {
+		v5FallbackMu.Unlock()
+		return
+	}
+	v5FallbackLast[reason] = now
+	v5FallbackMu.Unlock()
+
+	cr := callRecorderFrom(ctx)
+	if cr == nil {
+		return
+	}
+	cr.mu.Lock()
+	cr.rec.Events = append(cr.rec.Events, CallEvent{
+		Type:   "v5_fallback",
+		Model:  model,
+		Reason: reason,
+		Detail: "reason=" + reason,
+		At:     now.Format("2006-01-02T15:04:05.000Z07:00"),
 	})
 	cr.mu.Unlock()
 }
