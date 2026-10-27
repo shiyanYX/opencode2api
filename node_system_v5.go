@@ -329,6 +329,13 @@ func v5DropAttempt(at *Attempt) {
 	if at == nil {
 		return
 	}
+	// 未真正发出的租约也必须走 Observe("other")：它同时做 release
+	// 和 exploreInflight 递减（见 Admission.Observe）。只调 release()
+	// 会让冷启动的 explore 计数永久停在 1，之后同出口无法再探索。
+	if rt := v5GetRuntime(); rt != nil {
+		rt.adm.Observe(at, OutcomeClass("other"))
+		return
+	}
 	at.once.Do(func() {
 		if at.release != nil {
 			at.release()

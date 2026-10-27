@@ -2,7 +2,7 @@
 
 - 分支：`test`
 - 基线：`4d62dc3`（W1 shadow wiring）
-- 结论：**force 路径已实现并通过定向测试/竞态/变异检查**；完整 `go test ./...` 仍被 3 个既有非 W2 测试拖红，见 §5。
+- 结论：**force 路径已实现并通过定向测试/竞态/变异检查**；完整 `go test ./...` 仍被既有非 W2 测试拖红（最新为 2 个 IP4RV 口径测试），见 §5。
 - 范围：只改选路与观测接线；没有改 `proxy_node` 生命周期、`admission` 算法、`main` 的旧重试/计费逻辑。
 
 ## 1. 实现
@@ -85,7 +85,7 @@ GOMODCACHE=$PWD/.modcache GOPROXY=off go vet ./...
 # (no output)
 
 GOMODCACHE=$PWD/.modcache GOPROXY=off go test -count=1 ./...
-# FAIL 179.450s；仅 3 个既有失败，见 §5
+# FAIL 179.450s（首次）；最新 270.413s 仅 2 个 IP4RV 既有失败，见 §5
 ```
 
 ## 4. 变异检查
@@ -103,13 +103,12 @@ Bun 变异第一次“存活”是因为测试用了 `&http.Client{}`（无 Tran
 
 ## 5. 完整套件与既有失败
 
-`/tmp/w2-off-full.log` 失败集合：
+最新一次 `go test -count=1 ./...`（`/tmp/w2-fix-full.log`，270.413s）只复现 2 个既有失败：
 
-- `TestExhaustedExpiryEntersProbationNotAvailable`（`proxy_node` 既有语义，非 W2 文件）
 - `TestIP4RVLiveServedDrift`（既有 R-A/R-B 统计口径）
 - `TestIP4RVDocsDrift`（既有 R-A/R-B 统计口径）
 
-W1 报告 `25-w1-report.md` 已记录：临时撤掉 W1 接线后同样失败，确认不是 W1/W2 引入。W2 没改这些路径，因此不把它们算作 W2 回归；但“off 下整个 `go test ./...` 全绿”这一验收口径仍被这 3 个存量失败挡住，需要由后续专门修 R-A/R-B 或调整门禁，不能在本切片假装全绿。
+更早一次日志还出现过 `TestExhaustedExpiryEntersProbationNotAvailable` 的临时状态文件路径告警/失败，但本次已通过；它不是 W2 路径，且属于测试目录清理时序的既有问题。W1 报告 `25-w1-report.md` 已记录：临时撤掉 W1 接线后 IP4RV 同样失败，确认不是 W1/W2 引入。W2 没改这些路径，因此不把它们算作 W2 回归；但“off 下整个 `go test ./...` 全绿”这一验收口径仍被存量失败挡住，需要由后续专门修 R-A/R-B 或调整门禁，不能在本切片假装全绿。
 
 ## 6. 已知边界/风险
 
@@ -124,3 +123,36 @@ W1 报告 `25-w1-report.md` 已记录：临时撤掉 W1 接线后同样失败，
 - force 灰度：先 1 个出口/1 个模型，观察 `v5_outcome`、`v5_fallback`、503 比例；
 - 把 `v5Candidates` 的 client 初始化竞态纳入启动顺序验收；
 - 为 `bunEgressResult` 增加 free-tier 真实请求级测试（当前只测字段保留）。
+
+## 8. W2 复核修复（租约生命周期）
+
+复核指出两个真实泄漏点，均已修复并验证：
+
+1. **build 失败泄漏**：`main.go:3021`（非流式）与 `main.go:3557`（流式）在
+   `buildOCRequestWithEndpoint` 失败时直接 `return nil, 500, nil, err`，此前既没有
+   `Observe` 也没有归还租约。现在两处都在 return 前调用
+   `v5DropAttempt(egResult.V5())`。否则 K=8 的出口连续 8 次 build 失败就会永久
+   `all_inflight`。
+2. **drop 只 release、不减 explore**：`v5DropAttempt` 现在优先走
+   `v5GetRuntime().adm.Observe(at, "other")`，由 `Observe` 统一做
+   `release` + `exploreInflight` 递减 + `sync.Once`；只有 `rt == nil`（例如 off
+   模式/运行时尚未建立）时才退回裸 `at.once.Do(release)`。
+
+新增测试 `TestV5DropAttemptClearsExploreInflight`：冷启动取到 `explore=true` 租约
+→ `v5DropAttempt` → `sem` 长度回 0、`exploreInflight["node:e1"]==0`，再次
+`AdmitPreferred` 仍能进入同出口探索。
+
+```bash
+GOMODCACHE=$PWD/.modcache GOPROXY=off go test -run '^TestV5DropAttemptClearsExploreInflight$' -count=1 .
+# ok github.com/shiyanYX/opencode2api 0.008s
+
+GOMODCACHE=$PWD/.modcache GOPROXY=off go test -run 'TestV5' -race -count=1 .
+# ok github.com/shiyanYX/opencode2api 1.047s
+
+GOMODCACHE=$PWD/.modcache GOPROXY=off go vet ./...
+# (no output)
+```
+
+变异：把 `v5DropAttempt` 改回裸 `release()` 后，
+`TestV5DropAttemptClearsExploreInflight` 在 `exploreInflight after drop=1 want 0`
+处失败（rc=1）；恢复后重新全绿。完整套件仍仅有 §5 的既有失败（最新为 2 个 IP4RV 口径测试）。

@@ -3018,6 +3018,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp, attemptVer)
 		if err != nil {
+			v5DropAttempt(egResult.V5())
 			return nil, 500, nil, err
 		}
 		// 把上下文真正挂到上游请求上（builder 用的是 http.NewRequest，Context 是
@@ -3554,6 +3555,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp, attemptVer)
 		if err != nil {
+			v5DropAttempt(egResult.V5())
 			return nil, 500, nil, err
 		}
 		// 把上下文真正挂到上游请求上（builder 用的是 http.NewRequest，Context 是

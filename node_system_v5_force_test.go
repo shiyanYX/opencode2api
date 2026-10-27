@@ -206,3 +206,35 @@ func TestV5ForceBunPreservesLease(t *testing.T) {
 		t.Fatal("bunEgressResult dropped v5 lease")
 	}
 }
+
+func TestV5DropAttemptClearsExploreInflight(t *testing.T) {
+	t.Setenv("NODE_SYSTEM", "force")
+	resetV5ForTest()
+	v5CandidatesHook = forceTestCandidates("m", Candidate{Egress: "node:e1", Sub: "s"})
+	rt := v5GetRuntime()
+	at, reason := rt.adm.AdmitPreferred("m", nil, "")
+	if at == nil {
+		t.Fatalf("first Admit failed: %s", reason)
+	}
+	if !at.explore {
+		t.Fatal("cold-start first admit should be explore")
+	}
+	if got := len(rt.adm.sems["node:e1"]); got != 1 {
+		t.Fatalf("sem len=%d want 1", got)
+	}
+	v5DropAttempt(at)
+	if got := len(rt.adm.sems["node:e1"]); got != 0 {
+		t.Fatalf("sem len after drop=%d want 0", got)
+	}
+	if got := rt.adm.exploreInflight["node:e1"]; got != 0 {
+		t.Fatalf("exploreInflight after drop=%d want 0", got)
+	}
+	at2, reason := rt.adm.AdmitPreferred("m", nil, "")
+	if at2 == nil || at2.Egress != "node:e1" {
+		t.Fatalf("second Admit after drop=%+v,%s; want same egress explore", at2, reason)
+	}
+	if !at2.explore {
+		t.Fatal("second admit should still be explore")
+	}
+	v5DropAttempt(at2)
+}
