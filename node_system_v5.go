@@ -19,6 +19,8 @@ import (
 type v5Mode int
 
 const (
+	v5MaxAttempts = 2
+
 	v5Off v5Mode = iota
 	v5Shadow
 	v5Force
@@ -70,6 +72,11 @@ type v5Runtime struct {
 	started    time.Time
 	shadowOnly bool
 	adm        *Admission
+	statePath  string
+
+	persistMu sync.Mutex
+	dirty     bool
+	lastSave  time.Time
 
 	requests int64
 	agree    int64
@@ -89,6 +96,9 @@ var (
 	// v5CandidatesHook 仅测试注入，生产为 nil。影子测试需要一个不依赖
 	// proxyPool 全局状态的候选集；不能在请求路径上留下可变 hook。
 	v5CandidatesHook func(string) []Candidate
+
+	// v5StatePath is a var so tests can redirect it; production persists under /data.
+	v5StatePath = "/data/v5_state.json"
 )
 
 func resetV5ForTest() {
@@ -110,14 +120,68 @@ func v5GetRuntime() *v5Runtime {
 	if v5Enabled() == v5Off {
 		return nil
 	}
-	st := NewNodeStateV5(time.Now())
+	st, loadErr := loadNodeStateV5(v5StatePath)
+	if loadErr != nil {
+		slog.Warn("v5_state_load_failed", "path", v5StatePath, "error", loadErr)
+	}
+	if st == nil {
+		st = NewNodeStateV5(time.Now())
+	}
+	now := time.Now()
 	v5RT = &v5Runtime{
-		started:    time.Now(),
+		started:    now,
 		shadowOnly: true,
 		adm:        NewAdmission(st, 8, v5Candidates),
+		statePath:  v5StatePath,
+		lastSave:   now,
 		byClass:    map[string]int64{},
 	}
 	return v5RT
+}
+
+// markDirty records a state mutation; the actual write is debounced by
+// persistIfDue (2s) so a burst of 429s does not fsync on every attempt.
+func (rt *v5Runtime) markDirty() {
+	if rt == nil {
+		return
+	}
+	rt.persistMu.Lock()
+	rt.dirty = true
+	rt.persistMu.Unlock()
+}
+
+func (rt *v5Runtime) persistIfDue(now time.Time) {
+	if rt == nil {
+		return
+	}
+	rt.persistMu.Lock()
+	if !rt.dirty || now.Sub(rt.lastSave) < 2*time.Second {
+		rt.persistMu.Unlock()
+		return
+	}
+	rt.dirty = false
+	rt.lastSave = now
+	path := rt.statePath
+	rt.persistMu.Unlock()
+
+	rt.adm.mu.Lock()
+	err := SaveNodeStateV5(path, rt.adm.st)
+	rt.adm.mu.Unlock()
+	if err != nil {
+		slog.Warn("v5_state_save_failed", "path", path, "error", err)
+		rt.markDirty()
+	}
+}
+
+// persistNow is used by tests and shutdown/flush paths; it bypasses the 2s debounce.
+func (rt *v5Runtime) persistNow() {
+	if rt == nil {
+		return
+	}
+	rt.persistMu.Lock()
+	rt.dirty = true
+	rt.persistMu.Unlock()
+	rt.persistIfDue(time.Now().Add(2 * time.Second))
 }
 
 // v5Candidates 只读快照：不 sweep、不改变节点生命周期，避免影子观测反过来
@@ -224,6 +288,8 @@ func v5ObserveUpstream(ctx context.Context, modelID string, eg EgressResult, sta
 	if mode == v5Force {
 		if at := eg.V5(); at != nil {
 			rt.adm.Observe(at, class)
+			rt.markDirty()
+			rt.persistIfDue(time.Now())
 		}
 		rt.mu.Lock()
 		rt.requests++
@@ -324,6 +390,15 @@ func v5AppendOutcome(ctx context.Context, model, actual string, class OutcomeCla
 // v5LegacyGatesBypassed 是 force 下旁路旧闸门的唯一判定。
 func v5LegacyGatesBypassed() bool { return v5Enabled() == v5Force }
 
+// v5AttemptLimit is the force-mode upstream attempt cap (N4b). Off/shadow keep
+// their historical caps.
+func v5AttemptLimit() int {
+	if v5Enabled() == v5Force {
+		return v5MaxAttempts
+	}
+	return 0
+}
+
 // v5DropAttempt 归还一个未真正发出的租约；once 确保与 Observe 不会双重归还。
 func v5DropAttempt(at *Attempt) {
 	if at == nil {
@@ -355,6 +430,28 @@ func v5AdmitContext(ctx context.Context, model, region string, exclude map[strin
 		return nil, false
 	}
 
+	// The pool-wide winter gate blocks normal traffic. The only exceptions are
+	// the periodic direct canary and the one node probe after a direct 2xx.
+	if rt.adm.GatePaused() {
+		if rt.adm.GateCanaryDue() {
+			if at, reason := rt.adm.AdmitCanary(model); at != nil {
+				return at, true
+			} else if reason != "" && reason != "canary_wait" {
+				v5Winter(ctx, model, "canary_"+reason)
+			}
+		}
+		if rt.adm.GateNodeProbeReady() {
+			at, reason := rt.adm.AdmitGateProbe(model)
+			if at != nil {
+				return at, true
+			}
+			v5Winter(ctx, model, "node_probe_"+reason)
+		} else {
+			v5Winter(ctx, model, "gate_paused")
+		}
+		return nil, false
+	}
+
 	ex := make(map[string]bool, len(exclude)+1)
 	for k, v := range exclude {
 		ex[k] = v
@@ -381,6 +478,14 @@ func v5AdmitContext(ctx context.Context, model, region string, exclude map[strin
 		return nil, false
 	}
 	return at, true
+}
+
+// v5Winter records that the pool-wide 429 gate stopped normal selection.
+func v5Winter(ctx context.Context, model, reason string) {
+	if reason == "" {
+		reason = "gate_paused"
+	}
+	callLogEvent(ctx, "v5_winter", "", "model="+model+" reason="+reason)
 }
 
 // v5Fallback 记录“force 选路无租约、本次回退直连”。同一 reason 每分钟最多一条。

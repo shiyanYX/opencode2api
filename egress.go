@@ -45,6 +45,10 @@ type EgressResult struct {
 	key string        // sticky key，Invalidate() 用
 	eg  *EgressClient // 反向引用
 	v5  *Attempt      // force 下由 Admission 取得的租约；旧路径为 nil
+
+	// NoCandidate 由 force 选路返回：本轮不允许发送，main 必须回 429+Retry-After，
+	// 绝不能把 Client 当成直连回退。
+	NoCandidate bool
 }
 
 // V5 返回 force 选路取得的租约。旧路径/shadow 为 nil。
@@ -158,8 +162,10 @@ func (eg *EgressClient) Get(r EgressRequest) EgressResult {
 				}
 			}
 			v5DropAttempt(at)
+			v5Fallback(ctx, r.Model, "node_missing")
 		}
-		return EgressResult{Client: eg.direct, Direct: true}
+		// force 下没有租约就是 NoCandidate：由 main 返回 429，绝不直连。
+		return EgressResult{Client: eg.direct, NoCandidate: true}
 	}
 
 	// 节点池活跃 → 从池中选取

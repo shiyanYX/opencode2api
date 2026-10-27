@@ -2942,6 +2942,10 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 	upstreamLoopStart := time.Now()
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
+	if limit := v5AttemptLimit(); limit > 0 {
+		maxAttempts = limit
+		loopBudget = limit
+	}
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
 		// T2：池级 403 halt 期间不再换节点、不再发新 attempt，fail-fast。
@@ -2968,6 +2972,10 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			blockedEgress = shapeDriftBlockedEgress(modelID, time.Now())
 		}
 		egResult := egress.Get(EgressRequest{Auth: auth, Model: modelID, Context: ctx, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
+		if egResult.NoCandidate {
+			callLogSuppressedAttempt(ctx, modelID, "", "v5_winter", EgressKeyDirect, nil)
+			return nil, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}}, fmt.Errorf("v5 gate: no candidate")
+		}
 		switchCandidates := proxyPool.lastSwitchCandidates()
 		if !v5LegacyGatesBypassed() && proxyPool.poolHalted(time.Now()) {
 			// 另一个请求可能在本次 egress.Get 期间刚触发 halt：不能再直连/发请求。
@@ -3089,13 +3097,15 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
 			// 真实 2xx 是 probation 的唯一证据：拿到即转 available（其他状态无副作用）。
-			proxyPool.recordNodeSuccess(nodeFp)
+			if !v5LegacyGatesBypassed() {
+				proxyPool.recordNodeSuccess(nodeFp)
+			}
 			v5Observe(resp.StatusCode, nil, nil)
-			// 该出口真的拿到 2xx ⇒ 喂给熔断闸门的恢复滞回（连续 2 次 + 间隔 ≥60s）。
-			// 这是本版解闩权的唯一来源：不再靠节点池状态推断该出口是否恢复。
-			quotaHaltGuard.observeSuccess(egResult.EgressKey())
-			// 429 漂移守卫：任一出口真实 2xx 立即解除该 model 的闩（半开试探成功亦然）。
-			shapeDriftObserveSuccess(modelID, egResult.EgressKey(), time.Now())
+			// 旧闸门的恢复证据在 force 下必须旁路，否则两套状态机互相污染。
+			if !v5LegacyGatesBypassed() {
+				quotaHaltGuard.observeSuccess(egResult.EgressKey())
+				shapeDriftObserveSuccess(modelID, egResult.EgressKey(), time.Now())
+			}
 			b, readErr := readAllMarkingFirstData(resp.Body, ctx)
 			resp.Body.Close()
 			if readErr != nil {
@@ -3350,7 +3360,9 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			// 按出口分桶：桶身份来自 EgressResult（NodeFP/Direct），不是全局一个 bool。
 			// 同时记一次失败 ⇒ 该出口的恢复滞回计数清零。
 			egressKey := egResult.EgressKey()
-			quotaHaltGuard.observeFailure(egressKey)
+			if !v5LegacyGatesBypassed() {
+				quotaHaltGuard.observeFailure(egressKey)
+			}
 			if quotaHaltGuard.halt(egressKey, "direct_429", errBody) {
 				log.Warn("quota_halt_entered",
 					"egress", egressKey,
@@ -3482,6 +3494,10 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 	upstreamLoopStart := time.Now()
 	maxQuotaSwitches := effectiveMaxQuotaNodeSwitches()
 	loopBudget := maxAttempts + maxQuotaSwitches
+	if limit := v5AttemptLimit(); limit > 0 {
+		maxAttempts = limit
+		loopBudget = limit
+	}
 
 	for attempt := 0; attempt < loopBudget; attempt++ {
 		// T2：池级 403 halt 期间不再换节点、不再发新 attempt，fail-fast。
@@ -3508,6 +3524,10 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			blockedEgress = shapeDriftBlockedEgress(modelID, time.Now())
 		}
 		egResult := egress.Get(EgressRequest{Auth: auth, Model: modelID, Context: ctx, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
+		if egResult.NoCandidate {
+			callLogSuppressedAttempt(ctx, modelID, "", "v5_winter", EgressKeyDirect, nil)
+			return nil, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}}, fmt.Errorf("v5 gate: no candidate")
+		}
 		switchCandidates := proxyPool.lastSwitchCandidates()
 		if !v5LegacyGatesBypassed() && proxyPool.poolHalted(time.Now()) {
 			// 另一个请求可能在本次 egress.Get 期间刚触发 halt：不能再直连/发请求。
@@ -3621,11 +3641,15 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
 			// 真实 2xx 是 probation 的唯一证据：拿到即转 available（其他状态无副作用）。
-			proxyPool.recordNodeSuccess(nodeFp)
+			if !v5LegacyGatesBypassed() {
+				proxyPool.recordNodeSuccess(nodeFp)
+			}
 			v5Observe(resp.StatusCode, nil, nil)
-			// 同上：流式路径也必须喂恢复滞回，否则只有一半流量能积累恢复证据。
-			quotaHaltGuard.observeSuccess(egResult.EgressKey())
-			shapeDriftObserveSuccess(modelID, egResult.EgressKey(), time.Now())
+			// 同上：流式路径也必须旁路旧恢复计数，force 只让 v5 学习。
+			if !v5LegacyGatesBypassed() {
+				quotaHaltGuard.observeSuccess(egResult.EgressKey())
+				shapeDriftObserveSuccess(modelID, egResult.EgressKey(), time.Now())
+			}
 			log.Info("upstream_attempt",
 				"try_model", modelID,
 				"surface", surface,
@@ -3864,7 +3888,9 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			// 按出口分桶：桶身份来自 EgressResult（NodeFP/Direct），不是全局一个 bool。
 			// 同时记一次失败 ⇒ 该出口的恢复滞回计数清零。
 			egressKey := egResult.EgressKey()
-			quotaHaltGuard.observeFailure(egressKey)
+			if !v5LegacyGatesBypassed() {
+				quotaHaltGuard.observeFailure(egressKey)
+			}
 			if quotaHaltGuard.halt(egressKey, "direct_429", errBody) {
 				log.Warn("quota_halt_entered",
 					"egress", egressKey,

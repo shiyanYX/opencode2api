@@ -65,15 +65,15 @@ func TestV5ForceGetUsesAdmission(t *testing.T) {
 	rt.adm.Observe(got.V5(), Outcome2xx)
 }
 
-func TestV5ForceNoCandidateFallsBackDirect(t *testing.T) {
+func TestV5ForceNoCandidateNoDirect(t *testing.T) {
 	t.Setenv("NODE_SYSTEM", "force")
 	resetV5ForTest()
 	v5CandidatesHook = func(string) []Candidate { return nil }
 	ctx := beginCallLog(context.Background(), "/v1/chat/completions", "m", false, "test")
 	eg := NewEgressClient(&http.Client{})
 	got := eg.Get(EgressRequest{Model: "m", Context: ctx})
-	if !got.Direct || got.V5() != nil {
-		t.Fatalf("fallback=%+v want direct without v5", got)
+	if !got.NoCandidate || got.Direct || got.V5() != nil {
+		t.Fatalf("fallback=%+v want NoCandidate without direct/v5", got)
 	}
 	cr := callRecorderFrom(ctx)
 	cr.mu.Lock()
