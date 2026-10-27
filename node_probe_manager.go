@@ -96,7 +96,7 @@ func (m *probeManager) StartAll(ctx context.Context, nodes []ProxyNode, model, h
 	}
 
 	id := fmt.Sprintf("probe-%d", probeJobSeq.Add(1))
-	jobCtx, cancel := context.WithCancel(ctx)
+	jobCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	job := &probeJob{
 		id:        id,
 		running:   true,
@@ -135,6 +135,10 @@ func (m *probeManager) run(ctx context.Context, job *probeJob, nodes []ProxyNode
 			res := probeOne(ctx, node, model, healthURL)
 
 			m.mu.Lock()
+			if job.canceled && ctx.Err() != nil {
+				res.Class = "canceled"
+				res.Error = "canceled"
+			}
 			job.results = append(job.results, res)
 			job.done++
 			job.summary[res.Class]++
@@ -147,7 +151,6 @@ func (m *probeManager) run(ctx context.Context, job *probeJob, nodes []ProxyNode
 	m.mu.Lock()
 	job.running = false
 	job.finishedAt = probeClock()
-	job.summary["canceled"] = job.total - job.done
 	m.lastAllEnd = job.finishedAt
 	m.mu.Unlock()
 }

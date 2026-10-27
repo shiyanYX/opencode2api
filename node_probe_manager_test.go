@@ -222,14 +222,120 @@ func TestProbeCancelKeepsFinished(t *testing.T) {
 	if len(v.Results) != v.Done {
 		t.Fatalf("results=%d done=%d", len(v.Results), v.Done)
 	}
-	if v.Summary["canceled"] != v.Total-v.Done {
-		t.Fatalf("summary=%v, want canceled=%d", v.Summary, v.Total-v.Done)
+	canceled := 0
+	for _, r := range v.Results {
+		if r.Class == "canceled" {
+			if r.Error != "canceled" {
+				t.Fatalf("canceled error=%q", r.Error)
+			}
+			canceled++
+		}
+	}
+	if v.Summary["canceled"] != canceled {
+		t.Fatalf("summary=%v, want canceled=%d", v.Summary, canceled)
+	}
+	for class, n := range v.Summary {
+		if n == 0 {
+			t.Fatalf("summary contains zero key %q: %v", class, v.Summary)
+		}
+	}
+	if canceled == 0 {
+		t.Fatal("expected at least one canceled in-flight result")
 	}
 	if hits.Load() >= int64(v.Total) {
 		t.Fatalf("hits=%d, want fewer than %d", hits.Load(), v.Total)
 	}
 	if m.Cancel(id) {
 		t.Fatal("cancel of finished job returned true")
+	}
+}
+
+func TestProbeJobSurvivesParentCancel(t *testing.T) {
+	var hits atomic.Int64
+	probeClientFor = func(string) *http.Client {
+		return &http.Client{Transport: f6RoundTripper(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/models") {
+				return probeMgrResponse(204, ""), nil
+			}
+			hits.Add(1)
+			time.Sleep(20 * time.Millisecond)
+			return probeMgrResponse(200, `{}`), nil
+		})}
+	}
+	defer func() { probeClientFor = defaultProbeClient }()
+
+	nodes := make([]ProxyNode, 8)
+	for i := range nodes {
+		nodes[i].Fingerprint = fmt.Sprintf("fp%d", i)
+	}
+	m := newProbeManager()
+	parent, cancel := context.WithCancel(context.Background())
+	id, total, err := m.StartAll(parent, nodes, "m", "https://x/models")
+	if err != nil || total != 8 {
+		t.Fatalf("start err=%v total=%d", err, total)
+	}
+	cancel()
+	v := waitProbeJob(t, m, id)
+	if v.Done != v.Total {
+		t.Fatalf("done=%d total=%d, job was canceled by parent ctx", v.Done, v.Total)
+	}
+	if hits.Load() != int64(v.Total) {
+		t.Fatalf("hits=%d, want %d", hits.Load(), v.Total)
+	}
+	if v.Summary[probeClassOK] != v.Total {
+		t.Fatalf("summary=%v", v.Summary)
+	}
+	if _, ok := v.Summary["canceled"]; ok {
+		t.Fatalf("zero canceled key leaked: %v", v.Summary)
+	}
+}
+
+func TestProbeJobCancelStopsRemaining(t *testing.T) {
+	var hits atomic.Int64
+	probeClientFor = func(string) *http.Client {
+		return &http.Client{Transport: f6RoundTripper(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/models") {
+				return probeMgrResponse(204, ""), nil
+			}
+			hits.Add(1)
+			time.Sleep(10 * time.Millisecond)
+			return probeMgrResponse(200, `{}`), nil
+		})}
+	}
+	defer func() { probeClientFor = defaultProbeClient }()
+
+	nodes := make([]ProxyNode, 30)
+	for i := range nodes {
+		nodes[i].Fingerprint = fmt.Sprintf("fp%d", i)
+	}
+	m := newProbeManager()
+	id, total, err := m.StartAll(context.Background(), nodes, "m", "https://x/models")
+	if err != nil || total != 30 {
+		t.Fatalf("start err=%v total=%d", err, total)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		v, ok := m.Status(id)
+		if !ok {
+			t.Fatal("job missing")
+		}
+		if v.Done >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no probe completed before cancel")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !m.Cancel(id) {
+		t.Fatal("cancel returned false")
+	}
+	v := waitProbeJob(t, m, id)
+	if v.Done >= v.Total {
+		t.Fatalf("done=%d total=%d, want done<total", v.Done, v.Total)
+	}
+	if hits.Load() >= int64(v.Total) {
+		t.Fatalf("hits=%d, want fewer than %d", hits.Load(), v.Total)
 	}
 }
 
