@@ -209,6 +209,9 @@ func TestProbeDeadline(t *testing.T) {
 	a, _, _ := newAdmissionTest(t, 1, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
 	a.probeTimeout = 25 * time.Millisecond
 	probe := mustAdmitProbe(t, a, "m")
+	if at, reason := a.AdmitProbe("m"); at != nil || reason != "probe_busy" {
+		t.Fatalf("second probe = (%v,%q), want probe_busy", at, reason)
+	}
 	if at, reason := a.Admit("m", nil); at != nil || reason != "all_inflight" {
 		t.Fatalf("slot before deadline = (%v,%q), want all_inflight", at, reason)
 	}
@@ -288,4 +291,105 @@ func TestRetryAfter(t *testing.T) {
 	if got := a.RetryAfter("m"); got != time.Second {
 		t.Fatalf("RetryAfter empty = %v, want 1s", got)
 	}
+}
+
+func TestDeadExpiresToProbation(t *testing.T) {
+	a, clock, st := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
+	st.Egress["node:e1"] = &EgressState{Lifecycle: "dead", DeadUntil: clock.Now().Add(30 * time.Minute).UnixMilli()}
+	if at, reason := a.Admit("m", nil); at != nil || reason != "no_candidate" {
+		t.Fatalf("dead before expiry = (%v,%q), want no_candidate", at, reason)
+	}
+	clock.Advance(30*time.Minute + time.Millisecond)
+	at := mustAdmit(t, a, "m")
+	e := st.Egress["node:e1"]
+	if e.Lifecycle != "probation" || e.DeadUntil != 0 {
+		t.Fatalf("expired dead before success = %+v, want probation", e)
+	}
+	a.Observe(at, Outcome2xx)
+	if e.ConsecOK != 1 {
+		t.Fatalf("expired dead after success = %+v, want consec_ok=1", e)
+	}
+}
+
+func TestProbationNeedsThreeSuccesses(t *testing.T) {
+	a, clock, st := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
+	st.Egress["node:e1"] = &EgressState{Lifecycle: "dead", DeadUntil: clock.Now().Add(30 * time.Minute).UnixMilli()}
+	clock.Advance(30*time.Minute + time.Millisecond)
+
+	at := mustAdmit(t, a, "m")
+	a.Observe(at, Outcome2xx)
+	e := st.Egress["node:e1"]
+	if e.Lifecycle != "probation" || e.ConsecOK != 1 {
+		t.Fatalf("after 1 connected = %+v, want probation/1", e)
+	}
+
+	at = mustAdmit(t, a, "m")
+	a.Observe(at, Outcome429)
+	if e.Lifecycle != "probation" || e.ConsecOK != 2 {
+		t.Fatalf("after 2 connected = %+v, want probation/2", e)
+	}
+	clock.Advance(61 * time.Second)
+
+	at = mustAdmit(t, a, "m")
+	a.Observe(at, Outcome5xx)
+	if e.Lifecycle != "active" || e.ConsecOK != 0 {
+		t.Fatalf("after 3 connected = %+v, want active", e)
+	}
+}
+
+func TestSub403WindowExpires(t *testing.T) {
+	a, clock, st := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s"},
+	)
+	at, reason := a.Admit("m", map[string]bool{"node:e2": true})
+	if at == nil {
+		t.Fatalf("admit e1: %s", reason)
+	}
+	a.Observe(at, Outcome403)
+	if st.Subs["s"].Until != 0 {
+		t.Fatalf("one 403 quarantined sub: %+v", st.Subs["s"])
+	}
+
+	clock.Advance(11 * time.Minute)
+	at, reason = a.Admit("m", map[string]bool{"node:e1": true})
+	if at == nil {
+		t.Fatalf("admit e2: %s", reason)
+	}
+	a.Observe(at, Outcome403)
+	if st.Subs["s"].Until != 0 {
+		t.Fatalf("403 11m apart quarantined sub: %+v", st.Subs["s"])
+	}
+
+	at, reason = a.Admit("m", map[string]bool{"node:e2": true})
+	if at == nil {
+		t.Fatalf("admit e1 again: %s", reason)
+	}
+	a.Observe(at, Outcome403)
+	if st.Subs["s"].Until <= clock.Now().UnixMilli() {
+		t.Fatalf("two 403s within 10m did not quarantine: %+v", st.Subs["s"])
+	}
+}
+
+func TestProbe403RefreshesQuarantine(t *testing.T) {
+	a, clock, st := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
+	probe := mustAdmitProbe(t, a, "m")
+	a.Observe(probe, Outcome403)
+	s := st.Subs["s"]
+	if s == nil || s.Until != clock.Now().Add(10*time.Minute).UnixMilli() {
+		t.Fatalf("probe 403 did not refresh quarantine: %+v", s)
+	}
+}
+
+func TestDirectImmuneToLifecycle(t *testing.T) {
+	a, _, st := newAdmissionTest(t, 8, Candidate{Egress: "direct", Model: "m", Direct: true})
+	for i := 0; i < 5; i++ {
+		at := mustAdmit(t, a, "m")
+		a.Observe(at, OutcomeNetwork)
+	}
+	if e := st.Egress["direct"]; e != nil && e.Lifecycle == "dead" {
+		t.Fatalf("direct was marked dead: %+v", e)
+	}
+	at := mustAdmit(t, a, "m")
+	a.Observe(at, Outcome2xx)
 }

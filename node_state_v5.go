@@ -43,6 +43,7 @@ type PairState struct {
 type EgressState struct {
 	Lifecycle  string `json:"lifecycle"`
 	ConsecFail int    `json:"consecFail"`
+	ConsecOK   int    `json:"consec_ok"`
 	DeadUntil  int64  `json:"deadUntil"`
 	LastProbe  int64  `json:"lastProbe"`
 }
@@ -52,11 +53,12 @@ type DirectState struct {
 }
 
 type SubState struct {
-	Until   int64    `json:"until"`
-	Reason  string   `json:"reason,omitempty"`
-	N403    int      `json:"n403"`
-	Last403 int64    `json:"last403"`
-	Pairs   []string `json:"pairs"`
+	Until     int64    `json:"until"`
+	Reason    string   `json:"reason,omitempty"`
+	N403      int      `json:"n403"`
+	Last403   int64    `json:"last403"`
+	Pairs     []string `json:"pairs"`
+	PairTimes []int64  `json:"pair_times,omitempty"`
 }
 
 func NewNodeStateV5(now time.Time) *NodeStateV5 {

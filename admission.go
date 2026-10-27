@@ -167,7 +167,7 @@ func (a *Admission) AdmitProbe(model string) (*Attempt, string) {
 	defer a.mu.Unlock()
 	a.maybePruneLocked(now)
 	if a.probing {
-		return nil, "all_inflight"
+		return nil, "probe_busy"
 	}
 
 	if a.candidates == nil {
@@ -212,7 +212,7 @@ func (a *Admission) AdmitLifecycleProbe() (*Attempt, string) {
 	defer a.mu.Unlock()
 	a.maybePruneLocked(now)
 	if a.probing {
-		return nil, "all_inflight"
+		return nil, "probe_busy"
 	}
 
 	keys := make([]string, 0, len(a.st.Egress))
@@ -222,7 +222,7 @@ func (a *Admission) AdmitLifecycleProbe() (*Attempt, string) {
 	sort.Strings(keys)
 	for _, egress := range keys {
 		e := a.st.Egress[egress]
-		if e == nil || e.Lifecycle != "dead" || a.probeActive[egress] {
+		if egress == "direct" || e == nil || e.Lifecycle != "dead" || a.probeActive[egress] {
 			continue
 		}
 		sem := a.semLocked(egress)
@@ -287,8 +287,9 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 			a.clearSubLocked(at.sub)
 			a.probeBackoff = probeBackoffLadder[0]
 		}
-		a.egressSuccessLocked(at.Egress)
+		a.egressConnectedLocked(at.Egress)
 	case Outcome429:
+		a.egressConnectedLocked(at.Egress)
 		p := a.writePairLocked(at.Model, at.Egress)
 		p.B++
 		p.LastFail = nowMS
@@ -320,7 +321,10 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 			a.st.Direct.Until = now.Add(60 * time.Second).UnixMilli()
 		}
 	case Outcome403:
+		a.egressConnectedLocked(at.Egress)
 		a.observe403Locked(at, now, nowMS)
+	case Outcome5xx:
+		a.egressConnectedLocked(at.Egress)
 	case OutcomeNetwork, OutcomeTimeout:
 		a.egressFailureLocked(at.Egress, now)
 	}
@@ -398,9 +402,16 @@ func (a *Admission) eligibleLocked(c Candidate, model string, nowMS int64, probe
 			return false, false
 		}
 	}
-	if e := a.st.Egress[c.Egress]; e != nil {
-		if e.Lifecycle == "dead" || e.DeadUntil > nowMS {
-			return false, false
+	if !(c.Direct || c.Egress == "direct") {
+		if e := a.st.Egress[c.Egress]; e != nil {
+			if e.Lifecycle == "dead" {
+				if e.DeadUntil > nowMS {
+					return false, false
+				}
+				e.Lifecycle = "probation"
+				e.ConsecOK = 0
+				e.DeadUntil = 0
+			}
 		}
 	}
 	if !probe {
@@ -486,18 +497,36 @@ func (a *Admission) maybePruneLocked(now time.Time) {
 	a.lastPrune = nowMS
 }
 
-func (a *Admission) egressSuccessLocked(egress string) {
+func (a *Admission) egressConnectedLocked(egress string) {
+	if egress == "" || egress == "direct" {
+		return
+	}
 	e := a.egressLocked(egress)
 	e.ConsecFail = 0
-	if e.Lifecycle == "probation" || e.Lifecycle == "dead" {
-		e.Lifecycle = "active"
+	switch e.Lifecycle {
+	case "dead":
+		e.Lifecycle = "probation"
+		e.ConsecOK = 1
 		e.DeadUntil = 0
+	case "probation":
+		e.ConsecOK++
+		if e.ConsecOK >= 3 {
+			e.Lifecycle = "active"
+			e.ConsecOK = 0
+		}
+	case "active", "":
+		e.Lifecycle = "active"
+		e.ConsecOK = 0
 	}
 }
 
 func (a *Admission) egressFailureLocked(egress string, now time.Time) {
+	if egress == "" || egress == "direct" {
+		return
+	}
 	e := a.egressLocked(egress)
 	e.ConsecFail++
+	e.ConsecOK = 0
 	if e.ConsecFail >= 5 {
 		e.Lifecycle = "dead"
 		e.DeadUntil = now.Add(30 * time.Minute).UnixMilli()
@@ -530,6 +559,7 @@ func (a *Admission) clearSubLocked(sub string) {
 	s.N403 = 0
 	s.Last403 = 0
 	s.Pairs = nil
+	s.PairTimes = nil
 }
 
 func (a *Admission) observe403Locked(at *Attempt, now time.Time, nowMS int64) {
@@ -546,8 +576,30 @@ func (a *Admission) observe403Locked(at *Attempt, now time.Time, nowMS int64) {
 	}
 	s.N403++
 	s.Last403 = nowMS
+	if len(s.PairTimes) != len(s.Pairs) {
+		s.Pairs = nil
+		s.PairTimes = nil
+	}
 	key := PairKey(at.Model, at.Egress)
 	s.Pairs = append(s.Pairs, key)
+	s.PairTimes = append(s.PairTimes, nowMS)
+	cutoff := nowMS - (10 * time.Minute).Milliseconds()
+	kept := 0
+	for i, p := range s.Pairs {
+		if s.PairTimes[i] < cutoff {
+			continue
+		}
+		s.Pairs[kept] = p
+		s.PairTimes[kept] = s.PairTimes[i]
+		kept++
+	}
+	s.Pairs = s.Pairs[:kept]
+	s.PairTimes = s.PairTimes[:kept]
+	if len(s.Pairs) > 32 {
+		drop := len(s.Pairs) - 32
+		s.Pairs = s.Pairs[drop:]
+		s.PairTimes = s.PairTimes[drop:]
+	}
 	counts := map[string]int{}
 	for _, p := range s.Pairs {
 		counts[p]++
@@ -558,28 +610,34 @@ func (a *Admission) observe403Locked(at *Attempt, now time.Time, nowMS int64) {
 			quarantine = true
 		}
 	}
-	if quarantine {
+	if quarantine || at.probe {
 		s.Until = now.Add(10 * time.Minute).UnixMilli()
 		s.Reason = "403"
 	}
 }
 
 func (a *Admission) observeLifecycleLocked(at *Attempt, class OutcomeClass, now time.Time, nowMS int64) {
+	if at.Egress == "direct" {
+		return
+	}
 	e := a.egressLocked(at.Egress)
 	switch class {
 	case Outcome2xx:
-		e.Lifecycle = "active"
-		e.ConsecFail = 0
-		e.DeadUntil = 0
+		a.egressConnectedLocked(at.Egress)
 		a.probeBackoff = probeBackoffLadder[0]
 	case Outcome429:
+		a.egressConnectedLocked(at.Egress)
 		a.advanceProbeBackoffLocked()
 	case Outcome403:
+		a.egressConnectedLocked(at.Egress)
 		a.observe403Locked(at, now, nowMS)
+	case Outcome5xx:
+		a.egressConnectedLocked(at.Egress)
 	case OutcomeNetwork, OutcomeTimeout:
 		e.Lifecycle = "dead"
 		e.DeadUntil = now.Add(30 * time.Minute).UnixMilli()
 		e.ConsecFail = 0
+		e.ConsecOK = 0
 	}
 }
 
