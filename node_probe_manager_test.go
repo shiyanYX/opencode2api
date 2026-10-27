@@ -416,3 +416,39 @@ func TestProbeStatusSnapshotCopiesAndUnknown(t *testing.T) {
 		t.Fatalf("Status leaked internal slices/map: %+v", v2)
 	}
 }
+
+func TestProbeStartAllPopulatesSnapshot(t *testing.T) {
+	probeClientFor = func(fp string) *http.Client {
+		return &http.Client{Transport: f6RoundTripper(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/models") {
+				return probeMgrResponse(204, ""), nil
+			}
+			if fp == "fp-denied" {
+				return probeMgrResponse(403, `{"error":"FreeTierError: free usage limit"}`), nil
+			}
+			return probeMgrResponse(200, `{}`), nil
+		})}
+	}
+	defer func() { probeClientFor = defaultProbeClient }()
+
+	m := newProbeManager()
+	nodes := []ProxyNode{{Fingerprint: "fp-ok"}, {Fingerprint: "fp-denied"}}
+	id, total, err := m.StartAll(context.Background(), nodes, "m", "https://x/models")
+	if err != nil || total != 2 || id == "" {
+		t.Fatalf("start err=%v total=%d id=%q", err, total, id)
+	}
+	v := waitProbeJob(t, m, id)
+	if v.Done != 2 || len(v.Results) != 2 {
+		t.Fatalf("done=%d results=%d", v.Done, len(v.Results))
+	}
+	snap := m.Snapshot()
+	if len(snap) != 2 {
+		t.Fatalf("Snapshot after StartAll has %d entries, want 2", len(snap))
+	}
+	if got := snap["fp-ok"].Class; got != probeClassOK {
+		t.Fatalf("fp-ok class=%q", got)
+	}
+	if got := snap["fp-denied"].Class; got != probeClassDenied {
+		t.Fatalf("fp-denied class=%q", got)
+	}
+}

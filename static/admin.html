@@ -615,7 +615,7 @@ input,select,textarea{font-family:inherit;color:inherit}
       <button class="btn btn-primary" onclick="reloadSubs()">重新加载订阅</button>
       <button class="btn btn-ghost" onclick="resetAllMarks()">解除全部标记</button>
       <button class="btn btn-ghost" onclick="probeAll()">连通测速</button>
-      <button id="probeAllBtn" class="btn btn-ghost" onclick="probeAllNodes()">全量测试</button>
+      <button id="probeAllBtn" class="btn btn-ghost" onclick="probeAllPrimary()">全量测试</button>
       <div id="probeAllProgress" class="usage-bar" style="display:none;width:140px;min-width:90px;flex:0 1 180px"><i style="width:0%"></i></div>
       <button class="btn btn-ghost" onclick="loadNodes()">刷新节点</button>
       <span id="nodeStatus" class="muted" style="font-size:11px"></span>
@@ -1727,7 +1727,7 @@ async function nodeAction(action,fp){
 }
 function reloadSubs(){nodeAction('reload','')}
 function probeAll(){nodeAction('probe','')}
-let probeAllTimer=null,probeAllJob=null,probeAllTotal=0,probeAllDone=0,probeAllDemo=false,probeAllHideTimer=null;
+let probeAllTimer=null,probeAllJob=null,probeAllTotal=0,probeAllDone=0,probeAllDemo=false,probeAllHideTimer=null,probeAllStarting=false,probeAllCancelPending=false;
 function probeAllSetProgress(done,total){
   const bar=q('#probeAllProgress');
   if(bar){bar.style.display='';const fill=bar.querySelector('i');if(fill)fill.style.width=(total>0?Math.min(100,Math.round(done/total*100)):0)+'%'}
@@ -1759,22 +1759,29 @@ async function probeNode(fp,btn){
   }catch(e){showToast('测试失败: '+e.message,'error')}
   finally{if(btn&&btn.isConnected){btn.disabled=false;btn.textContent=original}}
 }
+function probeAllPrimary(){
+  if(probeAllTimer){cancelProbeAll();return}
+  if(probeAllStarting){probeAllCancelPending=true;const btn=q('#probeAllBtn');if(btn){btn.disabled=true;btn.textContent='取消中…'}return}
+  probeAllNodes();
+}
 function probeAllNodes(){
   const total=nodeData.length;
   if(!confirm('将对 '+total+' 个节点各发 1 次真实请求，最多消耗 '+total+' 次免费配额。继续？'))return;
   if(probeAllTimer){clearInterval(probeAllTimer);probeAllTimer=null}
   if(probeAllHideTimer){clearTimeout(probeAllHideTimer);probeAllHideTimer=null}
-  probeAllJob=null;probeAllTotal=total;probeAllDone=0;probeAllDemo=DEMO_MODE;
+  probeAllJob=null;probeAllTotal=total;probeAllDone=0;probeAllDemo=DEMO_MODE;probeAllCancelPending=false;
   const btn=q('#probeAllBtn');if(btn){btn.disabled=false;btn.textContent='取消'}
   probeAllSetProgress(0,total);
-  if(DEMO_MODE){startDemoProbeAll();return}
+  if(DEMO_MODE){probeAllStarting=false;startDemoProbeAll();return}
+  probeAllStarting=true;
   fetch('/api/nodes/probe_all',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(async r=>{
     const d=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(d.error||'启动失败');
-    probeAllJob=d.job_id;probeAllTotal=d.total||total;probeAllDone=0;
+    probeAllStarting=false;probeAllJob=d.job_id;probeAllTotal=d.total||total;probeAllDone=0;
     probeAllSetProgress(0,probeAllTotal);
     probeAllTimer=setInterval(pollProbeAll,1000);
-  }).catch(e=>finishProbeAll(null,e.message));
+    if(probeAllCancelPending){probeAllCancelPending=false;cancelProbeAll()}
+  }).catch(e=>{probeAllStarting=false;finishProbeAll(null,e.message)});
 }
 function startDemoProbeAll(){
   const classes=['ok','quota','denied','unreachable'];
@@ -1805,6 +1812,7 @@ async function pollProbeAll(){
   }catch(e){finishProbeAll(null,e.message)}
 }
 async function cancelProbeAll(){
+  if(probeAllStarting&&!probeAllJob){probeAllCancelPending=true;const btn=q('#probeAllBtn');if(btn){btn.disabled=true;btn.textContent='取消中…'}return}
   if(!probeAllTimer)return;
   if(probeAllDemo){
     const canceled=Math.max(0,probeAllTotal-probeAllDone);
@@ -1838,7 +1846,7 @@ function finishProbeAll(view,err){
     if(probeAllHideTimer)clearTimeout(probeAllHideTimer);
     probeAllHideTimer=setTimeout(()=>{if(bar)bar.style.display='none';probeAllHideTimer=null},2000);
   }
-  probeAllJob=null;probeAllDone=0;
+  probeAllJob=null;probeAllDone=0;probeAllStarting=false;probeAllCancelPending=false;
 }
 async function resetAllMarks(){if(!confirm('解除所有节点的耗尽/故障标记？'))return;nodeAction('reset_all','')}
 

@@ -169,6 +169,7 @@ func (m *probeManager) run(ctx context.Context, job *probeJob, nodes []ProxyNode
 				res.Error = "canceled"
 			}
 			job.results = append(job.results, res)
+			m.results[res.Fingerprint] = res
 			job.done++
 			job.summary[res.Class]++
 			m.mu.Unlock()
