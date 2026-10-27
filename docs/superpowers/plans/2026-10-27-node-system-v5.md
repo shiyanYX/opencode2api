@@ -1,6 +1,6 @@
-# 节点系统 v5.4：一次全局重构（资格 · 选择 · 可观测）
+# 节点系统 v5.5：一次全局重构（资格 · 选择 · 可观测）
 
-> **状态：DRAFT v5.4，R8-delta-3 仅剩 B3，已补探测路径待终审。** 相对 v5.2 的核心修正：熔断从「60s 窗口 + 比例」改成 **「首个 429 即冷却」**，单位回到 **pair**。依据是真实日志回放：653e×mimo 的 429 从 **1,106 → 5**，41d×mimo **402 → 4**，4ad×mimo **20 → 1**，而 653e×deepseek 的 **0 个 429 完全不受影响**。
+> **状态：DRAFT v5.5，B3 已补探测路径与硬封上限，待终审。** 相对 v5.2 的核心修正：熔断从「60s 窗口 + 比例」改成 **「首个 429 即冷却」**，单位回到 **pair**。依据是真实日志回放：653e×mimo 的 429 从 **1,106 → 5**，41d×mimo **402 → 4**，4ad×mimo **20 → 1**，而 653e×deepseek 的 **0 个 429 完全不受影响**。
 > 前情：T1/T2/T3 已写进 `test`（代码提交 `da85f2b`），生产仍是 10-26 15:16 旧镜像。v3.x 被 R3/R4/R5 判过度设计；v4.1 被 R6 认可；v5/v5.1 被 R8 判 NO-GO；v5.2 被 R8-delta 判 6 个 blocker。
 
 ## 1. 现状为什么必须重构
@@ -101,7 +101,7 @@ probe 429
 ```text
 冷却到期后第一个 2xx -> strikes=0, until=0
 无流量时由 probe 触发：单飞、退避 60s -> 2m -> 5m -> 15m -> 1h -> 6h
-probe 2xx -> 同「2xx 即恢复」；probe 429 -> strikes+1 并升档
+probe 2xx -> 同「2xx 即恢复」；probe 429 -> 只推进 probe 退避，不升 strikes/hard
 ```
 
 - 删除 canary：真实流量的 2xx 就是最强的恢复证据；190 个被旧版标 5h 的出口迁移为 `strikes=1, until=now+5m`，到期后正常流量或 probe 的 2xx 即清零（R8-delta D3）。
@@ -116,6 +116,8 @@ min_until(model) = min{ pair.until | pair.until > now }   // 只统计该 model 
 AdmitProbe(model, egress):
   与 Admit 共用同一信号量，但**跳过 pair.until 检查**（探测的目的就是验证冷却是否该结束）
   仍然要求：egress.lifecycle != dead、sub 未隔离、inflight 有名额
+AdmitLifecycleProbe(egress):
+  忽略 deadUntil（探测出口是否复活），只要求 inflight 有名额
   probe 结果走 Observe，与正常流量同一条恢复路径（2xx -> strikes=0）
 
 触发：
