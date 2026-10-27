@@ -66,6 +66,7 @@ probe:
   Observe(probe) 结束时 probing=false，并推进 nextProbeAt
 ```
 - `Admit` 返回的 egress 必须满足：`pair.until<=now && egress.lifecycle!=dead && !sub.quarantined && !exclude[egress] && inflight 名额已取到`。
+- pair 查询顺序：`model|egress` → 未命中回退 `*|egress`（迁移占位，见 §6）。
 - 抑制（Reject）不产生 attempt，不更新后验（I8），且必须归还已取名额。
 
 ### 2.3 状态机
@@ -275,7 +276,8 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 - 时间一律 int64 毫秒；`trips24h` 按 24h 滚动清理、cap 16（仅内存上限，不参与裁决）；`inflight` **不持久化**。
 - `direct` 的 pair key 写作 `model|direct`；egress 段不存 `direct`（无生命周期），整条直连的冷却存顶层 `direct.until`。
 - 上限：pair 最多 50k（活跃子集），空闲 30min 清理，**不淘汰 blocked**。
-- 迁移：旧 `NodeExhausted` 且 quota ⇒ `strikes=1, until=now+5m`；保留 dead/rejected；旧 `shape_drift` 状态丢弃。
+- 迁移：旧 `NodeExhausted` 且 quota ⇒ `*|node:<fp>` 占位 pair，`strikes=1, until=now+5m`；保留 dead/rejected；旧 `shape_drift` 状态丢弃。
+- **`*` 是迁移占位**（v2 没有 model 维度）：`Admit` 查 `model|egress` 未命中时回退读 `*|egress` 的 `strikes/until`（只读，用于挡住 5 分钟）；该 pair 首次真实 outcome 后写入具体 `model|egress`，并删除 `*|egress`。
 - **重启语义**：`strikes/until/trips24h` 保留；`inflight` 清零，最坏多放行 K 个请求（接受）。
 - 回滚后再升级：`node_state_v5.json` 带 `epoch`（部署时间戳），版本不匹配则整体丢弃重建（R8-delta Q4）。
 
