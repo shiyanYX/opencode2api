@@ -53,6 +53,12 @@ type GateState struct {
 	NextCanary    int64            `json:"nextCanary"`
 	CanaryOK      bool             `json:"canaryOK"`
 	NodeProbeUsed bool             `json:"nodeProbeUsed"`
+	// 5 分钟窗口计数器：B1 触发必须同时满足 distinct >=3、样本 >=10、失败率 >=50%。
+	WindowStart int64 `json:"windowStart"`
+	Attempts    int   `json:"attempts"`
+	Failures    int   `json:"failures"`
+	// NextNodeProbe 是 direct canary 长期失败时的时间兜底节点探测时间。
+	NextNodeProbe int64 `json:"nextNodeProbe"`
 }
 
 type EgressState struct {

@@ -30,6 +30,8 @@ type Attempt struct {
 	Model  string
 	Egress string
 	Direct bool
+	// gateProbe 标记这是 winter gate 的节点探测；任何非 2xx 都必须重置探测状态。
+	gateProbe bool
 
 	release func()
 	once    sync.Once
@@ -709,6 +711,10 @@ const (
 	gateBasePause    = 60 * time.Second
 	gateMaxPause     = 15 * time.Minute
 	gateCanaryPeriod = 60 * time.Second
+
+	gateMinAttempts  = 10
+	gateEscapeDelay  = 10 * time.Minute
+	gateEscapePeriod = 5 * time.Minute
 )
 
 func (a *Admission) gateLocked(now time.Time) *GateState {
@@ -717,6 +723,15 @@ func (a *Admission) gateLocked(now time.Time) *GateState {
 	}
 	if a.st.Gate.Egresses == nil {
 		a.st.Gate.Egresses = map[string]int64{}
+	}
+	// States written before v5.8 have no NextNodeProbe. An active old gate
+	// must still get the 10-minute time escape instead of staying forever.
+	if a.st.Gate.Active && a.st.Gate.NextNodeProbe == 0 {
+		base := a.st.Gate.LastTrip
+		if base == 0 {
+			base = now.UnixMilli()
+		}
+		a.st.Gate.NextNodeProbe = base + gateEscapeDelay.Milliseconds()
 	}
 	return a.st.Gate
 }
@@ -741,24 +756,48 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 			g.CanaryOK = true
 			g.NodeProbeUsed = false
 			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
-		case class == Outcome2xx && !at.Direct && g.CanaryOK:
+		case class == Outcome2xx && !at.Direct && (at.gateProbe || g.CanaryOK):
 			// Node probe succeeded: the pool is no longer in winter.
-			g.Active = false
-			g.PausedUntil = 0
-			g.CanaryOK = false
-			g.NodeProbeUsed = false
-			g.NextCanary = 0
-			g.Egresses = map[string]int64{}
-		case class == Outcome429 && at.Direct:
-			g.CanaryOK = false
-			g.NodeProbeUsed = false
-			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
-		case class == Outcome429 && !at.Direct && g.CanaryOK:
+			a.clearGateLocked(nowMS)
+			return
+		case class != Outcome2xx && at.gateProbe:
+			// Any failed node probe (429/403/5xx/network/timeout/cancel/other)
+			// must reopen the state machine, otherwise both canary and node
+			// probe entrances can stay closed forever.
 			g.CanaryOK = false
 			g.NodeProbeUsed = false
 			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
+			g.NextNodeProbe = nowMS + gateEscapePeriod.Milliseconds()
+			return
+		case class != Outcome2xx && at.Direct:
+			// Direct canary failed: retry it after one minute, keep the
+			// 10-minute time escape for a node probe.
+			g.CanaryOK = false
+			g.NodeProbeUsed = false
+			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
+			return
+		case class != Outcome2xx && !at.Direct && g.CanaryOK:
+			// Probe admitted after a canary but failed for a non-429 reason.
+			g.CanaryOK = false
+			g.NodeProbeUsed = false
+			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
+			g.NextNodeProbe = nowMS + gateEscapePeriod.Milliseconds()
+			return
 		}
 		return
+	}
+
+	// Tumbling 5-minute sample window. This is intentionally reset at the
+	// boundary so the failure ratio is based on a bounded, cheap counter.
+	if g.WindowStart == 0 || nowMS-g.WindowStart >= gateWindow.Milliseconds() {
+		g.WindowStart = nowMS
+		g.Attempts = 0
+		g.Failures = 0
+		g.Egresses = map[string]int64{}
+	}
+	g.Attempts++
+	if class == Outcome429 {
+		g.Failures++
 	}
 	if class != Outcome429 || at.Egress == "" {
 		return
@@ -773,6 +812,9 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 	if len(g.Egresses) < gateDistinct {
 		return
 	}
+	if g.Attempts < gateMinAttempts || g.Failures*2 < g.Attempts {
+		return
+	}
 	if g.LastTrip > 0 && nowMS-g.LastTrip >= gateQuiet.Milliseconds() {
 		g.Backoff = 0
 	}
@@ -784,10 +826,28 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 	g.Active = true
 	g.PausedUntil = nowMS + pause.Milliseconds()
 	g.NextCanary = g.PausedUntil
+	g.NextNodeProbe = nowMS + gateEscapeDelay.Milliseconds()
 	g.CanaryOK = false
 	g.NodeProbeUsed = false
 	g.Egresses = map[string]int64{}
+	g.WindowStart = nowMS
+	g.Attempts = 0
+	g.Failures = 0
 	g.LastTrip = nowMS
+}
+
+func (a *Admission) clearGateLocked(nowMS int64) {
+	g := a.gateLocked(a.now())
+	g.Active = false
+	g.PausedUntil = 0
+	g.CanaryOK = false
+	g.NodeProbeUsed = false
+	g.NextCanary = 0
+	g.NextNodeProbe = 0
+	g.Egresses = map[string]int64{}
+	g.WindowStart = nowMS
+	g.Attempts = 0
+	g.Failures = 0
 }
 
 func (a *Admission) GateCanaryDue() bool {
@@ -801,24 +861,35 @@ func (a *Admission) GateNodeProbeReady() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	g := a.gateLocked(a.now())
-	return g.Active && g.CanaryOK && !g.NodeProbeUsed
+	if !g.Active || g.NodeProbeUsed {
+		return false
+	}
+	if g.CanaryOK {
+		return true
+	}
+	return g.NextNodeProbe > 0 && a.now().UnixMilli() >= g.NextNodeProbe
 }
 
-// AdmitGateProbe is the single node probe after a successful direct canary.
-// It deliberately ignores the pair cooldown (probe=true) but still honors
-// sub-quarantine and inflight limits; a 2xx clears the pool gate.
+// AdmitGateProbe is the single node probe after a successful direct canary,
+// or the 10-minute time-escape probe when direct itself is unhealthy.
+// It deliberately ignores the pair cooldown by selecting with probe=true, but the
+// Attempt is marked probe=false so a 429 still advances the normal pair ladder.
+// It still honors sub-quarantine and inflight limits; a 2xx clears the pool gate.
 func (a *Admission) AdmitGateProbe(model string) (*Attempt, string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	g := a.gateLocked(a.now())
-	if !g.Active || !g.CanaryOK || g.NodeProbeUsed {
+	now := a.now()
+	nowMS := now.UnixMilli()
+	if !g.Active || g.NodeProbeUsed {
+		return nil, "probe_not_ready"
+	}
+	if !g.CanaryOK && (g.NextNodeProbe == 0 || nowMS < g.NextNodeProbe) {
 		return nil, "probe_not_ready"
 	}
 	if a.candidates == nil {
 		return nil, "no_candidate"
 	}
-	now := a.now()
-	nowMS := now.UnixMilli()
 	cands := a.candidates(model)
 	eligible := make([]Candidate, 0, len(cands))
 	for _, c := range cands {
@@ -839,6 +910,7 @@ func (a *Admission) AdmitGateProbe(model string) (*Attempt, string) {
 		case sem <- struct{}{}:
 			g.NodeProbeUsed = true
 			at := a.attemptLocked(c, model, false, false, false, sem)
+			at.gateProbe = true
 			return at, ""
 		default:
 		}

@@ -52,12 +52,9 @@ func TestNoReburnWithin10m(t *testing.T) {
 		Candidate{Egress: "node:e2", Model: "m", Sub: "s2"},
 		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
 	)
-	for i := 0; i < 3; i++ {
-		at := mustAdmit(t, a, "m")
-		a.Observe(at, Outcome429)
-	}
+	tripGate(t, a)
 	if !a.GatePaused() {
-		t.Fatal("gate did not trip after 3 distinct egress 429")
+		t.Fatal("gate did not trip after 5 429 / 10 attempts and 3 distinct egress")
 	}
 	g := a.st.Gate
 	until, backoff := g.PausedUntil, g.Backoff
@@ -83,10 +80,7 @@ func TestGateTrips(t *testing.T) {
 		Candidate{Egress: "node:e2", Model: "m", Sub: "s2"},
 		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
 	)
-	for i := 0; i < 3; i++ {
-		at := mustAdmit(t, a, "m")
-		a.Observe(at, Outcome429)
-	}
+	tripGate(t, a)
 	if !a.GatePaused() {
 		t.Fatal("gate did not trip")
 	}
@@ -161,5 +155,134 @@ func TestNoCandidateNoDirect(t *testing.T) {
 	got := eg.Get(EgressRequest{Model: "m", Context: context.Background()})
 	if !got.NoCandidate || got.Direct {
 		t.Fatalf("Get=%+v want NoCandidate without direct", got)
+	}
+}
+
+func tripGate(t *testing.T, a *Admission) {
+	t.Helper()
+	for i := 0; i < 3; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i))}, Outcome429)
+	}
+	for i := 0; i < 5; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+	}
+	a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome429)
+	a.Observe(&Attempt{Model: "m", Egress: "node:e2"}, Outcome429)
+}
+
+func TestGateNeedsFailureRatio(t *testing.T) {
+	a, _, _ := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s1"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s2"},
+		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
+	)
+	// 3 distinct 429 but only 3% failure across 100 attempts: must not trip.
+	for i := 0; i < 100; i++ {
+		if i < 3 {
+			a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i))}, Outcome429)
+		} else {
+			a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+		}
+	}
+	if a.GatePaused() {
+		t.Fatal("gate tripped on 3/100 failures")
+	}
+
+	b, _, _ := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s1"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s2"},
+		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
+	)
+	// 30 failures / 50 attempts: must trip once 3 distinct egress are seen.
+	for i := 0; i < 50; i++ {
+		if i < 30 {
+			b.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3))}, Outcome429)
+		} else {
+			b.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+		}
+	}
+	if !b.GatePaused() {
+		t.Fatal("gate did not trip on 30/50 failures")
+	}
+}
+
+func TestGateEscapeAfter10m(t *testing.T) {
+	a, clock, _ := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s1"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s2"},
+		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
+	)
+	tripGate(t, a)
+	if !a.GatePaused() {
+		t.Fatal("gate did not trip")
+	}
+	clock.Advance(10 * time.Minute)
+	if !a.GateNodeProbeReady() {
+		t.Fatal("node probe not ready after 10m time escape")
+	}
+	probe, reason := a.AdmitGateProbe("m")
+	if probe == nil {
+		t.Fatalf("time-escape probe rejected: %s", reason)
+	}
+	a.Observe(probe, Outcome2xx)
+	if a.GatePaused() {
+		t.Fatal("successful time-escape probe did not clear gate")
+	}
+}
+
+func TestGateProbeFailureDoesNotFreeze(t *testing.T) {
+	a, clock, _ := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s1"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s2"},
+		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
+	)
+	tripGate(t, a)
+	// Use the canary-authorized node probe: this is the path where a failed
+	// probe used to leave CanaryOK=true and NodeProbeUsed=true, closing both
+	// entrances forever.
+	clock.Advance(60 * time.Second)
+	canary, reason := a.AdmitCanary("m")
+	if canary == nil {
+		t.Fatalf("canary rejected: %s", reason)
+	}
+	a.Observe(canary, Outcome2xx)
+	probe, reason := a.AdmitGateProbe("m")
+	if probe == nil {
+		t.Fatalf("probe rejected: %s", reason)
+	}
+	a.Observe(probe, Outcome403)
+	if a.GateNodeProbeReady() {
+		t.Fatal("failed probe left node probe ready")
+	}
+	clock.Advance(60 * time.Second)
+	if !a.GateCanaryDue() {
+		t.Fatal("failed probe froze canary entrance")
+	}
+	canary, reason = a.AdmitCanary("m")
+	if canary == nil {
+		t.Fatalf("canary after failed probe rejected: %s", reason)
+	}
+	a.Observe(canary, Outcome2xx)
+	if !a.GateNodeProbeReady() {
+		t.Fatal("canary 2xx did not reopen node probe after failed probe")
+	}
+}
+
+func TestWinterLogThrottled(t *testing.T) {
+	resetV5ForTest()
+	ctx := beginCallLog(context.Background(), "/v1/chat/completions", "m", false, "test")
+	v5Winter(ctx, "m", "gate_paused")
+	v5Winter(ctx, "m", "gate_paused")
+	cr := callRecorderFrom(ctx)
+	cr.mu.Lock()
+	n := 0
+	for _, ev := range cr.rec.Events {
+		if ev.Type == "v5_winter" {
+			n++
+		}
+	}
+	cr.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("v5_winter events=%d want 1", n)
 	}
 }

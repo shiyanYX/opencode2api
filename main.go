@@ -2973,7 +2973,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		}
 		egResult := egress.Get(EgressRequest{Auth: auth, Model: modelID, Context: ctx, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
 		if egResult.NoCandidate {
-			callLogSuppressedAttempt(ctx, modelID, "", "v5_winter", EgressKeyDirect, nil)
+			callLogSuppressedAttempt(ctx, modelID, "", v5NoCandidateEventName(), EgressKeyDirect, nil)
 			return nil, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}}, fmt.Errorf("v5 gate: no candidate")
 		}
 		switchCandidates := proxyPool.lastSwitchCandidates()
@@ -3525,7 +3525,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 		egResult := egress.Get(EgressRequest{Auth: auth, Model: modelID, Context: ctx, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
 		if egResult.NoCandidate {
-			callLogSuppressedAttempt(ctx, modelID, "", "v5_winter", EgressKeyDirect, nil)
+			callLogSuppressedAttempt(ctx, modelID, "", v5NoCandidateEventName(), EgressKeyDirect, nil)
 			return nil, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}}, fmt.Errorf("v5 gate: no candidate")
 		}
 		switchCandidates := proxyPool.lastSwitchCandidates()

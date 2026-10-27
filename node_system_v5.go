@@ -93,6 +93,9 @@ var (
 	v5FallbackMu   sync.Mutex
 	v5FallbackLast = map[string]time.Time{}
 
+	v5GateLogMu   sync.Mutex
+	v5GateLogLast = map[string]time.Time{}
+
 	// v5CandidatesHook 仅测试注入，生产为 nil。影子测试需要一个不依赖
 	// proxyPool 全局状态的候选集；不能在请求路径上留下可变 hook。
 	v5CandidatesHook func(string) []Candidate
@@ -109,6 +112,9 @@ func resetV5ForTest() {
 	v5FallbackMu.Lock()
 	v5FallbackLast = map[string]time.Time{}
 	v5FallbackMu.Unlock()
+	v5GateLogMu.Lock()
+	v5GateLogLast = map[string]time.Time{}
+	v5GateLogMu.Unlock()
 }
 
 func v5GetRuntime() *v5Runtime {
@@ -474,18 +480,66 @@ func v5AdmitContext(ctx context.Context, model, region string, exclude map[strin
 
 	at, reason := rt.adm.AdmitPreferred(model, ex, prefer)
 	if at == nil {
-		v5Fallback(ctx, model, reason)
+		v5NoCandidate(ctx, model, reason)
 		return nil, false
 	}
 	return at, true
 }
 
 // v5Winter records that the pool-wide 429 gate stopped normal selection.
+// Same reason is logged at most once per minute.
 func v5Winter(ctx context.Context, model, reason string) {
 	if reason == "" {
 		reason = "gate_paused"
 	}
-	callLogEvent(ctx, "v5_winter", "", "model="+model+" reason="+reason)
+	v5GateLog(ctx, "v5_winter", model, reason)
+}
+
+// v5NoCandidate records that force selection found no usable lease (all pairs
+// cooling / region-excluded / no candidate), never a direct fallback.
+func v5NoCandidate(ctx context.Context, model, reason string) {
+	if reason == "" {
+		reason = "no_candidate"
+	}
+	v5GateLog(ctx, "v5_no_candidate", model, reason)
+}
+
+func v5GateLog(ctx context.Context, typ, model, reason string) {
+	now := time.Now()
+	key := typ + "|" + reason
+	v5GateLogMu.Lock()
+	if last, ok := v5GateLogLast[key]; ok && now.Sub(last) < time.Minute {
+		v5GateLogMu.Unlock()
+		return
+	}
+	v5GateLogLast[key] = now
+	v5GateLogMu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cr := callRecorderFrom(ctx)
+	if cr == nil {
+		callLogEvent(ctx, typ, "", "model="+model+" reason="+reason)
+		return
+	}
+	cr.mu.Lock()
+	cr.rec.Events = append(cr.rec.Events, CallEvent{
+		Type:   typ,
+		Model:  model,
+		Reason: reason,
+		Detail: "reason=" + reason,
+		At:     now.Format("2006-01-02T15:04:05.000Z07:00"),
+	})
+	cr.mu.Unlock()
+}
+
+// v5NoCandidateEventName keeps the suppressed-attempt log consistent with the
+// real reason: gate pause vs pair cooldown exhaustion.
+func v5NoCandidateEventName() string {
+	if rt := v5GetRuntime(); rt != nil && rt.adm.GatePaused() {
+		return "v5_winter"
+	}
+	return "v5_no_candidate"
 }
 
 // v5Fallback 记录“force 选路无租约、本次回退直连”。同一 reason 每分钟最多一条。

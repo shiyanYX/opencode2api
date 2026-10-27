@@ -81,7 +81,7 @@ func TestV5ForceNoCandidateNoDirect(t *testing.T) {
 	cr.mu.Unlock()
 	count := 0
 	for _, ev := range events {
-		if ev.Type == "v5_fallback" {
+		if ev.Type == "v5_no_candidate" {
 			count++
 			if ev.Reason != "no_candidate" || ev.Model != "m" {
 				t.Fatalf("fallback event=%+v", ev)
@@ -97,7 +97,7 @@ func TestV5ForceNoCandidateNoDirect(t *testing.T) {
 	defer cr.mu.Unlock()
 	count = 0
 	for _, ev := range cr.rec.Events {
-		if ev.Type == "v5_fallback" {
+		if ev.Type == "v5_no_candidate" {
 			count++
 		}
 	}
