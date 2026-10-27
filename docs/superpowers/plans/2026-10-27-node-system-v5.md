@@ -78,13 +78,13 @@ probe:
   -> until   = now + ladder[strikes-1]      // 60s / 2m / 5m / 5m
   -> trips24h 追加一条
 任意 2xx
-  -> strikes = 0；until = 0
+  -> strikes = 0；hard = 0；until = 0
 strikes 将要超过 4（即连续第 5 次 429，期间无任何 2xx）
-  -> hard = min(hard+1, 5)
-  -> until = now + min(1h * 2^(hard-1), 24h)   // 1h/2h/4h/8h/24h
+  -> hard = min(hard+1, 6)
+  -> until = now + min(1h * 2^(hard-1), 24h)   // 1h/2h/4h/8h/16h/24h
   -> strikes 保持 4
 probe 429
-  -> 不升 strikes/hard，只设 until = now + probe_backoff   // 探测失败不参与熔断升级
+  -> 不升 strikes/hard；until = max(until, now + probe_backoff)   // 只延后，绝不缩短已有的 1h 硬封
 ```
 
 - **不再用 60s 窗口、不再用比例、不再用 nAtt。** 理由：真实数据里 653e×mimo 在 60s 窗口内是 28×429 / 28×2xx（正好 50%），任何比例阈值都会在「熔断」和「放行」之间摇摆；而「首个 429 冷却 60s」在回放中把该 pair 的上游 429 从 1,106 降到 **5**，且完全不误伤同出口的 deepseek。
@@ -110,14 +110,20 @@ probe 2xx -> 同「2xx 即恢复」；probe 429 -> 只推进 probe 退避，不�
 **无候选 / 全冷却时的探测（B3）**
 
 ```text
-min_until(model) = min{ pair.until | pair.until > now }   // 只统计该 model 下仍在冷却的 pair
-  若不存在（全 sub 隔离 / 全 egress dead / 全在途）-> Retry-After = 1
+min_until(model) = min(
+    { pair.until | pair.until > now },                              // 该 model 仍在冷却的 pair
+    { sub.until  | sub.until  > now, sub 拥有该 model 的候选 egress }, // 订阅隔离
+    { egress.deadUntil | > now }                                    // 出口判死
+  )
+  三者都为空（全在途）-> Retry-After = 1
 
 AdmitProbe(model, egress):
-  与 Admit 共用同一信号量，但**跳过 pair.until 检查**（探测的目的就是验证冷却是否该结束）
-  仍然要求：egress.lifecycle != dead、sub 未隔离、inflight 有名额
+  与 Admit 共用同一信号量，但**跳过 pair.until 与 sub.until**（探测的目的就是验证冷却/隔离是否该结束）
+  仍然要求：egress.lifecycle != dead、inflight 有名额（probe 最多占 K 中的 1 个）
+  必须带 deadline（20s）：超时按 `Observe(probe, timeout)` 归还名额
+  probe 2xx -> strikes=0/hard=0/until=0，并清除该 sub 隔离；probe 403 -> 刷新 sub 隔离
 AdmitLifecycleProbe(egress):
-  忽略 deadUntil（探测出口是否复活），只要求 inflight 有名额
+  忽略 deadUntil（探测出口是否复活），只要求 inflight 有名额，同样带 20s deadline
   probe 结果走 Observe，与正常流量同一条恢复路径（2xx -> strikes=0）
 
 触发：
@@ -127,7 +133,7 @@ AdmitLifecycleProbe(egress):
 退避：60s -> 2m -> 5m -> 15m -> 1h -> 6h；任意 2xx 重置为 60s
 ```
 
-- `no_candidate` 的 `Retry-After = max(1, min_until(model) - now)`；`min_until` 为空时取 1（B3 定义）。
+- `no_candidate` 的 `Retry-After = max(1, min_until(model) - now)`；`min_until` 为空（全在途）时取 1（B3 定义）。
 - probe 单飞：`probeMu` 只保护 `nextProbeAt/probing`，网络调用在锁外；`probing=true` 期间不再发起第二个 probe。
 
 **Egress 生命周期**
@@ -302,7 +308,9 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 | `TestDirectCooldown`：direct 429 | 所有 model 的 direct pair 同时冷却 60s |
 | `TestPairCoolNoCrossModel`：653e×mimo 429 | 653e×deepseek 仍可选 |
 | `TestAllCooling`：43 个 pair 同时 429 | 503 带有限 `Retry-After`，probe 60s 内发起且能恢复 1 个 pair |
-| `TestHardBlockBounded`：模型级风暴 1h | 首次硬封 1h，不是 24h；probe 2xx 后立即恢复 |
+| `TestAllSubQuarantined`：全部 sub 隔离 | `Retry-After` = sub 最早到期，不是 1；probe 能穿过隔离并清除它 |
+| `TestProbeDeadline`：probe 卡住 | 20s 后归还名额，`inflight` 回到 0 |
+| `TestHardBlockBounded`：模型级风暴 | 1h→2h→4h→8h→16h→24h 共 6 档；probe 429 不缩短已有封禁 |
 | `TestProbeBypassesCooldown`：pair 冷却中 | `AdmitProbe` 可选中该 pair，普通 `Admit` 不可 |
 
 ## 9. 测试策略
