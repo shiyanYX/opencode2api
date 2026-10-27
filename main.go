@@ -1068,6 +1068,7 @@ type AppConfig struct {
 	// 0 = 默认 15min；负数 = 禁用健康检查；URL 空 = 默认 https://opencode.ai/zen/v1/models
 	NodeHealthIntervalMinutes int    `json:"node_health_interval_minutes,omitempty"`
 	NodeHealthProbeURL        string `json:"node_health_probe_url,omitempty"`
+	ProbeModel                string `json:"probe_model,omitempty"`
 
 	// ---- 缓存增强 ----
 	// PromptCacheRetention 注入上游的 prompt 前缀缓存保留时长：
@@ -7367,6 +7368,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"node_cooldown_dead_minutes":    cooldownDead,
 			"node_health_interval_minutes":  merged.NodeHealthIntervalMinutes,
 			"node_health_probe_url":         merged.NodeHealthProbeURL,
+			"probe_model":                   probeModelOrDefault(merged.ProbeModel),
 			"prompt_cache_retention":        merged.PromptCacheRetention,
 			"cache_control_breakpoints":     merged.CacheControlBreakpoints,
 			"text_only_models":              merged.TextOnlyModels,
@@ -7608,20 +7610,21 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 
 // nodeAdminView API 视图：只读字段 + 当前/手动标记 + 健康探测结果。
 type nodeAdminView struct {
-	Name          string  `json:"name"`
-	Protocol      string  `json:"protocol"`
-	Address       string  `json:"address"`
-	Port          int     `json:"port"`
-	Fingerprint   string  `json:"fingerprint"`
-	State         string  `json:"state"`
-	MarkedAt      string  `json:"marked_at,omitempty"`
-	CooldownUntil *string `json:"cooldown_until"` // null = 无冷却（裁定 5：零值后端归一化）
-	LastError     *string `json:"last_error"`     // null = 无错误（task-67 契约：string|null）
-	LastUsedAt    string  `json:"last_used_at,omitempty"`
-	LatencyMs     int64   `json:"latency_ms,omitempty"`
-	LastProbeAt   *string `json:"last_probe_at"` // null = 从未探测（裁定 5：零值后端归一化）
-	Active        bool    `json:"active"`
-	Manual        bool    `json:"manual"`
+	Name          string       `json:"name"`
+	Protocol      string       `json:"protocol"`
+	Address       string       `json:"address"`
+	Port          int          `json:"port"`
+	Fingerprint   string       `json:"fingerprint"`
+	State         string       `json:"state"`
+	MarkedAt      string       `json:"marked_at,omitempty"`
+	CooldownUntil *string      `json:"cooldown_until"` // null = 无冷却（裁定 5：零值后端归一化）
+	LastError     *string      `json:"last_error"`     // null = 无错误（task-67 契约：string|null）
+	LastUsedAt    string       `json:"last_used_at,omitempty"`
+	LatencyMs     int64        `json:"latency_ms,omitempty"`
+	LastProbeAt   *string      `json:"last_probe_at"` // null = 从未探测（裁定 5：零值后端归一化）
+	Active        bool         `json:"active"`
+	Manual        bool         `json:"manual"`
+	Probe         *probeResult `json:"probe"`
 
 	// task-67：打分字段（字段名是前端契约，见 docs/research/node-scoring-spec.md §5.1）
 	nodeScoreView
@@ -7635,6 +7638,7 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 		// task-67：打分（纯内存 O(节点数)，219 节点 <1ms；不需要缓存层）
 		scoringNow := time.Now()
 		_, scoreByFP := nodeScoringSnapshot(nodes, scoringNow)
+		probeSnap := nodeProber.Snapshot()
 		activeName, manualName := "", ""
 		out := make([]nodeAdminView, 0, len(nodes))
 		health := map[string]int{"available": 0, "exhausted": 0, "dead": 0}
@@ -7651,6 +7655,10 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 				Active: n.Fingerprint == pick,
 				Manual: n.Fingerprint == manual, LatencyMs: n.LatencyMs,
 				nodeScoreView: scoreByFP[n.Fingerprint],
+			}
+			if pr, ok := probeSnap[n.Fingerprint]; ok {
+				probeCopy := pr
+				v.Probe = &probeCopy
 			}
 			if n.LastError != "" {
 				e := n.LastError
@@ -8090,6 +8098,9 @@ func main() {
 	mux.HandleFunc("/logout", loggingMiddleware(logoutHandler))
 	mux.HandleFunc("/api/config", loggingMiddleware(requireAuth(adminConfigHandler)))
 	mux.HandleFunc("/api/nodes", loggingMiddleware(requireAuth(adminNodesHandler)))
+	mux.HandleFunc("/api/nodes/probe", loggingMiddleware(requireAuth(adminNodeProbeHandler)))
+	mux.HandleFunc("/api/nodes/probe_all", loggingMiddleware(requireAuth(adminNodeProbeAllHandler)))
+	mux.HandleFunc("/api/nodes/probe_all/cancel", loggingMiddleware(requireAuth(adminNodeProbeAllCancelHandler)))
 	mux.HandleFunc("/api/stats", loggingMiddleware(requireAuth(adminStatsHandler)))
 	mux.HandleFunc("/api/logs/aggregate", loggingMiddleware(requireAuth(adminAggregateHandler)))
 	mux.HandleFunc("/api/stats/trends", loggingMiddleware(requireAuth(adminTrendsHandler)))

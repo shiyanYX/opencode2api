@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,6 +82,34 @@ func (m *probeManager) Single(ctx context.Context, node ProxyNode, model, health
 	m.results[node.Fingerprint] = res
 	m.mu.Unlock()
 	return res, nil
+}
+
+// SingleCooldownRemaining 返回单节点探测剩余冷却秒数（向上取整，0=无冷却）。
+func (m *probeManager) SingleCooldownRemaining(fp string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	last, ok := m.lastSingle[fp]
+	if !ok {
+		return 0
+	}
+	return cooldownSeconds(probeSingleCooldown - (probeClock().Sub(last)))
+}
+
+// AllCooldownRemaining 返回全量探测剩余冷却秒数（向上取整，0=无冷却）。
+func (m *probeManager) AllCooldownRemaining() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.lastAllEnd.IsZero() {
+		return 0
+	}
+	return cooldownSeconds(probeAllCooldown - (probeClock().Sub(m.lastAllEnd)))
+}
+
+func cooldownSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 0
+	}
+	return int(math.Ceil(d.Seconds()))
 }
 
 func (m *probeManager) StartAll(ctx context.Context, nodes []ProxyNode, model, healthURL string) (string, int, error) {
