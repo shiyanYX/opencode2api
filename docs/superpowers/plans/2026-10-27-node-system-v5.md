@@ -1,7 +1,7 @@
-# 节点系统 v5.3：一次全局重构（资格 · 选择 · 可观测）
+# 节点系统 v5.4：一次全局重构（资格 · 选择 · 可观测）
 
 > **状态：DRAFT v5.4，待 R8-delta-3 复核。** 相对 v5.2 的核心修正：熔断从「60s 窗口 + 比例」改成 **「首个 429 即冷却」**，单位回到 **pair**。依据是真实日志回放：653e×mimo 的 429 从 **1,106 → 5**，41d×mimo **402 → 4**，4ad×mimo **20 → 1**，而 653e×deepseek 的 **0 个 429 完全不受影响**。
-> 前情：T1/T2/T3 已写进 `test`（HEAD `da85f2b`），生产仍是 10-26 15:16 旧镜像。v3.x 被 R3/R4/R5 判过度设计；v4.1 被 R6 认可；v5/v5.1 被 R8 判 NO-GO；v5.2 被 R8-delta 判 6 个 blocker。
+> 前情：T1/T2/T3 已写进 `test`（代码提交 `da85f2b`），生产仍是 10-26 15:16 旧镜像。v3.x 被 R3/R4/R5 判过度设计；v4.1 被 R6 认可；v5/v5.1 被 R8 判 NO-GO；v5.2 被 R8-delta 判 6 个 blocker。
 
 ## 1. 现状为什么必须重构
 
@@ -89,7 +89,7 @@ strikes 将要超过 4（即连续第 5 次 429，期间无任何 2xx）
 - **hard block 只看连续失败，不看 24h 累计**：`strikes` 只有在 2xx 时才归零，所以「第 5 次连续 429」意味着 4 轮冷却（60s+2m+5m+5m≈13min）到期后的第一个请求仍然 429、期间没有任何 2xx——这是真死。一天里偶发 6 次孤立 429（每次都有 2xx 隔开）永远不会触发 hard block（R8-delta-2 B1）。
 - `trips24h` 只用于面板与告警，**不参与任何裁决**；按 24h 滚动清理（cap 16 仅作内存上限）。
 - `until` 只影响该 pair；同一 egress 的其他 model 不受影响（653e×deepseek 0 个 429）。
-- **direct**：`pair=(model,direct)`，但 429 时额外设置 `egress.directUntil = now + 60s`，所有 model 的 direct pair 一并排除——直连是本机 IP，不按 model 分账。
+- **direct**：`pair=(model,direct)`，但 429 时额外设置 `direct.until = now + 60s`（顶层键），所有 model 的 direct pair 一并排除——直连是本机 IP，不按 model 分账。
 
 **恢复：2xx 即恢复（不设 canary）**
 
@@ -297,6 +297,6 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 | **D1** 653e 第 3 个 429 距最近 2xx 仅 4.32s，(c) 为假，第 3 次不熔断 | **不再依赖静默期或比例**：第一个 429 就冷却。回放实测 653e×mimo 429 1,106→5，且不再声称「0 个 2xx」——事实是 182×2xx / 1,106×429 |
 | **D2** `inflight<K` 无原子预留 | 每 egress 一个 cap=K 的 channel 信号量，`select` 非阻塞取、`sync.Once` 释放；`TestInflightAtomic` 在 `-race` 下断言恰好 K |
 | **D3** probe 无单飞；190 个正常 2xx 不减 strikes | `probeMu + nextProbeAt` 单飞；**任意 2xx 即 strikes=0**，不需要等 probe |
-| **D4** `win*` cap 64 不精确、缺字段 | **删除 win 窗口**；新增 `lastDecay`、`sub.n403/last403`、`egress.directUntil`、`epoch`；`trips24h` cap 16 |
-| **D5** direct 429 未真正并入 | `pair=(model,direct)` + `egress.directUntil` 双写；`TestDirectCooldown` |
+| **D4** `win*` cap 64 不精确、缺字段 | **删除 win 窗口**；新增 `lastDecay`、`sub.n403/last403`、顶层 `direct.until`、`epoch`；`trips24h` cap 16 |
+| **D5** direct 429 未真正并入 | `pair=(model,direct)` + 顶层 `direct.until` 双写；`TestDirectCooldown` |
 | **D6** egress 熔断误伤其他 model；strikes 越界；trips24h=3 过硬 | **熔断回 pair**，653e×deepseek 实测 0 个 429 不受影响；strikes 上限 4；hard block 只看「连续第 5 次 429」，有 2xx 即清零（v5.4） |
