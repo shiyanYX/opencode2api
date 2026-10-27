@@ -1,126 +1,147 @@
-# 节点系统 v3.1 执行计划（2026-10-27）
+# 节点系统 v3.2 执行计划（2026-10-27）
 
-> **状态：DRAFT v3.1 —— 已过 R3 校对，待 R4 复审。** R3 结论 NO-GO（3 条 blocker）已全部写入本版。
-> 纪律：同一时刻只允许一个代理在跑；R4 通过前不开工。
+> **状态：DRAFT v3.2 —— 已吸收 R3 + R4 全部 blocker，待 R5 复审。** R5 通过前不开工。
+> 纪律：同一时刻只允许一个代理在跑（用户要求）。
 
-## 0. 决策记录（R3 裁决后）
-
-**默认路径：per-`(model, egress)` 排除。全局闸降为严格例外。**
-
-| 分歧 | v3.0 | v3.1（R3 裁决） |
-|---|---|---|
-| D1 状态粒度 | 全局单闸 × per-model 二选一 | **默认 per-`(model,egress)`**；全局仅在严格布尔条件下启用 |
-| D2 触发条件 | 3 distinct/10min 或 K=5 | **K=5 + distinct_new_egress≥5 + 60s 无任何 2xx + attempts≥20 + 429 比例≥0.90** |
-| D3 闩退出 | TTL 10min 退出 | **TTL 只推 `nextProbeAt`，绝不清 `blocked`**；退出唯一条件是任一真实 2xx |
-| D4 每 IP 预算 | 24h 8 次 | 接受，但**只统计 shape-suspect**，不统计普通配额 429 |
-| D5 冷却 5h | 固定 5h | **5m→30m→2h→5h 递进 + 真实请求 canary**；190 个首次标记 100% 为 +5.00h，无依据 |
-| D6 probation 证据 | 真实请求 vs 探测未定 | 配额 probation **只用真实请求**；主动探测只用于 dead/transport；**删除 `recordProbeSuccess` 对 NodeProbation 的提升** |
-| D7 对外状态码 | 混用 | 全局/pool403/direct → **503 + Retry-After**；仅 per-model 配额 → 429；**禁止透传上游 429** |
-| D8 三套 halt | 并存 | **唯一 `Decide(GateInput) GateDecision`**，优先级 `pool403 > global shape > model quota > direct quota > selection` |
-
-**更正一处先前错误**：我此前说「23:03/00:33/01:00 有 21/29/9 个节点到期」是**日志行数**，distinct fp 只有 **3/1/2**；18:03 的 21 行只涉及 2 个节点。涉及这些数字的论证已按 R3 复算修正。
-
-## 1. 唯一裁决点
-
-```go
-type GateInput struct {
-    Now               time.Time
-    Model             string
-    EgressKey         string
-    AttemptsLast60s   int
-    Ratio429Last60s   float64
-    DistinctNew429    int   // 600s，去重 egress
-    ConsecutiveNew429 int
-    LastAny2xx        time.Time
-    Pool403Halted     bool
-    PairBlocked       bool
-    ModelQuotaBlocked bool
-    DirectQuotaBlocked bool
-    GlobalArmed       bool
-}
-type GateDecision struct {
-    Allow      bool
-    Reason     string // pool403 | global_shape | model_quota | direct_quota | ok
-    StatusCode int    // 503 或 429
-    RetryAfter int
-    TrialToken string // 单飞探测令牌（绑 egress）
-    SuppressBy string
-}
-func Decide(in GateInput) GateDecision
-```
-
-优先级（高→低）：`pool403 > global_shape > model_quota > direct_quota > selection`。
-- 同一事务内更新全局闸与 per-pair 状态，禁止只更新一边。
-- 禁止在 gate 内调用 `hasEligibleNode()` 之类有副作用的函数。
-
-## 2. 全局 shape 的可判定条件（R3 §2.3）
-
-```text
-GLOBAL_SHAPE =
-  no_2xx_any_model(last 60s)                      // 硬否决：任一 2xx 立即 false
-  AND last_any_2xx_age >= 60s
-  AND distinct_new_egress_429(last 600s) >= 5     // 同一 egress 被不同 model 429 只算 1 个
-  AND consecutive_new_egress_429 >= 5              // 同出口重复 429 不递增
-  AND attempts(last 60s) >= 20
-  AND 429_count(last 60s) / attempts(last 60s) >= 0.90
-```
-
-- 只有 1 个出口反复 429（如 00:20 的 `US-191.96.254.138`，167 次）**永远不触发全局**，由 per-pair 处理。
-- 低流量（attempts<20）不启用全局，靠 per-pair + fail-fast。
-- 全局闸生效时：`blocked` 保留；TTL 只推 `nextProbeAt`；除单飞探测外零上游发送。
-- 任一真实 2xx（任意 model）⇒ 同事务清除全局闸与对应 `(model,egress)`。
-
-## 3. 切片（每个切片 = 一个可独立回滚的提交）
-
-### S0 拆分提交（已完成基础）
-- `da85f2b`（T1/T2/T3 + 草案）、`456256f`（probation + mark 幂等）。测试文件不入库。
-
-### S1 闸门引擎 + 唯一裁决点
-- 文件：`shape_drift.go`（重写为引擎）、`gate.go`（新增 `Decide`）、`main.go`（两条循环改为先 `Decide` 再发）、`calllog.go`（结构化抑制字段）。
-- 必须：per-pair 递进冷却 5m/30m/2h/5h；24h shape-suspect 预算 8；单飞令牌绑 egress；全局条件如上；禁止回退直连；`SHAPE_DRIFT_GATE=off` 时行为回到 HEAD。
-- 测试 ≥20（含 D1 条件逐条布尔、单出口 167 连发不升级、同窗口 40 ok 禁止全局、TTL 不清 blocked、令牌错配、24h 预算、503 header、off 开关、并发 100 单飞）。
-- 变异 ≥8 全红。
-- 事故仿真：18:03 与 00:20 两段参数各跑 5h 虚拟时间；断言单出口命中 ≤1、主 IP 命中 0、无 5,520 次发送、全局 armed 连续 <10min。
-- 独立评审 PASS 后才进 S2。
-
-### S2 生命周期收尾（probation 已在 `456256f`）
-- 删除 `recordProbeSuccess` 对 NodeProbation 的提升；冷却改 5m/30m/2h/5h + canary；补测试与变异。
-
-### S3 per `(model,node)` 配额状态 + 持久化迁移
-- 旧状态文件无字段 ⇒ `unknown`；面板只读字段缺失显示「未提供」。
-
-### S4 打分架构（等 T7 完成；`13-scoring-architecture.md` 目前仍是半成品）
-
-## 4. 验证门禁
-
-1. `go build` / `go vet` / gofmt；
-2. `go test -skip 'TestIP4RV' -count=1 ./...`；
-3. 变异全红；
-4. 事故仿真通过；
-5. **独立评审**（非实现者）go/no-go；
-6. 提交信息含切片号与回滚方式。
-
-## 5. 上线与回滚
-
-- 开关：`SHAPE_DRIFT_GATE=off|on`（默认 on）、`SHAPE_DRIFT_K`、`SHAPE_DRIFT_PROBE_TTL`。
-- 观察 30min：成功率、上游发送总量、`suppressed_by` 分布、单出口命中分布、`Retry-After` 命中率。
-- 回滚：成功率低于部署前 10pp / 可用节点 <20 / 全局 armed >15min 未退出 ⇒ 关开关或回滚 S1。
-- 禁止靠重启清闩（会清掉 blocked 证据）。
-
-## 6. 校对轮次
+## 0. 版本演进
 
 | 轮次 | 评审者 | 结论 | 本版处理 |
 |---|---|---|---|
 | R1 | review-t1-design | 现实现 no-go（C1–C4）+ G1 | 采纳发送前闸门/令牌/不清 blocked |
-| R2 | healthcheck-probe | 提出 C10 + 烧 IP 上界 | 采纳 per-pair 递进冷却 + 24h 预算 |
-| R3 | verify-c5v2 | DRAFT NO-GO，8 条裁决 + 3 个 blocker | 全部写入 v3.1（本文件） |
-| R4（待跑） | 待定（非 R1–R3） | — | — |
+| R2 | healthcheck-probe | C10 + 烧 IP 上界 | 采纳 per-pair 递进冷却 + 24h 预算 |
+| R3 | verify-c5v2 | NO-GO，D1–D8 裁决 + 3 blocker | per-pair 默认、全局严格例外、TTL 不清 blocked、Decide 唯一裁决点 |
+| R4 | impl-ip1 | NO-GO，B1–B6 | 本版：事务化 API、条件化五层、per-pair 状态机、canary 并发门、持久化/off、meter/clock |
 
-## 7. R4 必须攻击的点
+**已更正的事实**：此前「21/29/9 个节点到期」是日志行数，distinct fp 仅 3/1/2；18:03 的 21 行只涉及 2 个节点。190 个首次 `NodeExhausted` 标记 100% 为 `+5.00h`，无数据依据。
 
-1. `Decide` 的优先级是否真的能消除「一处放行、另一处闩死」；用交互矩阵穷举。
-2. 全局条件里 `attempts≥20` 与 `ratio≥0.9` 在低流量/突发流量下的边界；会不会因为流量小永远不触发、或因为 1 个 2xx 永远不触发。
-3. per-pair 冷却到期 + canary 是否会重新引入「假性恢复」；canary 失败后的退避是否单调。
-4. 24h 预算只统计 shape-suspect 的判定规则是否可被伪造（客户端/上游行为）。
-5. 切换 503 后客户端重试行为（惊群）与 `Retry-After` 的实际效果。
-6. 迁移：旧持久化状态、`SHAPE_DRIFT_GATE=off` 的回退语义。
+## 1. 核心设计（R4 修订后）
+
+### 1.1 Admission 事务 API（B1）
+
+```go
+type Admission struct { /* gate state, meter, pair state, pool 引用 */ }
+
+func (a *Admission) Snapshot(now time.Time, model string) GateInput
+func (a *Admission) Decide(in GateInput) GateDecision        // 纯函数，无副作用
+func (a *Admission) Commit(d GateDecision, now time.Time)     // 锁内状态转移 + meter 写入
+```
+
+`GateInput` 必须包含：`Now, Model, CandidateN, UnblockedN, DirectAvailable, PairChosen, PairBlocked, ModelAllPairsBlocked, PairCooldownRemaining, TrialInFlight, TrialTokenValid, NextProbeIn, GlobalArmed, GlobalBlockedSet, Pool403Halted, AttemptsLast60s, Ratio429Last60s, DistinctNew429_600s, ConsecutiveNew429, LastAny2xx`。
+
+规则：
+- `Snapshot` 在**同一把锁/版本**下生成所有计数，避免 attempts=19 与 ratio=1 来自不同时刻。
+- `Decide` 只读；`Commit` 在锁内做 CAS 与状态迁移；meter 的 attempts 只在「真正发送」时记，抑制不记（否则分母被自己的拒绝污染）。
+- **发送前再复核 `Pool403Halted`**（保留 main 现有双重检查）。
+- 时钟：所有 gate/pair/meter 函数接收 `Now`；测试用 fake clock，可跑 5h 虚拟时间。
+
+### 1.2 五层条件化语义（B2）
+
+| 层 | 拒绝条件（必须精确） | 状态码 | Reason |
+|---|---|---|---|
+| P pool403 | `Pool403Halted` | 503 + Retry-After | `pool403` |
+| G global shape | §1.3 六条件全真 | 503 + Retry-After | `global_shape` |
+| M model quota | **该 model 的所有 pair 都 blocked**（不是有任意一个 blocked） | 429 | `model_quota` |
+| D direct quota | **仅当选路会落到 direct 时** | 503 + Retry-After | `direct_quota` |
+| S selection | `CandidateN==0`（含全部 blocked） | 503 | `no_candidate` |
+
+- 多层同时拒绝时取**最高优先级**的状态码与 Reason，`SuppressBy` 记录全部命中层（逗号分隔），禁止状态码随无关层跳变。
+- 禁止回退直连：`DirectAvailable=false` 时 `S=0` 直接 503。
+- 禁止透传上游 429。
+
+### 1.3 全局 shape 条件（严格例外）
+
+```text
+GLOBAL_SHAPE =
+  no_2xx_any_model(last 60s)                    // 硬否决
+  AND last_any_2xx_age >= 60s
+  AND distinct_new_egress_429(600s) >= 5        // 同 egress 多 model 只算 1
+  AND consecutive_new_egress_429 >= 5           // 同出口重复不加不重置
+  AND attempts(60s) >= 20
+  AND 429_count(60s)/attempts(60s) >= 0.90
+```
+
+- 单出口 167 连发（distinct=1）永不触发全局；由 per-pair 在第 3 次时停。
+- 任一真实 2xx（任意 model）⇒ 同事务清全局与对应 pair。
+- 全局生效时 `blocked` 保留；TTL 只推 `nextProbeAt`；除单飞探测外零上游发送。
+
+### 1.4 per-pair 状态机（B3）
+
+```text
+pair = (model, egressKey)
+strikes: 1→5m, 2→30m, 3→2h, 4+→5h（封顶）
+触发排除：同一 pair 在 10min 内第 3 次 FUL（不等全局）
+canary：冷却到期后只允许 1 次真实请求；K=2 次成功且间隔≥60s 才 reset strikes；失败则 strikes+1
+并发门：同一 pair 同时只允许 1 个 canary（100 并发 → 1 次上游）
+每 egress 总 canary 上限：24h 内 8 次（含所有 model 叠加）
+24h 预算：统计所有「接触过 FUL 或 403-confirmed」的发送；达到 8 次 ⇒ 该 egress 硬排除 24h
+```
+
+### 1.5 持久化与 off（B5）
+
+- 新增 `gate_state.json`（**不塞进 `proxy_state.json`**，避免回滚旧二进制丢节点状态）：`{version, blocked: {pair: {until, strikes, lastHit, canaryOK}}, global: {armed, armedAt, nextProbeAt, blocked[]}, budget: {egress: {hits, windowStart}}}`。
+- 原子写（tmp+rename）；损坏时 fail-open（清空并告警），不 fail-closed。
+- 上限：`modelCap=512` + 空闲 30min 清理；**不得淘汰已 armed/blocked 的证据**（旧 C2 教训）。
+- 重启不清 blocked（与 §4 一致）。
+- `SHAPE_DRIFT_GATE=off`：走 HEAD 旧 shape 路径（per-model/3 distinct/TTL 清 seen），**不绕过 pool403 与 quota_halt**；env 非法值默认 on。
+- 部署时一次性迁移：旧 `NodeExhausted` 且 `LastError` 含 quota ⇒ 按新规则重算冷却（首次 5m），保留 dead / `GateStateRejected`。
+
+### 1.6 meter 与可测性（B6）
+
+- `gateMeter`：60 个 1s 桶（attempts/n429）+ `last2xx`；600s distinct `map[egress]time.Time`（上限 213+1）。
+- 写入点唯一：`Admission.Commit`（两条 main 循环、direct/node、canary 全走同一接口）。
+- 内存测试：10 万随机 model 名，`modelCap` 生效且内存不增长；已 blocked 的 pair 不被淘汰。
+- 事故仿真用 fake clock 跑 5h；用 instrumented transport 统计「每 egress 发送次数」与「direct 发送次数」，替代不可测的「命中 ≤1」字面断言。
+
+## 2. 切片（每个切片一个可回滚提交）
+
+### S0 基线（已完成）
+- `da85f2b` T1/T2/T3 + 草案；`456256f` probation + mark 幂等；`9c3cc59` 2xx 接线 + R4 报告。
+
+### S1a Admission API + meter + 条件化五层
+- 新增 `admission.go`（Snapshot/Decide/Commit、gateMeter、fake clock 接口）。
+- `main.go` 两条循环改为 `Snapshot → Decide → Commit → 发送`，保留 pool403 双重检查。
+- 测试：32 行交互矩阵（R4 附录 A）、并发 100 单飞、发送前 halt 竞态、抑制不污染 ratio。
+- 验收：矩阵逐行断言；变异 ≥6。
+
+### S1b per-pair 状态机 + canary + 24h 预算
+- `admission.go` + `gate_state.json` 结构（先内存，S1c 再落盘）。
+- 测试：单出口 167 连发在第 3 次停；100 并发 canary 只发 1；K=2/60s reset；失败退避单调；每 egress 24h 8 次；多 model 叠加。
+- 验收：变异 ≥6；5h 虚拟时间下每 egress 发送次数 ≤ 预算。
+
+### S1c 全局闸 + off + 持久化 + 迁移
+- 全局六条件、单飞令牌绑 egress、`SHAPE_DRIFT_GATE`、`gate_state.json` 原子读写、旧 NodeExhausted 迁移。
+- 测试：重启不清 blocked；旧 state 加载；off 与 HEAD golden 对比；损坏文件 fail-open。
+- 验收：变异 ≥6；golden 回放发送数/抑制数/状态码一致。
+
+### S2 生命周期收尾
+- 删除 `recordProbeSuccess` 对 NodeProbation 的提升；冷却 5m/30m/2h/5h + canary；补测试。
+
+### S3 per `(model,node)` 配额状态
+- 旧状态文件无字段 ⇒ `unknown`；面板只读字段缺失显示「未提供」。
+
+### S4 打分架构（等 T7；`13-scoring-architecture.md` 仍是半成品）
+
+## 3. 验证门禁
+
+1. `go build` / `go vet` / gofmt；
+2. `go test -skip 'TestIP4RV' -count=1 ./...`；
+3. 变异全红（每片 ≥6，总计 ≥18）；
+4. 事故仿真（fake clock 5h，18:03 与 00:20 两组参数）；
+5. 独立评审 go/no-go（每片）；
+6. 提交信息含切片号与回滚方式。
+
+## 4. 上线与回滚
+
+- 开关：`SHAPE_DRIFT_GATE=off|on`（默认 on）。
+- 观察 30min：成功率、上游发送总量、`suppressed_by` 分布、每 egress 发送次数、`Retry-After` 命中。
+- 回滚：成功率低于部署前 10pp / 可用节点 <20 / 全局 armed >15min 未退出 ⇒ 关开关或回滚该片。
+- 禁止靠重启清闩。
+
+## 5. R5 必须攻击的点
+
+1. `Decide/Commit` 分离后，Snapshot 与发送之间的状态漂移（尤其 pool403、pair blocked 变更）是否仍可能放行一个已 blocked 的 egress；给出竞态时序。
+2. 条件化 M（所有 pair blocked）与 per-pair 冷却的交互：会不会出现「pair 还有 1 个未到期但实际不可用」的假放行。
+3. canary K=2/60s 与 24h 8 次预算在「配额每日重置」场景下是否会永久锁死节点；给出解锁路径。
+4. `gate_state.json` 与 `proxy_state.json` 两份状态在崩溃/回滚时的不一致；给出恢复顺序。
+5. off 路径与 HEAD 的 golden 对比是否真的可复现（HEAD 旧路径有 TTL 清 seen，行为差异需列全）。
+6. 是否仍存在「一处放行、另一处拒绝」的层间组合；用 32 行矩阵之外的组合（含 direct、canary、trial）再穷举一轮。
