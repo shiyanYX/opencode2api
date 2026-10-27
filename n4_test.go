@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -284,5 +285,141 @@ func TestWinterLogThrottled(t *testing.T) {
 	cr.mu.Unlock()
 	if n != 1 {
 		t.Fatalf("v5_winter events=%d want 1", n)
+	}
+}
+
+func TestGateThresholdOnTenthAttempt(t *testing.T) {
+	a, _, _ := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s1"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s2"},
+		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
+	)
+	for i := 0; i < 5; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3))}, Outcome429)
+	}
+	for i := 0; i < 4; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+	}
+	if a.GatePaused() {
+		t.Fatal("gate tripped before the 10th attempt")
+	}
+	a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+	if !a.GatePaused() {
+		t.Fatal("10th attempt (2xx) did not evaluate the 5/10 boundary")
+	}
+}
+
+func TestGateNeedsTenAttempts(t *testing.T) {
+	a, _, _ := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s1"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s2"},
+		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
+	)
+	for i := 0; i < 5; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3))}, Outcome429)
+	}
+	for i := 0; i < 4; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+	}
+	if a.GatePaused() {
+		t.Fatal("gate tripped on 9 attempts")
+	}
+}
+
+func TestGateBelowFiftyPercent(t *testing.T) {
+	a, _, _ := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s1"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s2"},
+		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
+	)
+	for i := 0; i < 49; i++ {
+		class := Outcome2xx
+		if i >= 25 {
+			class = Outcome429
+		}
+		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3))}, class)
+	}
+	if a.GatePaused() {
+		t.Fatal("gate tripped below 50%")
+	}
+}
+
+func TestGateEmptyEgressNotCounted(t *testing.T) {
+	a, _, st := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s1"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s2"},
+		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
+	)
+	for i := 0; i < 5; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3))}, Outcome429)
+	}
+	for i := 0; i < 5; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: ""}, Outcome429)
+	}
+	if st.Gate.Attempts != 5 || st.Gate.Failures != 5 || len(st.Gate.Egresses) != 3 {
+		t.Fatalf("window=%+v want attempts=5 failures=5 egresses=3", st.Gate)
+	}
+	if a.GatePaused() {
+		t.Fatal("empty egress attempts must not trip the gate")
+	}
+}
+
+func TestV5CandidatesColdStart(t *testing.T) {
+	p := newProxyPool(filepath.Join(t.TempDir(), "proxy_state.json"))
+	p.setNodes([]*ProxyNode{
+		{Name: "n1", Protocol: "socks5", Address: "10.0.0.1", Port: 1080, Region: "jp"},
+		{Name: "n2", Protocol: "socks5", Address: "10.0.0.2", Port: 1080, Region: "us"},
+		{Name: "n3", Protocol: "socks5", Address: "10.0.0.3", Port: 1080, Region: "hk"},
+	})
+	old := proxyPool
+	proxyPool = p
+	t.Cleanup(func() { proxyPool = old })
+	v5CandidatesHook = nil
+
+	got := v5Candidates("m")
+	nodes, direct := 0, 0
+	for _, c := range got {
+		if c.Direct {
+			direct++
+		} else if c.Egress != "" {
+			nodes++
+		}
+	}
+	if nodes != 3 || direct != 1 {
+		t.Fatalf("cold candidates=%+v want 3 nodes + direct", got)
+	}
+}
+
+func TestV5CandidateSurvivesLegacyClientDelete(t *testing.T) {
+	p := newProxyPool(filepath.Join(t.TempDir(), "proxy_state.json"))
+	p.setNodes([]*ProxyNode{{Name: "n1", Protocol: "socks5", Address: "10.0.0.1", Port: 1080, Region: "jp"}})
+	n := p.snapshot()[0]
+	old := proxyPool
+	proxyPool = p
+	t.Cleanup(func() { proxyPool = old })
+	v5CandidatesHook = nil
+	if got := v5Candidates("m"); len(got) != 2 {
+		t.Fatalf("initial candidates=%+v", got)
+	}
+	p.mu.Lock()
+	delete(p.clients, n.Fingerprint)
+	p.mu.Unlock()
+	got := v5Candidates("m")
+	if len(got) != 2 || got[0].Egress != nodeEgressKey(n.Fingerprint) {
+		t.Fatalf("after legacy client delete candidates=%+v", got)
+	}
+}
+
+func TestForceTransportErrorDoesNotMarkLegacyState(t *testing.T) {
+	t.Setenv("NODE_SYSTEM", "force")
+	p := newProxyPool(filepath.Join(t.TempDir(), "proxy_state.json"))
+	p.setNodes([]*ProxyNode{{Name: "n1", Protocol: "socks5", Address: "10.0.0.1", Port: 1080}})
+	n := p.snapshot()[0]
+	old := proxyPool
+	proxyPool = p
+	t.Cleanup(func() { proxyPool = old })
+	noteAttemptTransportError(context.Background(), p, n.Fingerprint, errors.New("eof"))
+	if got := p.snapshot()[0].State; got != NodeAvailable {
+		t.Fatalf("force transport error changed legacy state to %v", got)
 	}
 }

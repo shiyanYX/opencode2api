@@ -795,20 +795,24 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 		g.Failures = 0
 		g.Egresses = map[string]int64{}
 	}
+	// Empty-egress attempts (admission misses, probes without a chosen egress)
+	// must not pollute the gate window at all (F2).
+	if at.Egress == "" {
+		return
+	}
 	g.Attempts++
 	if class == Outcome429 {
 		g.Failures++
-	}
-	if class != Outcome429 || at.Egress == "" {
-		return
-	}
-	cutoff := nowMS - gateWindow.Milliseconds()
-	for k, ts := range g.Egresses {
-		if ts < cutoff {
-			delete(g.Egresses, k)
+		cutoff := nowMS - gateWindow.Milliseconds()
+		for k, ts := range g.Egresses {
+			if ts < cutoff {
+				delete(g.Egresses, k)
+			}
 		}
+		g.Egresses[at.Egress] = nowMS
 	}
-	g.Egresses[at.Egress] = nowMS
+	// Thresholds are evaluated on every attempt, not only on a 429. This
+	// makes the 10th attempt decisive even when it is a 2xx (F1).
 	if len(g.Egresses) < gateDistinct {
 		return
 	}

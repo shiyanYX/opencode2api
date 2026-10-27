@@ -2866,7 +2866,7 @@ func noteAttemptTransportError(ctx context.Context, pool *nodePool, nodeFp strin
 	// 连接错误（EOF、建连超时等）：标记节点为 dead，避免后续请求继续命中坏节点。
 	// 无论是否还有重试预算都要标记，否则最后一次失败会让坏节点长期留在池中。
 	// 池级 halt 期间不 mark（与 T2「halt 期间不 mark 任何节点」的硬约束一致）。
-	if nodeFp != "" && !pool.poolHalted(time.Now()) {
+	if nodeFp != "" && !v5LegacyGatesBypassed() && !pool.poolHalted(time.Now()) {
 		pool.mark(nodeFp, NodeDead, "connect_error:"+err.Error())
 	}
 	return false

@@ -203,7 +203,6 @@ func v5Candidates(model string) []Candidate {
 			nodes = append(nodes, n)
 		}
 	}
-	clients := proxyPool.clients
 	proxyPool.mu.RUnlock()
 
 	out := make([]Candidate, 0, len(nodes)+1)
@@ -211,7 +210,10 @@ func v5Candidates(model string) []Candidate {
 		if n.Fingerprint == "" {
 			continue
 		}
-		if clients == nil || clients[n.Fingerprint] == nil {
+		// getClient lazily creates the cached client on a cold start. Relying
+		// on a pre-populated clients map made force mode see only direct until
+		// the first health probe happened (F3).
+		if proxyPool.getClient(n.Fingerprint) == nil {
 			continue
 		}
 		out = append(out, Candidate{
