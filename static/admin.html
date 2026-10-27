@@ -213,6 +213,12 @@ input,select,textarea{font-family:inherit;color:inherit}
 .tag{display:inline-flex;align-items:center;padding:1px 7px;border-radius:6px;font-size:10.5px;font-weight:600;letter-spacing:.03em;vertical-align:1px}
 .tag.cur{background:var(--accent-dim);color:var(--accent);margin-left:6px}
 .tag.man{background:var(--blue-dim);color:var(--blue);margin-left:6px}
+.tag.avail-ok{background:var(--ok-dim);color:var(--ok)}
+.tag.avail-quota{background:var(--orange-dim);color:var(--orange)}
+.tag.avail-denied{background:var(--purple-dim);color:var(--purple)}
+.tag.avail-unreachable{background:var(--surface-2);color:var(--text-ter)}
+.tag.avail-error{background:var(--red-dim);color:var(--red)}
+.avail-meta{display:inline-block;margin-left:5px;font-size:10.5px;color:var(--text-ter);font-family:var(--mono);white-space:nowrap}
 .node-name{font-weight:600}
 .proto{font-family:var(--mono);font-size:12px;color:var(--text-sec)}
 .err{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px;color:var(--text-ter)}
@@ -608,14 +614,16 @@ input,select,textarea{font-family:inherit;color:inherit}
     <div class="actions">
       <button class="btn btn-primary" onclick="reloadSubs()">重新加载订阅</button>
       <button class="btn btn-ghost" onclick="resetAllMarks()">解除全部标记</button>
-      <button class="btn btn-ghost" onclick="probeAll()">测速</button>
+      <button class="btn btn-ghost" onclick="probeAll()">连通测速</button>
+      <button id="probeAllBtn" class="btn btn-ghost" onclick="probeAllNodes()">全量测试</button>
+      <div id="probeAllProgress" class="usage-bar" style="display:none;width:140px;min-width:90px;flex:0 1 180px"><i style="width:0%"></i></div>
       <button class="btn btn-ghost" onclick="loadNodes()">刷新节点</button>
       <span id="nodeStatus" class="muted" style="font-size:11px"></span>
     </div>
     <div class="latdist" id="latdist"></div>
     <div class="card" style="padding:14px 0 6px">
       <div style="overflow-x:auto"><table class="tbl" id="nodeTable">
-        <thead><tr><th style="width:20%">名称</th><th style="width:9%">协议</th><th style="width:9%">状态</th><th class="num" style="width:9%">延迟</th><th style="width:16%">冷却至</th><th style="width:27%">最近错误</th><th style="width:10%"></th></tr></thead>
+        <thead><tr><th style="width:18%">名称</th><th style="width:8%">协议</th><th style="width:8%">状态</th><th class="num" style="width:8%">延迟</th><th style="width:17%">可用性</th><th style="width:13%">冷却至</th><th style="width:16%">最近错误</th><th style="width:12%">操作</th></tr></thead>
         <tbody></tbody>
       </table></div>
     </div>
@@ -993,7 +1001,7 @@ async function loadNodes(){
   try{const d=await fetchJSON('/api/nodes',{core:'nodes'});nodeData=d.nodes||[];subData=(d.subscriptions||[]).filter(s=>s.url!=='webshare API');applyWsSnapshot(d.subscriptions||[]);renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable()}catch(e){
     // 保留上一次渲染好的行：整表清空会把「拿不到」渲染成「这个网关一个节点都没有」。
     const tb=q('#nodeTable tbody');
-    if(tb)tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="7" class="empty-hint">未更新：'+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>');
+    if(tb)tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="8" class="empty-hint">未更新：'+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>');
   }
 }
 /* GET /api/stats?range=<当前时间窗> 一次返回 models 聚合 + trends_by_model，
@@ -1682,16 +1690,34 @@ function trendDemo(rng){
 function setFilter(f){filter=f;qa('#stateChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.f===f));renderNodeTable()}
 const badgeMap={available:'<span class="badge available"><span class="bdot"></span>可用</span>',exhausted:'<span class="badge exhausted"><span class="bdot"></span>已耗尽</span>',dead:'<span class="badge dead"><span class="bdot"></span>故障</span>',idle:'<span class="badge idle"><span class="bdot"></span>未知</span>'};
 function badgeHtml(s){return badgeMap[s]||badgeMap.idle}
+function fmtAgo(iso){
+  const t=Date.parse(iso);if(!Number.isFinite(t))return '-';
+  const sec=Math.max(0,Math.floor((Date.now()-t)/1000));
+  if(sec<5)return '刚刚';
+  if(sec<60)return sec+' 秒前';
+  if(sec<3600)return Math.floor(sec/60)+' 分钟前';
+  return Math.floor(sec/3600)+' 小时前';
+}
+const probeTagMap={ok:['avail-ok','可用'],quota:['avail-quota','配额'],denied:['avail-denied','拒绝'],unreachable:['avail-unreachable','不可达'],error:['avail-error','错误']};
+function probeTagHtml(n){
+  const p=n.probe;
+  if(!p||!p.class)return '<span class="muted">未测试</span>';
+  const d=probeTagMap[p.class]||probeTagMap.error;
+  let out='<span class="tag '+d[0]+'">'+d[1]+'</span>';
+  if(p.class==='ok'&&p.latency_ms>0)out+='<span class="avail-meta">'+p.latency_ms+' ms</span>';
+  if(p.at)out+='<span class="avail-meta">'+esc(fmtAgo(p.at))+'</span>';
+  return out;
+}
 function renderNodeTable(){
   const tb=q('#nodeTable tbody');const rows=nodeData.filter(n=>filter==='all'||n.state===filter);
   q('#cntAll').textContent=nodeData.length;
   q('#cntAvail').textContent=nodeData.filter(n=>n.state==='available').length;
   q('#cntExh').textContent=nodeData.filter(n=>n.state==='exhausted').length;
   q('#cntDead').textContent=nodeData.filter(n=>n.state==='dead').length;
-  if(!rows.length){tb.innerHTML='<tr><td colspan="7" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}
+  if(!rows.length){tb.innerHTML='<tr><td colspan="8" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}
   tb.innerHTML=rows.map(n=>{
     const lat=(n.latency_ms!=null&&n.latency_ms>=0)?'<span class="num '+latClass(n.latency_ms)+'">'+n.latency_ms+' ms</span>':(n.latency_ms!=null&&n.latency_ms<0?'<span class="muted">超时</span>':'<span class="muted">-</span>');
-    return '<tr class="'+(n.active?'hl':'')+'"><td><span class="node-name">'+esc(n.name)+(n.active?'<span class="tag cur">当前</span>':'')+(n.manual?'<span class="tag man">手动</span>':'')+'</span></td><td><span class="proto">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="num">'+lat+'</td><td class="num muted">'+esc(fmtTime(n.cooldown_until))+'</td><td class="err">'+esc(n.last_error||'-')+'</td><td class="acts"><button class="btn btn-sm btn-primary" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-sm btn-ghost" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button></td></tr>';
+    return '<tr class="'+(n.active?'hl':'')+'"><td><span class="node-name">'+esc(n.name)+(n.active?'<span class="tag cur">当前</span>':'')+(n.manual?'<span class="tag man">手动</span>':'')+'</span></td><td><span class="proto">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="num">'+lat+'</td><td>'+probeTagHtml(n)+'</td><td class="num muted">'+esc(fmtTime(n.cooldown_until))+'</td><td class="err">'+esc(n.last_error||'-')+'</td><td class="acts"><button class="btn btn-sm btn-primary" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-sm btn-ghost" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button> <button class="btn btn-sm btn-ghost" onclick="probeNode(\''+n.fingerprint+'\',this)">测试</button></td></tr>';
   }).join('');
 }
 async function nodeAction(action,fp){
@@ -1701,6 +1727,119 @@ async function nodeAction(action,fp){
 }
 function reloadSubs(){nodeAction('reload','')}
 function probeAll(){nodeAction('probe','')}
+let probeAllTimer=null,probeAllJob=null,probeAllTotal=0,probeAllDone=0,probeAllDemo=false,probeAllHideTimer=null;
+function probeAllSetProgress(done,total){
+  const bar=q('#probeAllProgress');
+  if(bar){bar.style.display='';const fill=bar.querySelector('i');if(fill)fill.style.width=(total>0?Math.min(100,Math.round(done/total*100)):0)+'%'}
+  q('#nodeStatus').textContent='已完成 '+done+'/'+total;
+}
+function demoProbe(fp,forceClass){
+  const sum=Array.from(String(fp)).reduce((a,c)=>a+c.charCodeAt(0),0);
+  const cls=forceClass||['ok','quota','denied','unreachable'][sum%4];
+  return {fingerprint:fp,class:cls,latency_ms:20+(sum%281),at:new Date().toISOString()};
+}
+async function probeNode(fp,btn){
+  const original=btn?btn.textContent:'测试';
+  if(btn){btn.disabled=true;btn.textContent='测试中…'}
+  try{
+    let d;
+    if(DEMO_MODE){await new Promise(r=>setTimeout(r,350));d=demoProbe(fp)}
+    else{
+      const r=await fetch('/api/nodes/probe',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({fingerprint:fp})});
+      const body=await r.json().catch(()=>({}));
+      if(!r.ok){
+        if(r.status===429){showToast('冷却中，'+(body.retry_after_s||0)+' 秒后可重试','error');return}
+        throw new Error(body.error||'请求失败');
+      }
+      d=body;
+    }
+    const i=nodeData.findIndex(n=>n.fingerprint===fp);
+    if(i>=0)nodeData[i].probe=d;
+    renderNodeTable();
+  }catch(e){showToast('测试失败: '+e.message,'error')}
+  finally{if(btn&&btn.isConnected){btn.disabled=false;btn.textContent=original}}
+}
+function probeAllNodes(){
+  const total=nodeData.length;
+  if(!confirm('将对 '+total+' 个节点各发 1 次真实请求，最多消耗 '+total+' 次免费配额。继续？'))return;
+  if(probeAllTimer){clearInterval(probeAllTimer);probeAllTimer=null}
+  if(probeAllHideTimer){clearTimeout(probeAllHideTimer);probeAllHideTimer=null}
+  probeAllJob=null;probeAllTotal=total;probeAllDone=0;probeAllDemo=DEMO_MODE;
+  const btn=q('#probeAllBtn');if(btn){btn.disabled=false;btn.textContent='取消'}
+  probeAllSetProgress(0,total);
+  if(DEMO_MODE){startDemoProbeAll();return}
+  fetch('/api/nodes/probe_all',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(async r=>{
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(d.error||'启动失败');
+    probeAllJob=d.job_id;probeAllTotal=d.total||total;probeAllDone=0;
+    probeAllSetProgress(0,probeAllTotal);
+    probeAllTimer=setInterval(pollProbeAll,1000);
+  }).catch(e=>finishProbeAll(null,e.message));
+}
+function startDemoProbeAll(){
+  const classes=['ok','quota','denied','unreachable'];
+  const counts={};
+  probeAllTimer=setInterval(()=>{
+    if(probeAllDone>=probeAllTotal){
+      finishProbeAll({done:probeAllDone,total:probeAllTotal,summary:counts});
+      return;
+    }
+    const i=probeAllDone;
+    const cls=classes[i%classes.length];
+    if(nodeData[i])nodeData[i].probe=demoProbe(nodeData[i].fingerprint,cls);
+    counts[cls]=(counts[cls]||0)+1;
+    probeAllDone++;
+    probeAllSetProgress(probeAllDone,probeAllTotal);
+    renderNodeTable();
+  },1000);
+}
+async function pollProbeAll(){
+  if(!probeAllJob)return;
+  try{
+    const r=await fetch('/api/nodes/probe_all?id='+encodeURIComponent(probeAllJob));
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(d.error||'状态查询失败');
+    probeAllDone=d.done||0;probeAllTotal=d.total||probeAllTotal;
+    probeAllSetProgress(probeAllDone,probeAllTotal);
+    if(!d.running)finishProbeAll(d);
+  }catch(e){finishProbeAll(null,e.message)}
+}
+async function cancelProbeAll(){
+  if(!probeAllTimer)return;
+  if(probeAllDemo){
+    const canceled=Math.max(0,probeAllTotal-probeAllDone);
+    finishProbeAll({done:probeAllDone,total:probeAllTotal,summary:{canceled:canceled}});
+    return;
+  }
+  if(!probeAllJob)return;
+  const btn=q('#probeAllBtn');if(btn)btn.disabled=true;
+  try{
+    const r=await fetch('/api/nodes/probe_all/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id:probeAllJob})});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok&&r.status!==404)throw new Error(d.error||'取消失败');
+  }catch(e){if(btn)btn.disabled=false;showToast('取消失败: '+e.message,'error')}
+}
+function probeAllSummaryText(s){
+  const labels=[['ok','可用'],['quota','配额'],['denied','拒绝'],['unreachable','不可达'],['error','错误'],['canceled','取消']];
+  const parts=labels.filter(([k])=>(s&&s[k])>0).map(([k,v])=>v+' '+s[k]);
+  return parts.length?parts.join(' / '):'完成';
+}
+function finishProbeAll(view,err){
+  if(probeAllTimer){clearInterval(probeAllTimer);probeAllTimer=null}
+  const btn=q('#probeAllBtn');if(btn){btn.disabled=false;btn.textContent='全量测试'}
+  const bar=q('#probeAllProgress');
+  if(err){q('#nodeStatus').textContent='失败: '+err;if(bar)bar.style.display='none';showToast('全量测试失败: '+err,'error')}
+  else{
+    const done=view?view.done:probeAllDone;const total=view?view.total:probeAllTotal;
+    probeAllSetProgress(done,total);
+    if(bar&&bar.querySelector('i'))bar.querySelector('i').style.width=(total>0?Math.min(100,Math.round(done/total*100)):0)+'%';
+    showToast('全量测试完成：'+probeAllSummaryText(view&&view.summary),'success');
+    if(!probeAllDemo)loadNodes();
+    if(probeAllHideTimer)clearTimeout(probeAllHideTimer);
+    probeAllHideTimer=setTimeout(()=>{if(bar)bar.style.display='none';probeAllHideTimer=null},2000);
+  }
+  probeAllJob=null;probeAllDone=0;
+}
 async function resetAllMarks(){if(!confirm('解除所有节点的耗尽/故障标记？'))return;nodeAction('reset_all','')}
 
 /* ============================================================
