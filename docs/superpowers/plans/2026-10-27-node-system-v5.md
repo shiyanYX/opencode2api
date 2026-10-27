@@ -131,7 +131,7 @@ quarantine 期间该 sub 的 egress 不进入候选；全部 sub 隔离 ⇒ no_c
 |---|---|
 | `shape_drift.go` 全局闩 | **删除**；由 pair 冷却 + no_candidate 取代 |
 | `modelQuota` map（未接选路） | 合并进 pair |
-| `quota_halt.go`（direct 429） | 并入 `pair=(model,direct)` + `egress.directUntil` |
+| `quota_halt.go`（direct 429） | 并入 `pair=(model,direct)` + 顶层 `direct.until` |
 | `proxyPool.poolHalted`（403 全局 halt） | 改为「sub 全隔离 ⇒ no_candidate」；保留 403 归因 |
 | `node_scoring.go` v2 分数 | **保留为展示口径**；选路改用 pair 后验 |
 | v5.1 的 canary / 租约 / 500ms 排队 / `NODE_SYSTEM=legacy` | **删除** |
