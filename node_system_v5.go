@@ -284,12 +284,19 @@ func classifyV5(status int, errBody []byte, err error, attemptVer, pinnedVer str
 // off 直接返回；shadow 只写内存计数和 call_log，不取信号量、不阻塞。
 func v5ObserveUpstream(ctx context.Context, modelID string, eg EgressResult, status int, errBody []byte, err error, attemptVer string) {
 	mode := v5Enabled()
+	at := eg.V5()
 	if mode == v5Off {
+		releaseAttempt(at)
 		return
 	}
 	rt := v5GetRuntime()
 	if rt == nil {
+		releaseAttempt(at)
 		return
+	}
+	if mode != v5Force {
+		// 切到 shadow 也可能持有 force 租约；shadow 不 Observe，必须归还。
+		releaseAttempt(at)
 	}
 
 	class := classifyV5(status, errBody, err, attemptVer, pinnedOCVersion)

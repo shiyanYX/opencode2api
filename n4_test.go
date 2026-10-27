@@ -810,3 +810,48 @@ func TestF6OffStillConfirms(t *testing.T) {
 		t.Fatalf("off confirmation event missing: %v", evs)
 	}
 }
+
+func TestFinalRollbackInFlightLease(t *testing.T) {
+	t.Setenv("NODE_SYSTEM", "force")
+	resetV5ForTest()
+	t.Cleanup(resetV5ForTest)
+	v5CandidatesHook = func(model string) []Candidate {
+		return []Candidate{{Egress: "node:e1", Sub: "s1", Model: model}}
+	}
+	rt := v5GetRuntime()
+	if rt == nil {
+		t.Fatal("runtime nil")
+	}
+	for i := 0; i < 8; i++ {
+		at, reason := rt.adm.AdmitPreferred("m", nil, "")
+		if at == nil {
+			t.Fatalf("round %d admit: %s", i, reason)
+		}
+		if len(rt.adm.sems["node:e1"]) != 1 {
+			t.Fatalf("round %d sem len=%d, want 1", i, len(rt.adm.sems["node:e1"]))
+		}
+		t.Setenv("NODE_SYSTEM", "off")
+		v5ObserveUpstream(context.Background(), "m", EgressResult{v5: at}, 200, nil, nil, "")
+		if got := len(rt.adm.sems["node:e1"]); got != 0 {
+			t.Fatalf("round %d lease leaked: sem len=%d", i, got)
+		}
+		t.Setenv("NODE_SYSTEM", "force")
+	}
+	at, reason := rt.adm.AdmitPreferred("m", nil, "")
+	if at == nil {
+		t.Fatalf("force after rollback admit: %s", reason)
+	}
+	releaseAttempt(at)
+
+	// force->shadow 也必须归还，而不是只覆盖 off。
+	at, reason = rt.adm.AdmitPreferred("m", nil, "")
+	if at == nil {
+		t.Fatalf("force before shadow admit: %s", reason)
+	}
+	t.Setenv("NODE_SYSTEM", "shadow")
+	v5ObserveUpstream(context.Background(), "m", EgressResult{v5: at}, 200, nil, nil, "")
+	if got := len(rt.adm.sems["node:e1"]); got != 0 {
+		t.Fatalf("force->shadow lease leaked: sem len=%d", got)
+	}
+	t.Setenv("NODE_SYSTEM", "force")
+}

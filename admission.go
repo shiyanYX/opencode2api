@@ -43,6 +43,19 @@ type Attempt struct {
 	explore   bool
 }
 
+// releaseAttempt 只归还租约、不记录状态；用于 force 租约在 off/shadow/
+// runtime 缺失等「不 Observe」路径上兜底，避免信号量永久占用。
+func releaseAttempt(at *Attempt) {
+	if at == nil {
+		return
+	}
+	at.once.Do(func() {
+		if at.release != nil {
+			at.release()
+		}
+	})
+}
+
 type Admission struct {
 	st         *NodeStateV5
 	K          int
@@ -327,11 +340,6 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.maybePruneLocked(now)
-	if at.explore {
-		if n := a.exploreInflight[at.Egress]; n > 0 {
-			a.exploreInflight[at.Egress] = n - 1
-		}
-	}
 	if at.probe {
 		key := at.probeKey
 		if key == "" {
@@ -471,10 +479,21 @@ func (a *Admission) RetryAfter(model string) time.Duration {
 
 func (a *Admission) attemptLocked(c Candidate, model string, probe, lifecycle, explore bool, sem chan struct{}) *Attempt {
 	return &Attempt{
-		Model:     model,
-		Egress:    c.Egress,
-		Direct:    c.Direct || c.Egress == "direct",
-		release:   func() { <-sem },
+		Model:  model,
+		Egress: c.Egress,
+		Direct: c.Direct || c.Egress == "direct",
+		release: func() {
+			<-sem
+			// 探索名额也属于租约的一部分；releaseAttempt 不经过 Observe 时
+			// 同样要归还，否则该 egress 会永久被 exploreInflight 挡住。
+			if explore {
+				a.mu.Lock()
+				if n := a.exploreInflight[c.Egress]; n > 0 {
+					a.exploreInflight[c.Egress] = n - 1
+				}
+				a.mu.Unlock()
+			}
+		},
 		sub:       c.Sub,
 		probe:     probe,
 		lifecycle: lifecycle,
