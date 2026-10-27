@@ -50,7 +50,21 @@ Observe(attempt, outcome, now)   // 每次发送恰好一次，defer 保证
 
 - `Admit` 是唯一选路入口；`egress.go` 不再自行回退直连（全冷却返回 `NoCandidate`）。
 - `Observe` 是唯一结果入口；两条 main 循环、direct、probe 都调用它。
-- **无租约、无 TTL、无跨出口持有**。`inflight` 是每 egress 一个**带缓冲 channel 信号量**（cap=K），`Admit` 非阻塞 `select` 取名额，`Observe` 用 `sync.Once` 释放一次。这是原子预留，不存在 check-then-act 竞态（R8-delta D2）。
+- **无租约、无 TTL、无跨出口持有**。`inflight` 是每 egress 一个**带缓冲 channel 信号量**（cap=K），`Admit` 非阻塞 `select` 取名额，`Observe` 释放。这是原子预留，不存在 check-then-act 竞态（R8-delta D2）。
+
+```text
+Admit:
+  select sem <- struct{}{} ; default -> Reject(all_inflight)
+  defer func(){ if rejected { <-sem } }()      // 取到名额后任何校验失败都立即归还
+  校验 pair.until / lifecycle / sub / exclude
+  返回 Attempt{model, egress, release: sync.Once{ <-sem }}
+Observe(attempt, outcome, now):
+  defer attempt.release()                       // exactly-once，第二次 Observe 直接返回
+  请求路径统一 defer Observe(Attempt{}, abandoned) // panic/提前 return 也不泄漏
+probe:
+  probeMu 只保护 nextProbeAt / probing 两个字段，网络调用在锁外
+  Observe(probe) 结束时 probing=false，并推进 nextProbeAt
+```
 - `Admit` 返回的 egress 必须满足：`pair.until<=now && egress.lifecycle!=dead && !sub.quarantined && !exclude[egress] && inflight 名额已取到`。
 - 抑制（Reject）不产生 attempt，不更新后验（I8），且必须归还已取名额。
 
@@ -65,14 +79,15 @@ Observe(attempt, outcome, now)   // 每次发送恰好一次，defer 保证
   -> trips24h 追加一条
 任意 2xx
   -> strikes = 0；until = 0；consec429 = 0
-trips24h >= 6 且 strikes == 4
-  -> until = now + 24h（hard block）
+strikes 将要超过 4（即连续第 5 次 429，期间无任何 2xx）
+  -> until = now + 24h（hard block），strikes 保持 4
 ```
 
 - **不再用 60s 窗口、不再用比例、不再用 nAtt。** 理由：真实数据里 653e×mimo 在 60s 窗口内是 28×429 / 28×2xx（正好 50%），任何比例阈值都会在「熔断」和「放行」之间摇摆；而「首个 429 冷却 60s」在回放中把该 pair 的上游 429 从 1,106 降到 **5**，且完全不误伤同出口的 deepseek。
 - 单次冷却很短（60s），对 124 个候选的池子代价可忽略；重复失败自动升档，最长 5m。
 - `strikes` 上限 4，`ladder` 长度 4，越界不写（R8-delta D6）。
-- **hard block 需要同时满足 `trips24h>=6` 与 `strikes==4`**：`strikes==4` 意味着连续 4 轮冷却到期后第一个请求仍是 429、期间没有任何 2xx，是真死；只要中途有 2xx，`strikes` 归零，永远不会被 24h 封——避免「90% 成功率但一天偶发 6 次 429」的健康 pair 被误封。
+- **hard block 只看连续失败，不看 24h 累计**：`strikes` 只有在 2xx 时才归零，所以「第 5 次连续 429」意味着 4 轮冷却（60s+2m+5m+5m≈13min）到期后的第一个请求仍然 429、期间没有任何 2xx——这是真死。一天里偶发 6 次孤立 429（每次都有 2xx 隔开）永远不会触发 hard block（R8-delta-2 B1）。
+- `trips24h` 只用于面板与告警，**不参与任何裁决**；按 24h 滚动清理（cap 16 仅作内存上限）。
 - `until` 只影响该 pair；同一 egress 的其他 model 不受影响（653e×deepseek 0 个 429）。
 - **direct**：`pair=(model,direct)`，但 429 时额外设置 `egress.directUntil = now + 60s`，所有 model 的 direct pair 一并排除——直连是本机 IP，不按 model 分账。
 
@@ -106,7 +121,7 @@ quarantine 期间该 sub 的 egress 不进入候选；全部 sub 隔离 ⇒ no_c
 
 | Reject.reason | HTTP | 头 | body |
 |---|---|---|---|
-| `no_candidate` | 503 | `Retry-After: 5` | `{"error":{"type":"no_candidate"}}` |
+| `no_candidate` | 503 | `Retry-After: max(1, min_until-now)` | `{"error":{"type":"no_candidate"}}` |
 | `all_inflight` | 503 | `Retry-After: 1` | `{"error":{"type":"all_inflight"}}` |
 | `sub_quarantine` | 503 | `Retry-After: 30` | `{"error":{"type":"sub_quarantine"}}` |
 
@@ -202,6 +217,7 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 
 ```json
 {"version":5,
+ "epoch":"2026-10-27T12:00:00+08:00",
  "pairs":{"model|egress":{"a":8,"b":2,"lastOK":0,"lastFail":0,"lastDecay":0,
                           "strikes":0,"until":0,"trips24h":[]}},
  "egress":{"fp":{"lifecycle":"active","consecFail":0,"deadUntil":0,"lastProbe":0,
@@ -209,7 +225,8 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
  "subs":{"sub":{"until":0,"reason":"403","n403":0,"last403":0,"pairs":[]}}}
 ```
 
-- 时间一律 int64 毫秒；`trips24h` cap 16（超出丢最旧）；`inflight` **不持久化**。
+- 时间一律 int64 毫秒；`trips24h` 按 24h 滚动清理、cap 16（仅内存上限，不参与裁决）；`inflight` **不持久化**。
+- `direct` 的 pair key 写作 `model|direct`；egress 段不存 `direct`（无生命周期），只存 `directUntil` 字段于顶层 `direct` 键。
 - 上限：pair 最多 50k（活跃子集），空闲 30min 清理，**不淘汰 blocked**。
 - 迁移：旧 `NodeExhausted` 且 quota ⇒ `strikes=1, until=now+5m`；保留 dead/rejected；旧 `shape_drift` 状态丢弃。
 - **重启语义**：`strikes/until/trips24h` 保留；`inflight` 清零，最坏多放行 K 个请求（接受）。
