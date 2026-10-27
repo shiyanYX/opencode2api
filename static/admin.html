@@ -1843,7 +1843,13 @@ function finishProbeAll(view,err){
     probeAllSetProgress(done,total);
     if(bar&&bar.querySelector('i'))bar.querySelector('i').style.width=(total>0?Math.min(100,Math.round(done/total*100)):0)+'%';
     showToast('全量测试完成：'+probeAllSummaryText(view&&view.summary),'success');
-    if(!probeAllDemo)loadNodes();
+    const canceled=view&&view.summary?Number(view.summary.canceled||0):0;
+    if(view&&Array.isArray(view.results)&&view.results.length){
+      const byFp=new Map(view.results.map(r=>[r.fingerprint,r]));
+      nodeData.forEach(n=>{const r=byFp.get(n.fingerprint);if(r)n.probe=r});
+      renderNodeTable();
+    }
+    if(!probeAllDemo&&canceled<=0)loadNodes();
     if(probeAllHideTimer)clearTimeout(probeAllHideTimer);
     probeAllHideTimer=setTimeout(()=>{if(bar)bar.style.display='none';probeAllHideTimer=null},2000);
   }
