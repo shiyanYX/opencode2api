@@ -196,7 +196,7 @@ pair.a, pair.b  先验 a0=8, b0=2（新 pair = 80 分）
 429/FUL    -> b += 1, lastFail=now
 403        -> 不计入 pair（订阅级），只记 sub
 网络/超时  -> 不计入 pair（生命周期处理）
-半衰期 7d：a,b 按 exp(-Δt/7d) 衰减，记录 lastDecay
+半衰期 7d：证据量按 0.5^(Δt/7d) 衰减（与 `scoringHalfLifeDays` 同口径），即 a=a0+(a-a0)f、b=b0+(b-b0)f，记录 lastDecay；p 不变、n 衰减
 ```
 
 ### 3.2 选择
