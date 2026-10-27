@@ -386,3 +386,12 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 - `TestNoCandidateNoDirect`：全冷却时 `Get` 不返回直连，main 返回 429 + Retry-After。
 - `TestMaxTwoAttempts`：force 下单个请求最多 2 次上游 attempt。
 - `TestV5StatePersist`：保存后重启（重载）`until/strikes/gate` 一致。
+
+## 14. v5.8 闸门修正（Lead 复核）
+
+1. 触发条件加失败率：5 分钟窗口内 **≥3 个不同 egress 429 且失败率 ≥50%（样本 ≥10 attempt）**。依据：`docs/research/scoring2/29-n4-lead-review.md` —— 只用 distinct 会在 2% 失败率的正常窗口误停全池。
+2. 闸的时间兜底：激活满 **10 分钟**后，每 **5 分钟**允许一次节点探测，不要求 direct canary 成功；探测 2xx 解闸。避免 direct 持续 429 时闸永久不解除。
+3. 探测失败定义：节点探测的**任何非 2xx**（含 403/5xx/超时/取消）都重置 `CanaryOK/NodeProbeUsed` 并排下一次 canary；不允许状态机停在两个入口都关闭的位置。
+4. `v5Winter` 与 `v5_no_candidate` 日志按 reason 每分钟最多一条。
+
+断言：`TestGateNeedsFailureRatio`、`TestGateEscapeAfter10m`、`TestGateProbeFailureDoesNotFreeze`、`TestWinterLogThrottled`。
