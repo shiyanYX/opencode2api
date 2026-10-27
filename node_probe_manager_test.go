@@ -223,16 +223,28 @@ func TestProbeCancelKeepsFinished(t *testing.T) {
 		t.Fatalf("results=%d done=%d", len(v.Results), v.Done)
 	}
 	canceled := 0
+	nonCanceled := 0
 	for _, r := range v.Results {
 		if r.Class == "canceled" {
 			if r.Error != "canceled" {
 				t.Fatalf("canceled error=%q", r.Error)
 			}
 			canceled++
+		} else {
+			nonCanceled++
 		}
 	}
-	if v.Summary["canceled"] != canceled {
-		t.Fatalf("summary=%v, want canceled=%d", v.Summary, canceled)
+	wantCanceled := v.Total - nonCanceled
+	if v.Summary["canceled"] != wantCanceled {
+		t.Fatalf("summary=%v, want canceled=%d", v.Summary, wantCanceled)
+	}
+	snap := m.Snapshot()
+	for _, r := range v.Results {
+		if r.Class == "canceled" {
+			if _, ok := snap[r.Fingerprint]; ok {
+				t.Fatalf("canceled result polluted snapshot: %s", r.Fingerprint)
+			}
+		}
 	}
 	for class, n := range v.Summary {
 		if n == 0 {
@@ -450,5 +462,61 @@ func TestProbeStartAllPopulatesSnapshot(t *testing.T) {
 	}
 	if got := snap["fp-denied"].Class; got != probeClassDenied {
 		t.Fatalf("fp-denied class=%q", got)
+	}
+}
+
+func TestProbeCancelSummaryAndSnapshotSemantics(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	probeClientFor = func(string) *http.Client {
+		return &http.Client{Transport: f6RoundTripper(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/models") {
+				return probeMgrResponse(204, ""), nil
+			}
+			once.Do(func() { close(entered) })
+			<-release
+			return nil, errors.New("cancelled by test")
+		})}
+	}
+	defer func() { probeClientFor = defaultProbeClient }()
+
+	m := newProbeManager()
+	m.results["fp0"] = probeResult{Fingerprint: "fp0", Class: probeClassOK}
+	nodes := make([]ProxyNode, 9)
+	for i := range nodes {
+		nodes[i].Fingerprint = fmt.Sprintf("fp%d", i)
+	}
+	id, total, err := m.StartAll(context.Background(), nodes, "m", "https://x/models")
+	if err != nil || total != 9 {
+		t.Fatalf("start err=%v total=%d", err, total)
+	}
+	<-entered
+	if !m.Cancel(id) {
+		t.Fatal("cancel returned false")
+	}
+	close(release)
+	v := waitProbeJob(t, m, id)
+
+	nonCanceled := 0
+	for _, r := range v.Results {
+		if r.Class != "canceled" {
+			nonCanceled++
+		}
+	}
+	wantCanceled := v.Total - nonCanceled
+	if v.Summary["canceled"] != wantCanceled {
+		t.Fatalf("summary=%v, want canceled=%d (total=%d noncanceled=%d)", v.Summary, wantCanceled, v.Total, nonCanceled)
+	}
+	snap := m.Snapshot()
+	if got := snap["fp0"].Class; got != probeClassOK {
+		t.Fatalf("canceled result overwrote prior snapshot: fp0=%q", got)
+	}
+	for _, r := range v.Results {
+		if r.Class == "canceled" {
+			if _, ok := snap[r.Fingerprint]; ok && r.Fingerprint != "fp0" {
+				t.Fatalf("canceled result polluted snapshot: %s", r.Fingerprint)
+			}
+		}
 	}
 }

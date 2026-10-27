@@ -217,6 +217,7 @@ input,select,textarea{font-family:inherit;color:inherit}
 .tag.avail-quota{background:var(--orange-dim);color:var(--orange)}
 .tag.avail-denied{background:var(--purple-dim);color:var(--purple)}
 .tag.avail-unreachable{background:var(--surface-2);color:var(--text-ter)}
+.tag.avail-canceled{background:var(--surface-2);color:var(--text-ter)}
 .tag.avail-error{background:var(--red-dim);color:var(--red)}
 .avail-meta{display:inline-block;margin-left:5px;font-size:10.5px;color:var(--text-ter);font-family:var(--mono);white-space:nowrap}
 .node-name{font-weight:600}
@@ -1698,7 +1699,7 @@ function fmtAgo(iso){
   if(sec<3600)return Math.floor(sec/60)+' 分钟前';
   return Math.floor(sec/3600)+' 小时前';
 }
-const probeTagMap={ok:['avail-ok','可用'],quota:['avail-quota','配额'],denied:['avail-denied','拒绝'],unreachable:['avail-unreachable','不可达'],error:['avail-error','错误']};
+const probeTagMap={ok:['avail-ok','可用'],quota:['avail-quota','配额'],denied:['avail-denied','拒绝'],unreachable:['avail-unreachable','不可达'],canceled:['avail-canceled','取消'],error:['avail-error','错误']};
 function probeTagHtml(n){
   const p=n.probe;
   if(!p||!p.class)return '<span class="muted">未测试</span>';

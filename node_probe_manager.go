@@ -169,7 +169,9 @@ func (m *probeManager) run(ctx context.Context, job *probeJob, nodes []ProxyNode
 				res.Error = "canceled"
 			}
 			job.results = append(job.results, res)
-			m.results[res.Fingerprint] = res
+			if res.Class != "canceled" {
+				m.results[res.Fingerprint] = res
+			}
 			job.done++
 			job.summary[res.Class]++
 			m.mu.Unlock()
@@ -179,6 +181,18 @@ func (m *probeManager) run(ctx context.Context, job *probeJob, nodes []ProxyNode
 	job.cancel()
 
 	m.mu.Lock()
+	if job.canceled {
+		nonCanceled := 0
+		for _, res := range job.results {
+			if res.Class != "canceled" {
+				nonCanceled++
+			}
+		}
+		delete(job.summary, "canceled")
+		if n := job.total - nonCanceled; n > 0 {
+			job.summary["canceled"] = n
+		}
+	}
 	job.running = false
 	job.finishedAt = probeClock()
 	m.lastAllEnd = job.finishedAt
