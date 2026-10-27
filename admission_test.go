@@ -69,7 +69,8 @@ func TestPairCoolOnFirst429(t *testing.T) {
 }
 
 func TestInflightAtomic(t *testing.T) {
-	a, _, _ := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
+	a, clock, st := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
+	st.Pairs[PairKey("m", "node:e1")] = &PairState{A: 100, B: 50, LastOK: clock.Now().UnixMilli(), LastFail: clock.Now().UnixMilli(), LastDecay: clock.Now().UnixMilli()}
 
 	const n = 32
 	start := make(chan struct{})

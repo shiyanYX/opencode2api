@@ -36,6 +36,7 @@ type Attempt struct {
 	sub       string
 	probe     bool
 	lifecycle bool
+	explore   bool
 }
 
 type Admission struct {
@@ -44,13 +45,15 @@ type Admission struct {
 	candidates func(string) []Candidate
 	clock      Clock
 
-	mu           sync.Mutex
-	sems         map[string]chan struct{}
-	probeActive  map[string]bool
-	probing      bool
-	probeBackoff time.Duration
-	probeTimeout time.Duration
-	lastPrune    int64
+	mu              sync.Mutex
+	sems            map[string]chan struct{}
+	probeActive     map[string]bool
+	probing         bool
+	probeBackoff    time.Duration
+	probeTimeout    time.Duration
+	lastPrune       int64
+	rr              int
+	exploreInflight map[string]int
 }
 
 var pairCooldownLadder = [...]time.Duration{
@@ -89,13 +92,14 @@ func NewAdmission(st *NodeStateV5, k int, candidates func(string) []Candidate) *
 		st.Subs = map[string]*SubState{}
 	}
 	return &Admission{
-		st:           st,
-		K:            k,
-		candidates:   candidates,
-		sems:         map[string]chan struct{}{},
-		probeActive:  map[string]bool{},
-		probeBackoff: probeBackoffLadder[0],
-		probeTimeout: 20 * time.Second,
+		st:              st,
+		K:               k,
+		candidates:      candidates,
+		sems:            map[string]chan struct{}{},
+		probeActive:     map[string]bool{},
+		probeBackoff:    probeBackoffLadder[0],
+		probeTimeout:    20 * time.Second,
+		exploreInflight: map[string]int{},
 	}
 }
 
@@ -107,6 +111,10 @@ func (a *Admission) now() time.Time {
 }
 
 func (a *Admission) Admit(model string, exclude map[string]bool) (*Attempt, string) {
+	return a.AdmitPreferred(model, exclude, "")
+}
+
+func (a *Admission) AdmitPreferred(model string, exclude map[string]bool, prefer string) (*Attempt, string) {
 	now := a.now()
 	nowMS := now.UnixMilli()
 	a.mu.Lock()
@@ -139,6 +147,9 @@ func (a *Admission) Admit(model string, exclude map[string]bool) (*Attempt, stri
 			}
 			continue
 		}
+		if p := a.pairLocked(model, c.Egress); p != nil {
+			a.decayPairLocked(p, nowMS)
+		}
 		eligible = append(eligible, c)
 	}
 	if len(eligible) == 0 {
@@ -148,16 +159,60 @@ func (a *Admission) Admit(model string, exclude map[string]bool) (*Attempt, stri
 		return nil, "no_candidate"
 	}
 
+	if prefer != "" {
+		for _, c := range eligible {
+			if c.Egress != prefer {
+				continue
+			}
+			n := a.pairNLocked(model, c.Egress)
+			if n < pairExploreCutoff && a.exploreInflight[c.Egress] > 0 {
+				break
+			}
+			at, ok := a.acquireLocked(c, model, n < pairExploreCutoff)
+			if !ok {
+				return nil, "all_inflight"
+			}
+			return at, ""
+		}
+	}
+
 	a.sortCandidatesLocked(eligible, model)
+
 	for _, c := range eligible {
-		sem := a.semLocked(c.Egress)
-		select {
-		case sem <- struct{}{}:
-			return a.attemptLocked(c, model, false, false, sem), ""
-		default:
+		if a.pairNLocked(model, c.Egress) >= pairExploreCutoff {
+			continue
+		}
+		if a.exploreInflight[c.Egress] > 0 {
+			continue
+		}
+		at, ok := a.acquireLocked(c, model, true)
+		if ok {
+			return at, ""
+		}
+	}
+	for _, c := range eligible {
+		if a.pairNLocked(model, c.Egress) < pairExploreCutoff {
+			continue
+		}
+		at, ok := a.acquireLocked(c, model, false)
+		if ok {
+			return at, ""
 		}
 	}
 	return nil, "all_inflight"
+}
+
+func (a *Admission) acquireLocked(c Candidate, model string, explore bool) (*Attempt, bool) {
+	sem := a.semLocked(c.Egress)
+	select {
+	case sem <- struct{}{}:
+		if explore {
+			a.exploreInflight[c.Egress]++
+		}
+		return a.attemptLocked(c, model, false, false, explore, sem), true
+	default:
+		return nil, false
+	}
 }
 
 func (a *Admission) AdmitProbe(model string) (*Attempt, string) {
@@ -197,7 +252,7 @@ func (a *Admission) AdmitProbe(model string) (*Attempt, string) {
 		case sem <- struct{}{}:
 			a.probeActive[c.Egress] = true
 			a.probing = true
-			at := a.attemptLocked(c, model, true, false, sem)
+			at := a.attemptLocked(c, model, true, false, false, sem)
 			a.startProbeTimerLocked(at)
 			return at, ""
 		default:
@@ -265,6 +320,11 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.maybePruneLocked(now)
+	if at.explore {
+		if n := a.exploreInflight[at.Egress]; n > 0 {
+			a.exploreInflight[at.Egress] = n - 1
+		}
+	}
 	if at.probe {
 		delete(a.probeActive, at.Egress)
 		a.probing = false
@@ -278,6 +338,7 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 	switch class {
 	case Outcome2xx:
 		p := a.writePairLocked(at.Model, at.Egress)
+		a.decayPairLocked(p, nowMS)
 		p.A++
 		p.Strikes = 0
 		p.Hard = 0
@@ -291,6 +352,7 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 	case Outcome429:
 		a.egressConnectedLocked(at.Egress)
 		p := a.writePairLocked(at.Model, at.Egress)
+		a.decayPairLocked(p, nowMS)
 		p.B++
 		p.LastFail = nowMS
 		if at.probe {
@@ -375,7 +437,7 @@ func (a *Admission) RetryAfter(model string) time.Duration {
 	return d
 }
 
-func (a *Admission) attemptLocked(c Candidate, model string, probe, lifecycle bool, sem chan struct{}) *Attempt {
+func (a *Admission) attemptLocked(c Candidate, model string, probe, lifecycle, explore bool, sem chan struct{}) *Attempt {
 	return &Attempt{
 		Model:     model,
 		Egress:    c.Egress,
@@ -384,6 +446,7 @@ func (a *Admission) attemptLocked(c Candidate, model string, probe, lifecycle bo
 		sub:       c.Sub,
 		probe:     probe,
 		lifecycle: lifecycle,
+		explore:   explore,
 	}
 }
 
@@ -445,38 +508,6 @@ func (a *Admission) writePairLocked(model, egress string) *PairState {
 		delete(a.st.Pairs, PairKey("*", egress))
 	}
 	return p
-}
-
-func (a *Admission) sortCandidatesLocked(cands []Candidate, model string) {
-	sort.SliceStable(cands, func(i, j int) bool {
-		pi := a.pairScoreLocked(model, cands[i].Egress)
-		pj := a.pairScoreLocked(model, cands[j].Egress)
-		if pi != pj {
-			return pi > pj
-		}
-		li := a.pairLastOKLocked(model, cands[i].Egress)
-		lj := a.pairLastOKLocked(model, cands[j].Egress)
-		if li != lj {
-			return li > lj
-		}
-		return cands[i].Egress < cands[j].Egress
-	})
-}
-
-func (a *Admission) pairScoreLocked(model, egress string) float64 {
-	p := a.pairLocked(model, egress)
-	if p == nil {
-		return 0.5
-	}
-	return (p.A + 0.5) / (p.A + p.B + 1)
-}
-
-func (a *Admission) pairLastOKLocked(model, egress string) int64 {
-	p := a.pairLocked(model, egress)
-	if p == nil {
-		return 0
-	}
-	return p.LastOK
 }
 
 func (a *Admission) semLocked(egress string) chan struct{} {
