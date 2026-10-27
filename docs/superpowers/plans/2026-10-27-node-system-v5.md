@@ -1,6 +1,6 @@
 # 节点系统 v5.4：一次全局重构（资格 · 选择 · 可观测）
 
-> **状态：DRAFT v5.4，待 R8-delta-3 复核。** 相对 v5.2 的核心修正：熔断从「60s 窗口 + 比例」改成 **「首个 429 即冷却」**，单位回到 **pair**。依据是真实日志回放：653e×mimo 的 429 从 **1,106 → 5**，41d×mimo **402 → 4**，4ad×mimo **20 → 1**，而 653e×deepseek 的 **0 个 429 完全不受影响**。
+> **状态：DRAFT v5.4，R8-delta-3 仅剩 B3，已补探测路径待终审。** 相对 v5.2 的核心修正：熔断从「60s 窗口 + 比例」改成 **「首个 429 即冷却」**，单位回到 **pair**。依据是真实日志回放：653e×mimo 的 429 从 **1,106 → 5**，41d×mimo **402 → 4**，4ad×mimo **20 → 1**，而 653e×deepseek 的 **0 个 429 完全不受影响**。
 > 前情：T1/T2/T3 已写进 `test`（代码提交 `da85f2b`），生产仍是 10-26 15:16 旧镜像。v3.x 被 R3/R4/R5 判过度设计；v4.1 被 R6 认可；v5/v5.1 被 R8 判 NO-GO；v5.2 被 R8-delta 判 6 个 blocker。
 
 ## 1. 现状为什么必须重构
@@ -80,13 +80,18 @@ probe:
 任意 2xx
   -> strikes = 0；until = 0
 strikes 将要超过 4（即连续第 5 次 429，期间无任何 2xx）
-  -> until = now + 24h（hard block），strikes 保持 4
+  -> hard = min(hard+1, 5)
+  -> until = now + min(1h * 2^(hard-1), 24h)   // 1h/2h/4h/8h/24h
+  -> strikes 保持 4
+probe 429
+  -> 不升 strikes/hard，只设 until = now + probe_backoff   // 探测失败不参与熔断升级
 ```
 
 - **不再用 60s 窗口、不再用比例、不再用 nAtt。** 理由：真实数据里 653e×mimo 在 60s 窗口内是 28×429 / 28×2xx（正好 50%），任何比例阈值都会在「熔断」和「放行」之间摇摆；而「首个 429 冷却 60s」在回放中把该 pair 的上游 429 从 1,106 降到 **5**，且完全不误伤同出口的 deepseek。
 - 单次冷却很短（60s），对 124 个候选的池子代价可忽略；重复失败自动升档，最长 5m。
 - `strikes` 上限 4，`ladder` 长度 4，越界不写（R8-delta D6）。
 - **hard block 只看连续失败，不看 24h 累计**：`strikes` 只有在 2xx 时才归零，所以「第 5 次连续 429」意味着 4 轮冷却（60s+2m+5m+5m≈13min）到期后的第一个请求仍然 429、期间没有任何 2xx——这是真死。一天里偶发 6 次孤立 429（每次都有 2xx 隔开）永远不会触发 hard block（R8-delta-2 B1）。
+- **hard block 从 1h 起翻倍、封顶 24h，且 probe 失败不升级**：模型级配额风暴会让所有 pair 同时连续 429；若首次就封 24h，风暴过去后仍会瘫痪一天。1h 起步 + probe 探测（不升 strikes/hard）保证最坏 1h 内自动复测，任意 2xx 清零 `strikes/hard`。
 - `trips24h` 只用于面板与告警，**不参与任何裁决**；按 24h 滚动清理（cap 16 仅作内存上限）。
 - `until` 只影响该 pair；同一 egress 的其他 model 不受影响（653e×deepseek 0 个 429）。
 - **direct**：`pair=(model,direct)`，但 429 时额外设置 `direct.until = now + 60s`（顶层键），所有 model 的 direct pair 一并排除——直连是本机 IP，不按 model 分账。
@@ -101,6 +106,27 @@ probe 2xx -> 同「2xx 即恢复」；probe 429 -> strikes+1 并升档
 
 - 删除 canary：真实流量的 2xx 就是最强的恢复证据；190 个被旧版标 5h 的出口迁移为 `strikes=1, until=now+5m`，到期后正常流量或 probe 的 2xx 即清零（R8-delta D3）。
 - probe 单飞：`probeMu` + `nextProbeAt`，全局同时最多 1 个 probe；`Observe(probe)` 与普通 `Observe` 共用同一条恢复路径。
+
+**无候选 / 全冷却时的探测（B3）**
+
+```text
+min_until(model) = min{ pair.until | pair.until > now }   // 只统计该 model 下仍在冷却的 pair
+  若不存在（全 sub 隔离 / 全 egress dead / 全在途）-> Retry-After = 1
+
+AdmitProbe(model, egress):
+  与 Admit 共用同一信号量，但**跳过 pair.until 检查**（探测的目的就是验证冷却是否该结束）
+  仍然要求：egress.lifecycle != dead、sub 未隔离、inflight 有名额
+  probe 结果走 Observe，与正常流量同一条恢复路径（2xx -> strikes=0）
+
+触发：
+  1. 无流量时：now >= nextProbeAt -> 选 until 最早、strikes 最低的 pair
+  2. no_candidate 时：now >= nextProbeAt -> 同上，单飞，不占用户请求名额
+  3. 全部 egress dead：改为 lifecycle probe（probation），不经过 pair
+退避：60s -> 2m -> 5m -> 15m -> 1h -> 6h；任意 2xx 重置为 60s
+```
+
+- `no_candidate` 的 `Retry-After = max(1, min_until(model) - now)`；`min_until` 为空时取 1（B3 定义）。
+- probe 单飞：`probeMu` 只保护 `nextProbeAt/probing`，网络调用在锁外；`probing=true` 期间不再发起第二个 probe。
 
 **Egress 生命周期**
 
@@ -121,7 +147,7 @@ quarantine 期间该 sub 的 egress 不进入候选；全部 sub 隔离 ⇒ no_c
 
 | Reject.reason | HTTP | 头 | body |
 |---|---|---|---|
-| `no_candidate` | 503 | `Retry-After: max(1, min_until-now)` | `{"error":{"type":"no_candidate"}}` |
+| `no_candidate` | 503 | `Retry-After: max(1, min_until(model)-now)`，空则 1 | `{"error":{"type":"no_candidate"}}` |
 | `all_inflight` | 503 | `Retry-After: 1` | `{"error":{"type":"all_inflight"}}` |
 | `sub_quarantine` | 503 | `Retry-After: 30` | `{"error":{"type":"sub_quarantine"}}` |
 
@@ -202,7 +228,7 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 |---|---|---|
 | `pair_cooldown_ladder` | 60s/2m/5m/5m | 首个 429 起的冷却递进，长度 4 |
 | `pair_trips_24h_cap` | 16 | 仅内存上限/展示，不参与裁决；hard block 由「连续第 5 次 429」触发 |
-| `pair_hard_block` | 24h | 超限后的封锁时长 |
+| `pair_hard_block` | 1h | 硬封基础时长，按 2 倍递增，封顶 24h |
 | `egress_inflight_max` | 8 | 每出口在途上限（唯一口径） |
 | `direct_cooldown` | 60s | 直连 429 后整条直连冷却 |
 | `global_probe_interval` | 60s | 无流量时首次探测间隔，退避至 6h |
@@ -219,7 +245,7 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 {"version":5,
  "epoch":"2026-10-27T12:00:00+08:00",
  "pairs":{"model|egress":{"a":8,"b":2,"lastOK":0,"lastFail":0,"lastDecay":0,
-                          "strikes":0,"until":0,"trips24h":[]}},
+                          "strikes":0,"hard":0,"until":0,"trips24h":[]}},
  "egress":{"fp":{"lifecycle":"active","consecFail":0,"deadUntil":0,"lastProbe":0}},
  "direct":{"until":0},
  "subs":{"sub":{"until":0,"reason":"403","n403":0,"last403":0,"pairs":[]}}}
@@ -260,10 +286,13 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 | `TestInflightAtomic`：32 goroutine、N=1 | 恰好 8 个上游、24 个 `all_inflight` 503，无竞态（`-race`） |
 | `TestDirectCooldown`：direct 429 | 所有 model 的 direct pair 同时冷却 60s |
 | `TestPairCoolNoCrossModel`：653e×mimo 429 | 653e×deepseek 仍可选 |
+| `TestAllCooling`：43 个 pair 同时 429 | 503 带有限 `Retry-After`，probe 60s 内发起且能恢复 1 个 pair |
+| `TestHardBlockBounded`：模型级风暴 1h | 首次硬封 1h，不是 24h；probe 2xx 后立即恢复 |
+| `TestProbeBypassesCooldown`：pair 冷却中 | `AdmitProbe` 可选中该 pair，普通 `Admit` 不可 |
 
 ## 9. 测试策略
 
-- 单元：冷却阶梯、strikes 上限、trips24h→24h、2xx 恢复、lifecycle、sub。
+- 单元：冷却阶梯、strikes 上限、hard 1h→24h 递增、probe 失败不升级、2xx 清零、lifecycle、sub。
 - 并发：`-race` 下 32/100 并发；信号量不泄漏；`sync.Once` 只释放一次。
 - 回放：10-26/10-27 全量日志 + fake clock，跑 18:03、00:20、稳态三段；**断言值来自真实时间戳**。
 - 混沌：全出口 429、单出口 1,106 连发、403 风暴、网络抖动、5xx、客户端取消。
@@ -274,7 +303,7 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 
 1. **首个 429 即冷却的误伤**：非配额型 429（如请求体问题）会冷却该 pair 60s；代价可接受，影子期统计「单次 429 后 60s 内该 pair 成功率」验证。
 2. **per-pair 状态量**：512×212 最坏 10 万；活跃子集 + 上限 5 万 + 保护 blocked。
-3. **UCB 探索烧 IP**：被 pair 冷却 + trips24h 兜底；影子期量化。
+3. **UCB 探索烧 IP**：被 pair 冷却 + hard 1h 起步兜底；影子期量化。
 4. **sub 隔离误伤**：403 归因需 ≥2 个不同 pair 或同 pair 2 次。
 5. **重启丢 inflight**：最坏多放行 K 个请求；接受。
 6. **T7 未完成**：AUC/校准/MNAR 未做；N3 先实现，T7 后校准。
