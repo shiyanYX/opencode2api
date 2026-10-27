@@ -135,7 +135,7 @@ func (m *probeManager) run(ctx context.Context, job *probeJob, nodes []ProxyNode
 			res := probeOne(ctx, node, model, healthURL)
 
 			m.mu.Lock()
-			if job.canceled && ctx.Err() != nil {
+			if job.canceled && ctx.Err() != nil && res.Class == probeClassUnreachable {
 				res.Class = "canceled"
 				res.Error = "canceled"
 			}

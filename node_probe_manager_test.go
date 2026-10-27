@@ -181,7 +181,7 @@ func TestProbeCancelKeepsFinished(t *testing.T) {
 			}
 			hits.Add(1)
 			time.Sleep(10 * time.Millisecond)
-			return probeMgrResponse(200, `{}`), nil
+			return nil, errors.New("probe transport canceled")
 		})}
 	}
 	defer func() { probeClientFor = defaultProbeClient }()
@@ -336,6 +336,47 @@ func TestProbeJobCancelStopsRemaining(t *testing.T) {
 	}
 	if hits.Load() >= int64(v.Total) {
 		t.Fatalf("hits=%d, want fewer than %d", hits.Load(), v.Total)
+	}
+}
+
+func TestProbeCancelKeepsSuccessfulInFlightResult(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	probeClientFor = func(string) *http.Client {
+		return &http.Client{Transport: f6RoundTripper(func(r *http.Request) (*http.Response, error) {
+			if strings.Contains(r.URL.Path, "/models") {
+				return probeMgrResponse(204, ""), nil
+			}
+			once.Do(func() { close(entered) })
+			<-release
+			return probeMgrResponse(200, `{}`), nil
+		})}
+	}
+	defer func() { probeClientFor = defaultProbeClient }()
+
+	m := newProbeManager()
+	id, total, err := m.StartAll(context.Background(), []ProxyNode{{Fingerprint: "fp-ok"}}, "m", "https://x/models")
+	if err != nil || total != 1 {
+		t.Fatalf("start err=%v total=%d", err, total)
+	}
+	<-entered
+	if !m.Cancel(id) {
+		t.Fatal("cancel returned false")
+	}
+	close(release)
+	v := waitProbeJob(t, m, id)
+	if v.Done != 1 || len(v.Results) != 1 {
+		t.Fatalf("done=%d results=%d", v.Done, len(v.Results))
+	}
+	if v.Results[0].Class != probeClassOK || v.Results[0].Error != "" {
+		t.Fatalf("successful in-flight result mislabeled: %+v", v.Results[0])
+	}
+	if v.Summary[probeClassOK] != 1 {
+		t.Fatalf("summary=%v", v.Summary)
+	}
+	if _, ok := v.Summary["canceled"]; ok {
+		t.Fatalf("successful result got canceled summary: %v", v.Summary)
 	}
 }
 
