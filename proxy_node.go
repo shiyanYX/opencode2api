@@ -737,6 +737,9 @@ func (p *nodePool) subQuarantinedLocked(name string, now time.Time) bool {
 
 // quarantineSub 记一次「已确认 403」。10 分钟内累计 3 次 ⇒ 10/20/30 分钟退避。
 func (p *nodePool) quarantineSub(sub string, now time.Time) {
+	if v5LegacyGatesBypassed() {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.quarantineSubLocked(sub, now)
@@ -785,6 +788,9 @@ func (p *nodePool) quarantineSubLocked(sub string, now time.Time) {
 
 // confirmSub403 在 confirm-then-mark 的确认侧调用：把节点映射到订阅并记一次已确认 403。
 func (p *nodePool) confirmSub403(fp string, now time.Time) {
+	if v5LegacyGatesBypassed() {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if n := p.byID[fp]; n != nil {
@@ -1001,6 +1007,9 @@ func (p *nodePool) mark(fp string, st NodeState, reason string) bool {
 // 返回 (节点存在, 是否发生变更)。同一 (fp, reason) 在冷却期内重复 mark 是幂等的：
 // 不改状态、不后推 CooldownUntil、不刷新 MarkedAt、不重复写 state changed 日志。
 func (p *nodePool) markLocked(fp string, st NodeState, reason, gate string) (found, changed bool) {
+	if v5LegacyGatesBypassed() {
+		return false, false
+	}
 	now := time.Now()
 	n := p.byID[fp]
 	if n == nil {

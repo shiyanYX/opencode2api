@@ -38,6 +38,7 @@ type Attempt struct {
 
 	sub       string
 	probe     bool
+	probeKey  string
 	lifecycle bool
 	explore   bool
 }
@@ -257,6 +258,7 @@ func (a *Admission) AdmitProbe(model string) (*Attempt, string) {
 			a.probeActive[c.Egress] = true
 			a.probing = true
 			at := a.attemptLocked(c, model, true, false, false, sem)
+			at.probeKey = c.Egress
 			a.startProbeTimerLocked(at)
 			return at, ""
 		default:
@@ -294,6 +296,7 @@ func (a *Admission) AdmitLifecycleProbe() (*Attempt, string) {
 				Direct:    egress == "direct",
 				release:   func() { <-sem },
 				probe:     true,
+				probeKey:  egress,
 				lifecycle: true,
 			}
 			a.startProbeTimerLocked(at)
@@ -330,8 +333,12 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 		}
 	}
 	if at.probe {
-		delete(a.probeActive, at.Egress)
-		a.probing = false
+		key := at.probeKey
+		if key == "" {
+			key = at.Egress
+		}
+		delete(a.probeActive, key)
+		a.probing = len(a.probeActive) > 0
 	}
 	// Empty egress has no pair and no gate sample; it must never create a
 	// PairKey(model, "") or advance the gate window (F2).

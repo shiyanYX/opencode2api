@@ -483,7 +483,7 @@ func TestForceNote403DoesNotHaltLegacyPool(t *testing.T) {
 }
 
 func TestForceIgnoresLegacyDead(t *testing.T) {
-	t.Setenv("NODE_SYSTEM", "force")
+	t.Setenv("NODE_SYSTEM", "off")
 	p := newProxyPool(filepath.Join(t.TempDir(), "proxy_state.json"))
 	p.setNodes([]*ProxyNode{{Name: "n1", Protocol: "socks5", Address: "10.0.0.1", Port: 1080}})
 	n := p.snapshot()[0]
@@ -494,6 +494,7 @@ func TestForceIgnoresLegacyDead(t *testing.T) {
 	p.mu.Lock()
 	delete(p.clients, n.Fingerprint)
 	p.mu.Unlock()
+	t.Setenv("NODE_SYSTEM", "force")
 	oldPool := proxyPool
 	proxyPool = p
 	t.Cleanup(func() { proxyPool = oldPool })
@@ -508,5 +509,132 @@ func TestForceIgnoresLegacyDead(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("legacy dead node missing from v5 candidates: %+v", got)
+	}
+}
+
+func TestForceLegacyWritesNoop(t *testing.T) {
+	t.Setenv("NODE_SYSTEM", "force")
+	resetV5ForTest()
+	p := newProxyPool(filepath.Join(t.TempDir(), "proxy_state.json"))
+	n1 := &ProxyNode{Name: "subA::n1", Protocol: "socks5", Address: "127.0.0.1", Port: 1080}
+	n2 := &ProxyNode{Name: "subA::n2", Protocol: "socks5", Address: "127.0.0.1", Port: 1081}
+	p.setNodes([]*ProxyNode{n1, n2})
+	p.mu.Lock()
+	fp1, fp2 := n1.Fingerprint, n2.Fingerprint
+	beforeNodes := make(map[string]ProxyNode, len(p.nodes))
+	for k, n := range p.byID {
+		beforeNodes[k] = *n
+	}
+	beforeSubs := make(map[string]sub403State, len(p.sub403))
+	for k, v := range p.sub403 {
+		beforeSubs[k] = *v
+	}
+	p.mu.Unlock()
+	beforeHalt := p.poolHalted(time.Now())
+
+	if p.mark(fp1, NodeExhausted, "quota") {
+		t.Fatal("force mark must be no-op")
+	}
+	if p.markFreeTierRejected(fp2) {
+		t.Fatal("force markFreeTierRejected must be no-op")
+	}
+	p.quarantineSub("subA", time.Now())
+	p.confirmSub403(fp1, time.Now())
+	p.saveWG.Wait()
+
+	p.mu.Lock()
+	for k, want := range beforeNodes {
+		if got := p.byID[k]; got == nil || *got != want {
+			p.mu.Unlock()
+			t.Fatalf("node %s changed under force: got=%+v want=%+v", k, got, want)
+		}
+	}
+	if len(p.sub403) != len(beforeSubs) {
+		p.mu.Unlock()
+		t.Fatalf("sub403 changed under force: got=%d want=%d", len(p.sub403), len(beforeSubs))
+	}
+	for k, want := range beforeSubs {
+		if got := p.sub403[k]; got == nil || *got != want {
+			p.mu.Unlock()
+			t.Fatalf("sub %s changed under force: got=%+v want=%+v", k, got, want)
+		}
+	}
+	p.mu.Unlock()
+	if p.poolHalted(time.Now()) != beforeHalt {
+		t.Fatal("poolHalted changed under force")
+	}
+}
+
+func TestLegacyWritesOffStillApply(t *testing.T) {
+	t.Setenv("NODE_SYSTEM", "off")
+	resetV5ForTest()
+	p := newProxyPool(filepath.Join(t.TempDir(), "proxy_state.json"))
+	n := &ProxyNode{Name: "sub::n", Protocol: "socks5", Address: "127.0.0.1", Port: 1080}
+	p.setNodes([]*ProxyNode{n})
+	p.mu.Lock()
+	fp := n.Fingerprint
+	p.mu.Unlock()
+	if !p.mark(fp, NodeExhausted, "quota") {
+		t.Fatal("off mark must still apply")
+	}
+	p.saveWG.Wait()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.byID[fp].State != NodeExhausted {
+		t.Fatalf("off state=%s, want exhausted", p.byID[fp].State)
+	}
+}
+
+func TestProbeKeyReleasesMismatchedEgress(t *testing.T) {
+	a, _, _ := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m"})
+	at, reason := a.AdmitProbe("m")
+	if at == nil {
+		t.Fatalf("AdmitProbe: %s", reason)
+	}
+	at.Egress = "node:rewritten"
+	a.Observe(at, Outcome2xx)
+	a.mu.Lock()
+	if len(a.probeActive) != 0 || a.probing {
+		a.mu.Unlock()
+		t.Fatalf("probe residue after rewritten egress: active=%v probing=%v", a.probeActive, a.probing)
+	}
+	a.mu.Unlock()
+
+	at2, reason := a.AdmitProbe("m")
+	if at2 == nil {
+		t.Fatalf("second AdmitProbe: %s", reason)
+	}
+	a.Observe(at2, Outcome2xx)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.probeActive) != 0 || a.probing {
+		t.Fatalf("probe residue after empty egress: active=%v probing=%v", a.probeActive, a.probing)
+	}
+}
+
+func TestAdmitProbeMissNoResidue(t *testing.T) {
+	a, _, _ := newAdmissionTest(t, 8)
+	if at, _ := a.AdmitProbe("m"); at != nil {
+		t.Fatal("expected miss")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.probeActive) != 0 || a.probing {
+		t.Fatalf("miss residue: active=%v probing=%v", a.probeActive, a.probing)
+	}
+}
+
+func TestProbeObserveReleasesOnce(t *testing.T) {
+	a, _, _ := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m"})
+	at, reason := a.AdmitProbe("m")
+	if at == nil {
+		t.Fatalf("AdmitProbe: %s", reason)
+	}
+	a.Observe(at, Outcome2xx)
+	a.Observe(at, Outcome2xx)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.probeActive) != 0 || a.probing || len(a.sems["node:e1"]) != 0 {
+		t.Fatalf("double observe residue: active=%v probing=%v sem=%d", a.probeActive, a.probing, len(a.sems["node:e1"]))
 	}
 }
