@@ -190,8 +190,10 @@ func (rt *v5Runtime) persistNow() {
 	rt.persistIfDue(time.Now().Add(2 * time.Second))
 }
 
-// v5Candidates 只读快照：不 sweep、不改变节点生命周期，避免影子观测反过来
-// 影响真实选路。每个有 client 的节点 + 一个仅用于对比的 direct。
+// v5Candidates 枚举节点 + direct；不 sweep、不改变节点生命周期，避免影子
+// 观测反过来影响真实选路。这里刻意不按旧池的 State/Dead/Cooldown 过滤：
+// force 下 v5 不读旧状态，旧 dead 是应忽略的陈旧信号，隔离是设计要求。
+// 每个节点按需懒建/复用 client；创建失败才跳过。
 func v5Candidates(model string) []Candidate {
 	if v5CandidatesHook != nil {
 		return v5CandidatesHook(model)

@@ -333,6 +333,11 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 		delete(a.probeActive, at.Egress)
 		a.probing = false
 	}
+	// Empty egress has no pair and no gate sample; it must never create a
+	// PairKey(model, "") or advance the gate window (F2).
+	if at.Egress == "" {
+		return
+	}
 
 	if at.lifecycle {
 		a.observeLifecycleLocked(at, class, now, nowMS)
@@ -511,6 +516,9 @@ func (a *Admission) eligibleLocked(c Candidate, model string, nowMS int64, probe
 }
 
 func (a *Admission) pairLocked(model, egress string) *PairState {
+	if egress == "" {
+		return nil
+	}
 	if p := a.st.Pairs[PairKey(model, egress)]; p != nil {
 		return p
 	}
@@ -518,6 +526,9 @@ func (a *Admission) pairLocked(model, egress string) *PairState {
 }
 
 func (a *Admission) writePairLocked(model, egress string) *PairState {
+	if egress == "" {
+		return nil
+	}
 	key := PairKey(model, egress)
 	p := a.st.Pairs[key]
 	if p == nil {
@@ -749,6 +760,11 @@ func (a *Admission) GateRetryAfter() time.Duration { return gateCanaryPeriod }
 
 func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, now time.Time, nowMS int64) {
 	g := a.gateLocked(now)
+	// Empty egress is not a real attempt: do not touch the window, distinct
+	// set, gate state, or pair ledger (F2).
+	if at.Egress == "" {
+		return
+	}
 	if g.Active {
 		switch {
 		case class == Outcome2xx && at.Direct:
@@ -794,11 +810,6 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 		g.Attempts = 0
 		g.Failures = 0
 		g.Egresses = map[string]int64{}
-	}
-	// Empty-egress attempts (admission misses, probes without a chosen egress)
-	// must not pollute the gate window at all (F2).
-	if at.Egress == "" {
-		return
 	}
 	g.Attempts++
 	if class == Outcome429 {

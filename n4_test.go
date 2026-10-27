@@ -423,3 +423,90 @@ func TestForceTransportErrorDoesNotMarkLegacyState(t *testing.T) {
 		t.Fatalf("force transport error changed legacy state to %v", got)
 	}
 }
+
+func TestEmptyEgressDoesNotTouchGateOrPairs(t *testing.T) {
+	a, clock, st := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s1"},
+	)
+	for i := 0; i < 3; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: ""}, Outcome429)
+	}
+	if st.Gate.WindowStart != 0 || st.Gate.Attempts != 0 || st.Gate.Failures != 0 || len(st.Gate.Egresses) != 0 {
+		t.Fatalf("empty egress touched window: %+v", st.Gate)
+	}
+	if _, ok := st.Pairs[PairKey("m", "")]; ok {
+		t.Fatal("empty egress created model pair")
+	}
+	if _, ok := st.Pairs[PairKey("*", "")]; ok {
+		t.Fatal("empty egress created wildcard pair")
+	}
+
+	a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome429)
+	start, attempts, failures := st.Gate.WindowStart, st.Gate.Attempts, st.Gate.Failures
+	clock.Advance(time.Second)
+	a.Observe(&Attempt{Model: "m", Egress: ""}, Outcome429)
+	if st.Gate.WindowStart != start || st.Gate.Attempts != attempts || st.Gate.Failures != failures {
+		t.Fatalf("empty egress moved window: %+v", st.Gate)
+	}
+	if _, ok := st.Pairs[PairKey("m", "")]; ok {
+		t.Fatal("empty egress created pair after real attempt")
+	}
+}
+
+func TestForceNote403DoesNotHaltLegacyPool(t *testing.T) {
+	t.Setenv("NODE_SYSTEM", "force")
+	p := newProxyPool(filepath.Join(t.TempDir(), "proxy_state.json"))
+	nodes := make([]*ProxyNode, 0, 8)
+	for i := 0; i < 8; i++ {
+		nodes = append(nodes, &ProxyNode{Name: "n" + string(rune('0'+i)), Protocol: "socks5", Address: "10.0.0." + string(rune('1'+i)), Port: 1080})
+	}
+	p.setNodes(nodes)
+	now := time.Now()
+	before := p.snapshot()
+	for _, n := range before {
+		p.noteAttempt(n.Fingerprint, now)
+		p.note403(n.Fingerprint, now)
+	}
+	if p.poolHalted(now) {
+		t.Fatal("force note403 halted legacy pool")
+	}
+	t.Setenv("NODE_SYSTEM", "off")
+	after := p.snapshot()
+	if len(before) != len(after) {
+		t.Fatalf("node count changed: %d -> %d", len(before), len(after))
+	}
+	for i := range before {
+		if before[i].State != after[i].State {
+			t.Fatalf("legacy node %s changed %v -> %v", before[i].Fingerprint, before[i].State, after[i].State)
+		}
+	}
+}
+
+func TestForceIgnoresLegacyDead(t *testing.T) {
+	t.Setenv("NODE_SYSTEM", "force")
+	p := newProxyPool(filepath.Join(t.TempDir(), "proxy_state.json"))
+	p.setNodes([]*ProxyNode{{Name: "n1", Protocol: "socks5", Address: "10.0.0.1", Port: 1080}})
+	n := p.snapshot()[0]
+	if !p.mark(n.Fingerprint, NodeDead, "legacy_dead") {
+		t.Fatal("failed to mark legacy dead")
+	}
+	p.saveWG.Wait()
+	p.mu.Lock()
+	delete(p.clients, n.Fingerprint)
+	p.mu.Unlock()
+	oldPool := proxyPool
+	proxyPool = p
+	t.Cleanup(func() { proxyPool = oldPool })
+	v5CandidatesHook = nil
+
+	got := v5Candidates("m")
+	found := false
+	for _, c := range got {
+		if c.Egress == nodeEgressKey(n.Fingerprint) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("legacy dead node missing from v5 candidates: %+v", got)
+	}
+}

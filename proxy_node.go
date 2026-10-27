@@ -827,7 +827,7 @@ func (p *nodePool) allSubsQuarantined(now time.Time) bool {
 
 // noteAttempt 记录池级 403 窗口的「被尝试节点」（分母）。
 func (p *nodePool) noteAttempt(fp string, now time.Time) {
-	if fp == "" {
+	if fp == "" || v5LegacyGatesBypassed() {
 		return
 	}
 	p.mu.Lock()
@@ -841,7 +841,7 @@ func (p *nodePool) noteAttempt(fp string, now time.Time) {
 
 // note403 记录一次原始 403（不要求已确认）；达到池级阈值立即 halt。
 func (p *nodePool) note403(fp string, now time.Time) {
-	if fp == "" {
+	if fp == "" || v5LegacyGatesBypassed() {
 		return
 	}
 	p.mu.Lock()
