@@ -26,6 +26,7 @@ type NodeStateV5 struct {
 	Egress  map[string]*EgressState `json:"egress"`
 	Direct  *DirectState            `json:"direct"`
 	Subs    map[string]*SubState    `json:"subs"`
+	Gate    *GateState              `json:"gate"`
 }
 
 type PairState struct {
@@ -37,7 +38,21 @@ type PairState struct {
 	Strikes   int     `json:"strikes"`
 	Hard      int     `json:"hard"`
 	Until     int64   `json:"until"`
+	OKStreak  int     `json:"okStreak"`
 	Trips24h  []int64 `json:"trips24h"`
+}
+
+// GateState is the persisted pool-wide 429 winter gate. Egresses maps an
+// egress key to the last 429 timestamp inside the current 5-minute window.
+type GateState struct {
+	Active        bool             `json:"active"`
+	PausedUntil   int64            `json:"pausedUntil"`
+	Backoff       int              `json:"backoff"`
+	LastTrip      int64            `json:"lastTrip"`
+	Egresses      map[string]int64 `json:"egresses,omitempty"`
+	NextCanary    int64            `json:"nextCanary"`
+	CanaryOK      bool             `json:"canaryOK"`
+	NodeProbeUsed bool             `json:"nodeProbeUsed"`
 }
 
 type EgressState struct {
@@ -69,6 +84,7 @@ func NewNodeStateV5(now time.Time) *NodeStateV5 {
 		Egress:  map[string]*EgressState{},
 		Direct:  &DirectState{},
 		Subs:    map[string]*SubState{},
+		Gate:    &GateState{Egresses: map[string]int64{}},
 	}
 }
 
@@ -79,6 +95,7 @@ func emptyNodeStateV5() *NodeStateV5 {
 		Egress:  map[string]*EgressState{},
 		Direct:  &DirectState{},
 		Subs:    map[string]*SubState{},
+		Gate:    &GateState{Egresses: map[string]int64{}},
 	}
 }
 
@@ -90,20 +107,30 @@ func PairKey(model, egress string) string {
 // LoadNodeStateV5 reads node_state_v5.json. Missing/corrupt/unsupported files
 // degrade to an empty v5 state instead of failing startup.
 func LoadNodeStateV5(path string) *NodeStateV5 {
+	st, _ := loadNodeStateV5(path)
+	return st
+}
+
+// loadNodeStateV5 returns the load error so the runtime can emit one event on
+// corrupt/unsupported state. A missing file is not an error.
+func loadNodeStateV5(path string) (*NodeStateV5, error) {
 	st := emptyNodeStateV5()
 	if path == "" {
-		return st
+		return st, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return st
+		if errors.Is(err, os.ErrNotExist) {
+			return st, nil
+		}
+		return st, err
 	}
 	var loaded NodeStateV5
 	if err := json.Unmarshal(data, &loaded); err != nil {
-		return st
+		return st, err
 	}
 	if loaded.Version != nodeStateV5Version {
-		return st
+		return st, fmt.Errorf("v5 state version %d, want %d", loaded.Version, nodeStateV5Version)
 	}
 	if loaded.Pairs == nil {
 		loaded.Pairs = map[string]*PairState{}
@@ -117,7 +144,13 @@ func LoadNodeStateV5(path string) *NodeStateV5 {
 	if loaded.Subs == nil {
 		loaded.Subs = map[string]*SubState{}
 	}
-	return &loaded
+	if loaded.Gate == nil {
+		loaded.Gate = &GateState{}
+	}
+	if loaded.Gate.Egresses == nil {
+		loaded.Gate.Egresses = map[string]int64{}
+	}
+	return &loaded, nil
 }
 
 // SaveNodeStateV5 atomically writes node_state_v5.json (temp file + rename, 0644).
@@ -140,6 +173,12 @@ func SaveNodeStateV5(path string, st *NodeStateV5) error {
 	}
 	if st.Subs == nil {
 		st.Subs = map[string]*SubState{}
+	}
+	if st.Gate == nil {
+		st.Gate = &GateState{}
+	}
+	if st.Gate.Egresses == nil {
+		st.Gate.Egresses = map[string]int64{}
 	}
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
@@ -191,7 +230,7 @@ func (st *NodeStateV5) pruneLocked(now time.Time) int {
 			continue
 		}
 		p.Trips24h = pruneTrips(p.Trips24h, tripCutoff)
-		if p.Until > nowMS || p.Strikes > 0 || p.Hard > 0 {
+		if p.Until > nowMS || p.Strikes > 0 {
 			continue
 		}
 		if r8MaxInt64(p.LastOK, p.LastFail) < idleCutoff {

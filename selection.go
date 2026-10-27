@@ -55,7 +55,12 @@ func (a *Admission) pairPosteriorLocked(model, egress string) float64 {
 	}
 	aa := pairEffectiveA(p)
 	bb := pairEffectiveB(p)
-	return (aa + 0.5) / (aa + bb + 1)
+	score := (aa + 0.5) / (aa + bb + 1)
+	// Half-open pairs re-enter at 0.05 weight until two consecutive 2xx.
+	if p != nil && p.Strikes > 0 && p.Until > 0 && p.Until <= a.now().UnixMilli() && p.OKStreak < 2 {
+		score *= 0.05
+	}
+	return score
 }
 
 func (a *Admission) pairNLocked(model, egress string) float64 {

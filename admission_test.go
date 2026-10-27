@@ -50,21 +50,26 @@ func TestPairCoolOnFirst429(t *testing.T) {
 	a.Observe(at, Outcome429)
 
 	p := st.Pairs[PairKey("m", "node:e1")]
-	if p == nil || p.Strikes != 1 || p.Until != clock.Now().Add(60*time.Second).UnixMilli() {
+	if p == nil || p.Strikes != 1 || p.Until != clock.Now().Add(30*time.Minute).UnixMilli() {
 		t.Fatalf("first 429 state = %+v", p)
 	}
-	if got := a.RetryAfter("m"); got < 59*time.Second || got > 60*time.Second {
-		t.Fatalf("RetryAfter = %v, want ~60s", got)
+	if got := a.RetryAfter("m"); got < 29*time.Minute || got > 30*time.Minute {
+		t.Fatalf("RetryAfter = %v, want ~30m", got)
 	}
 	if at, reason := a.Admit("m", nil); at != nil || reason != "no_candidate" {
 		t.Fatalf("Admit during cooldown = (%v,%q), want no_candidate", at, reason)
 	}
 
-	clock.Advance(60*time.Second + time.Millisecond)
+	clock.Advance(30*time.Minute + time.Millisecond)
 	at = mustAdmit(t, a, "m")
 	a.Observe(at, Outcome2xx)
-	if p.Strikes != 0 || p.Until != 0 || p.A != 1 {
-		t.Fatalf("2xx did not recover: %+v", p)
+	if p.Strikes != 1 || p.OKStreak != 1 {
+		t.Fatalf("first half-open 2xx = %+v, want strikes=1 okStreak=1", p)
+	}
+	at = mustAdmit(t, a, "m")
+	a.Observe(at, Outcome2xx)
+	if p.Strikes != 0 || p.Until != 0 || p.OKStreak != 0 || p.A != 2 {
+		t.Fatalf("second 2xx did not recover: %+v", p)
 	}
 }
 
@@ -142,7 +147,7 @@ func TestAllCooling(t *testing.T) {
 	for i := range candidates {
 		candidates[i] = Candidate{Egress: "node:e" + string(rune('A'+i)), Model: "m", Sub: "s"}
 	}
-	a, _, st := newAdmissionTest(t, 8, candidates...)
+	a, clock, st := newAdmissionTest(t, 8, candidates...)
 	for range candidates {
 		at := mustAdmit(t, a, "m")
 		a.Observe(at, Outcome429)
@@ -150,9 +155,10 @@ func TestAllCooling(t *testing.T) {
 	if at, reason := a.Admit("m", nil); at != nil || reason != "no_candidate" {
 		t.Fatalf("all cooling Admit = (%v,%q)", at, reason)
 	}
-	if got := a.RetryAfter("m"); got <= 0 || got > 5*time.Minute {
+	if got := a.RetryAfter("m"); got <= 0 || got > 30*time.Minute {
 		t.Fatalf("RetryAfter = %v", got)
 	}
+	clock.Advance(30*time.Minute + time.Millisecond)
 	probe := mustAdmitProbe(t, a, "m")
 	a.Observe(probe, Outcome2xx)
 	if at := mustAdmit(t, a, "m"); at == nil {
@@ -185,12 +191,13 @@ func TestAllSubQuarantined(t *testing.T) {
 }
 
 func TestProbeBypassesCooldown(t *testing.T) {
-	a, _, _ := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
+	a, clock, _ := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
 	at := mustAdmit(t, a, "m")
 	a.Observe(at, Outcome429)
 	if at, reason := a.Admit("m", nil); at != nil || reason != "no_candidate" {
 		t.Fatalf("normal Admit during cooldown = (%v,%q)", at, reason)
 	}
+	clock.Advance(30*time.Minute + time.Millisecond)
 	probe := mustAdmitProbe(t, a, "m")
 	a.Observe(probe, Outcome2xx)
 	at = mustAdmit(t, a, "m")
@@ -234,39 +241,19 @@ func TestProbeDeadline(t *testing.T) {
 
 func TestHardBlockBounded(t *testing.T) {
 	a, clock, st := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
-	want := []time.Duration{
-		60 * time.Second, 2 * time.Minute, 5 * time.Minute, 5 * time.Minute,
-		time.Hour, 2 * time.Hour, 4 * time.Hour, 8 * time.Hour, 16 * time.Hour, 24 * time.Hour,
-	}
+	want := []time.Duration{30 * time.Minute, 2 * time.Hour, 8 * time.Hour, 24 * time.Hour, 72 * time.Hour}
 	key := PairKey("m", "node:e1")
 	for i, d := range want {
 		at := mustAdmit(t, a, "m")
 		now := clock.Now()
 		a.Observe(at, Outcome429)
 		p := st.Pairs[key]
-		wantStrikes := i + 1
-		if wantStrikes > 4 {
-			wantStrikes = 4
-		}
-		wantHard := 0
-		if i >= 4 {
-			wantHard = i - 3
-		}
-		if p.Strikes != wantStrikes || p.Hard != wantHard {
-			t.Fatalf("step %d strikes/hard = %d/%d, want %d/%d", i, p.Strikes, p.Hard, wantStrikes, wantHard)
-		}
-		if p.Until != now.Add(d).UnixMilli() {
-			t.Fatalf("step %d until = %d, want %d", i, p.Until, now.Add(d).UnixMilli())
+		if p.Strikes != i+1 || p.Until != now.Add(d).UnixMilli() {
+			t.Fatalf("step %d strikes/until = %d/%d, want %d/%d", i, p.Strikes, p.Until, i+1, now.Add(d).UnixMilli())
 		}
 		if i+1 < len(want) {
 			clock.Advance(d + time.Millisecond)
 		}
-	}
-	hardUntil := st.Pairs[key].Until
-	probe := mustAdmitProbe(t, a, "m")
-	a.Observe(probe, Outcome429)
-	if st.Pairs[key].Until != hardUntil {
-		t.Fatalf("probe 429 shortened hard block: %d -> %d", hardUntil, st.Pairs[key].Until)
 	}
 }
 
@@ -329,7 +316,7 @@ func TestProbationNeedsThreeSuccesses(t *testing.T) {
 	if e.Lifecycle != "probation" || e.ConsecOK != 2 {
 		t.Fatalf("after 2 connected = %+v, want probation/2", e)
 	}
-	clock.Advance(61 * time.Second)
+	clock.Advance(30*time.Minute + time.Millisecond)
 
 	at = mustAdmit(t, a, "m")
 	a.Observe(at, Outcome5xx)

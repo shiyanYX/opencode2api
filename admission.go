@@ -58,10 +58,11 @@ type Admission struct {
 }
 
 var pairCooldownLadder = [...]time.Duration{
-	60 * time.Second,
-	2 * time.Minute,
-	5 * time.Minute,
-	5 * time.Minute,
+	30 * time.Minute,
+	2 * time.Hour,
+	8 * time.Hour,
+	24 * time.Hour,
+	72 * time.Hour,
 }
 
 var probeBackoffLadder = [...]time.Duration{
@@ -335,27 +336,49 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 		a.observeLifecycleLocked(at, class, now, nowMS)
 		return
 	}
+	a.observeGateOutcomeLocked(at, class, now, nowMS)
 
 	switch class {
 	case Outcome2xx:
 		p := a.writePairLocked(at.Model, at.Egress)
 		a.decayPairLocked(p, nowMS)
 		p.A++
-		p.Strikes = 0
-		p.Hard = 0
-		p.Until = 0
 		p.LastOK = nowMS
+		// Half-open: after a cooldown expires, the pair returns at 0.05 weight
+		// and needs two consecutive 2xx before it is fully trusted again.
+		// A 2xx that arrives while the pair is still cooling (an older lease)
+		// must not shorten the cooldown.
+		if p.Strikes > 0 && p.Until > 0 {
+			if p.Until <= nowMS {
+				p.OKStreak++
+				if p.OKStreak >= 2 {
+					p.Strikes = 0
+					p.Hard = 0
+					p.Until = 0
+					p.OKStreak = 0
+				}
+			}
+		} else {
+			p.Strikes = 0
+			p.Hard = 0
+			p.Until = 0
+			p.OKStreak = 0
+		}
 		if at.probe {
 			a.clearSubLocked(at.sub)
 			a.probeBackoff = probeBackoffLadder[0]
 		}
 		a.egressConnectedLocked(at.Egress)
+		if at.Direct && a.st.Direct != nil {
+			a.st.Direct.Until = 0
+		}
 	case Outcome429:
 		a.egressConnectedLocked(at.Egress)
 		p := a.writePairLocked(at.Model, at.Egress)
 		a.decayPairLocked(p, nowMS)
 		p.B++
 		p.LastFail = nowMS
+		p.OKStreak = 0
 		if at.probe {
 			minUntil := nowMS + a.probeBackoff.Milliseconds()
 			if p.Until < minUntil {
@@ -363,17 +386,11 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 			}
 			a.advanceProbeBackoffLocked()
 		} else {
-			if p.Strikes >= 4 {
-				p.Hard++
-				if p.Hard > 6 {
-					p.Hard = 6
-				}
-				p.Strikes = 4
-				p.Until = now.Add(hardBlockDuration(p.Hard)).UnixMilli()
-			} else {
-				p.Strikes++
-				p.Until = now.Add(pairCooldownLadder[p.Strikes-1]).UnixMilli()
+			p.Strikes++
+			if p.Strikes > len(pairCooldownLadder) {
+				p.Strikes = len(pairCooldownLadder)
 			}
+			p.Until = now.Add(pairCooldownLadder[p.Strikes-1]).UnixMilli()
 			p.Trips24h = append(p.Trips24h, nowMS)
 			p.Trips24h = pruneTrips(p.Trips24h, now.Add(-24*time.Hour).UnixMilli())
 		}
@@ -683,6 +700,180 @@ func (a *Admission) advanceProbeBackoffLocked() {
 		}
 	}
 	a.probeBackoff = probeBackoffLadder[len(probeBackoffLadder)-1]
+}
+
+const (
+	gateWindow       = 5 * time.Minute
+	gateDistinct     = 3
+	gateQuiet        = 10 * time.Minute
+	gateBasePause    = 60 * time.Second
+	gateMaxPause     = 15 * time.Minute
+	gateCanaryPeriod = 60 * time.Second
+)
+
+func (a *Admission) gateLocked(now time.Time) *GateState {
+	if a.st.Gate == nil {
+		a.st.Gate = &GateState{Egresses: map[string]int64{}}
+	}
+	if a.st.Gate.Egresses == nil {
+		a.st.Gate.Egresses = map[string]int64{}
+	}
+	return a.st.Gate
+}
+
+// GatePaused reports whether normal node traffic must be turned into 429.
+func (a *Admission) GatePaused() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g := a.gateLocked(a.now())
+	return g.Active
+}
+
+// GateRetryAfter is the fixed client-facing retry interval while the gate is active.
+func (a *Admission) GateRetryAfter() time.Duration { return gateCanaryPeriod }
+
+func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, now time.Time, nowMS int64) {
+	g := a.gateLocked(now)
+	if g.Active {
+		switch {
+		case class == Outcome2xx && at.Direct:
+			// Direct canary succeeded: permit exactly one node probe.
+			g.CanaryOK = true
+			g.NodeProbeUsed = false
+			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
+		case class == Outcome2xx && !at.Direct && g.CanaryOK:
+			// Node probe succeeded: the pool is no longer in winter.
+			g.Active = false
+			g.PausedUntil = 0
+			g.CanaryOK = false
+			g.NodeProbeUsed = false
+			g.NextCanary = 0
+			g.Egresses = map[string]int64{}
+		case class == Outcome429 && at.Direct:
+			g.CanaryOK = false
+			g.NodeProbeUsed = false
+			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
+		case class == Outcome429 && !at.Direct && g.CanaryOK:
+			g.CanaryOK = false
+			g.NodeProbeUsed = false
+			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
+		}
+		return
+	}
+	if class != Outcome429 || at.Egress == "" {
+		return
+	}
+	cutoff := nowMS - gateWindow.Milliseconds()
+	for k, ts := range g.Egresses {
+		if ts < cutoff {
+			delete(g.Egresses, k)
+		}
+	}
+	g.Egresses[at.Egress] = nowMS
+	if len(g.Egresses) < gateDistinct {
+		return
+	}
+	if g.LastTrip > 0 && nowMS-g.LastTrip >= gateQuiet.Milliseconds() {
+		g.Backoff = 0
+	}
+	g.Backoff++
+	pause := gateBasePause * time.Duration(1<<(g.Backoff-1))
+	if pause > gateMaxPause {
+		pause = gateMaxPause
+	}
+	g.Active = true
+	g.PausedUntil = nowMS + pause.Milliseconds()
+	g.NextCanary = g.PausedUntil
+	g.CanaryOK = false
+	g.NodeProbeUsed = false
+	g.Egresses = map[string]int64{}
+	g.LastTrip = nowMS
+}
+
+func (a *Admission) GateCanaryDue() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g := a.gateLocked(a.now())
+	return g.Active && !g.CanaryOK && a.now().UnixMilli() >= g.NextCanary
+}
+
+func (a *Admission) GateNodeProbeReady() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g := a.gateLocked(a.now())
+	return g.Active && g.CanaryOK && !g.NodeProbeUsed
+}
+
+// AdmitGateProbe is the single node probe after a successful direct canary.
+// It deliberately ignores the pair cooldown (probe=true) but still honors
+// sub-quarantine and inflight limits; a 2xx clears the pool gate.
+func (a *Admission) AdmitGateProbe(model string) (*Attempt, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g := a.gateLocked(a.now())
+	if !g.Active || !g.CanaryOK || g.NodeProbeUsed {
+		return nil, "probe_not_ready"
+	}
+	if a.candidates == nil {
+		return nil, "no_candidate"
+	}
+	now := a.now()
+	nowMS := now.UnixMilli()
+	cands := a.candidates(model)
+	eligible := make([]Candidate, 0, len(cands))
+	for _, c := range cands {
+		if c.Direct || c.Egress == "" {
+			continue
+		}
+		if ok, _ := a.eligibleLocked(c, model, nowMS, true); ok {
+			eligible = append(eligible, c)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil, "no_candidate"
+	}
+	a.sortCandidatesLocked(eligible, model)
+	for _, c := range eligible {
+		sem := a.semLocked(c.Egress)
+		select {
+		case sem <- struct{}{}:
+			g.NodeProbeUsed = true
+			at := a.attemptLocked(c, model, false, false, false, sem)
+			return at, ""
+		default:
+		}
+	}
+	return nil, "all_inflight"
+}
+
+func (a *Admission) markGateNodeProbe() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g := a.gateLocked(a.now())
+	g.NodeProbeUsed = true
+}
+
+// AdmitCanary takes only the direct egress during an active gate. It ignores
+// the direct cooldown/pair state: it is an explicit, one-shot recovery probe.
+func (a *Admission) AdmitCanary(model string) (*Attempt, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	g := a.gateLocked(a.now())
+	if !g.Active || g.CanaryOK {
+		return nil, "not_due"
+	}
+	nowMS := a.now().UnixMilli()
+	if nowMS < g.NextCanary {
+		return nil, "canary_wait"
+	}
+	sem := a.semLocked(EgressKeyDirect)
+	select {
+	case sem <- struct{}{}:
+		g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
+		return a.attemptLocked(Candidate{Egress: EgressKeyDirect, Direct: true, Model: model}, model, false, false, false, sem), ""
+	default:
+		return nil, "all_inflight"
+	}
 }
 
 func hardBlockDuration(hard int) time.Duration {
