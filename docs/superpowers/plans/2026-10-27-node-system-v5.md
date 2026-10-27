@@ -166,6 +166,19 @@ quarantine 期间该 sub 的 egress 不进入候选；全部 sub 隔离 ⇒ no_c
 | v5.2 的 egress 级熔断 / 60s 窗口 / trips 分类 | **删除**（被 v5.3 首个 429 规则取代） |
 | T3 超时分层 / idle_read | 不动 |
 
+### 2.5 与现有代码的落点
+
+| 现有符号 | 处置 |
+|---|---|
+| `nodePool.pick/pickWithMeta/pickWithMetaExcluding`（`proxy_node.go:566-583`） | 拆成 `Admit` 的候选枚举；`force` 参数删除，粘滞由会话层传入 `exclude` |
+| `nodePool.poolHaltUntil/poolHalt/poolHalted`（`proxy_node.go:270,872-902`） | **删除**；403 全局停摆改由 sub quarantine + `no_candidate` 表达 |
+| `nodePool.sub403/quarantineSub`（`proxy_node.go:264-283,739-777`） | **保留**，与 v5 `subs` 合并为唯一一份；退避 10/20/30m 不变 |
+| `shape_drift.go` 的 `Halt/Trial`（`shape_drift.go:306`） | **删除闩**；drift 指标保留为纯观测 |
+| `main.go` 两处重试循环（`drift.Halt` 分支） | 改为 `Admit`→发送→`Observe`；删除 `if drift.Halt { break }` |
+| `egress.go` 直连回退 | 全冷却**不再回退直连**，返回 `NoCandidate`；direct 本身是 `pair=(model,direct)` |
+| `node_scoring.go` v2 分数 | 保留为面板展示口径，**选路不再读取** |
+| T3 超时分层 / `idle_read.go` | 不动 |
+
 ## 3. 选择层：per-pair 后验 + 有界探索
 
 ### 3.1 后验
