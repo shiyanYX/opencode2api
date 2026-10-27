@@ -38,20 +38,27 @@ Observe(lease, outcome, now)   // exactly once，defer 保证
 更新：pair 后验、breaker、quota、sub 状态、call_log、metrics
 ```
 
-- `Admit` 是唯一选路入口；`egress.go` 不再自行回退直连。
+- `Admit` 是唯一选路入口；`egress.go` 不再自行回退直连（全冷却时返回 `NoCandidate`，不是 direct）。
 - `Observe` 是唯一结果入口；两条 main 循环、direct、canary、trial 都调用它。
 - 抑制（Reject）不产生 attempt，不更新后验（I8）。
+- **租约**：`Lease{model, egress, kind, token}` 带 TTL 10min；`Observe` 用 `sync.Once` 保证 exactly-once；跨出口重试前必须 `Observe(old, abandoned)` 释放，否则旧出口永久占在途。
 
 ### 2.3 状态机
 
-**Pair 配额/熔断**
+**Pair 配额/熔断**（计数单位：**attempt**；窗口：**精确 60s 滑动**，用时间戳队列，不用 ring[8]）
 
 ```text
-ok --(60s 内 ≥3 次 429 或 ≥4 次中 ≥50%)--> cooling(5m) --到期--> canary
-canary --2 次 2xx(≥60s)--> ok（24h 最多 3 次清零；超出每日降 1 级）
-canary --失败--> cooling 升档(30m/2h/5h) 
-任意 --24h 内 8 次 429--> hard_blocked(24h)
+ok --(60s 内 n429>=3 且 n429/nAtt>=0.5，nAtt>=3)--> cooling(5m) --到期--> canary
+canary --2 次 2xx(≥60s)--> ok（24h 最多 3 次清零；超出则 strikes 每日降 1 级，until=now+ladder[strikes]，strikes=0 时 until=zero）
+canary --任意 429--> strikes+1 并升档（canary 的 1 次失败立即升档，不等 3 次）
+任意 --24h 内 8 次 429--> hard_blocked(24h)（预算只统计 429/FUL，不统计 2xx 与网络失败）
 ```
+
+- 触发条件用 **AND**（≥3 次 429 且占比 ≥50%）：`4ad1982e` 型（20 次 429 但同窗 219 次 2xx，占比 8.4%）不熔断；00:20 单出口（167 次 429、0 次 2xx）第 3 次即熔断。
+- 单次 429 不改变 `until`；canary / global_probe 的 429 是例外，直接升档。
+- `strikes=0` 时 `until` 必须为零，禁止写 `ladder[0]`（否则健康节点被永久排除）。
+
+**全局探测（R7-B4）**：无候选时按 **60s → 2m → 5m → 15m → 1h → 6h** 退避，任一 2xx 重置；每次只发 1 个，选 `until` 最早的出口；探测 429 计入该出口 24h 预算，预算耗尽则 24h 内不再探测该出口。恢复时间：上游恢复后的首个探测间隔内（≤2min 仅对前两次探测成立，之后按退避，不承诺 ≤2min）。
 
 **Egress 生命周期**
 
@@ -104,6 +111,8 @@ n>=5 -> UCB: p + 0.05*sqrt(2*ln(N)/n)
 tie  -> lastOK 更近 > 近 1h 失败更少 > 轮询
 sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 ```
+
+**在途与排队（R7-B2）**：每出口 `inflight < K=8`；全部候选都在途时**最多等 500ms** 抢一个名额，超时才 503 `all_inflight`（Retry-After 1s）。N=4/C=31 时容量 32 ≥ 31，不产生假 503；N=3 时容量 24 < 31，最多 7 个请求排队，而不是 48–61% 直接失败。
 
 ### 3.3 为什么不是静态总分
 - 稳态 99%+ 成功率，任何排序都差不多；静态分反而引入噪声（−2.6pp）。
@@ -166,7 +175,7 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
    "subs":{"sub":{"until":0,"reason":"403"}}}
   ```
 - 上限：pair 最多 50k（512 model × 212 egress 的活跃子集），空闲 30min 清理，**不淘汰 armed/blocked**。
-- 迁移：旧 `NodeExhausted` 且 quota ⇒ 首次冷却 5m；保留 dead/rejected；旧 `shape_drift` 状态丢弃（本来就不该持久化）。
+- 迁移：旧 `NodeExhausted` 且 quota ⇒ `strikes=1, until=now+5m`（不是保留 5h，否则上线即 40% 假 503）；保留 dead/rejected；旧 `shape_drift` 状态丢弃（本来就不该持久化）。
 - `proxy_state.json` 保持 v1 不动（节点静态配置与现有 mark），避免回滚丢状态。
 
 ## 7. 上线：影子 → 强制
@@ -204,3 +213,15 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 3. **sub quarantine 误伤**：403 归因需 ≥2 个不同 pair 或同 pair 2 次；影子期观察误伤率。
 4. **面板口径变化**：quality 从「加权总分」变为「后验均值」，需要标注样本量，避免用户误读。
 5. **T7 研究未完成**：AUC/校准/MNAR 还没做；N3 先按本方案实现，T7 完成后校准参数。
+
+## 11. R7 复审（v4.1）到 v5.1 的对照
+
+| R7 条目 | v5.1 处置 |
+|---|---|
+| **Critical-1** 计数单位/窗口：attempt vs request、ring[8] 漏判、canary 单次 429 不升档 | 明确 **attempt**；**精确 60s 时间戳队列**；触发改 **AND**（n429≥3 且占比≥50%，nAtt≥3）；canary/global_probe 的 429 **立即升档** |
+| **Critical-2** 00:20 N=4/C=31 容量 16 → 48% all_inflight；N=3 → 61% | K 从 4 提到 **8**；全部在途时**排队 500ms** 再 503；N=4 容量 32≥31、N=3 容量 24 仅 7 个排队 |
+| **Critical-3** B3 伪代码 normal 先选无 return、canary 不可达/双选/泄漏 | 伪代码改为互斥分支 + 显式 return；canary 必须 `strikes>0 && until<=now && !canaryInFlight`；租约 token 保证 exactly-once |
+| **Critical-4** 全局探测与 24h 预算冲突（N=3 时 480/IP/日；封顶则 24min 无探测） | 探测退避 **60s→2m→5m→15m→1h→6h**；探测 429 计入预算；**不承诺全程 ≤2min**，只承诺前两次探测间隔 |
+| **Critical-5** `strikes→0` 仍写 `until=ladder[0]` ⇒ 永久排除；`egress.go:143` 直连回退绕过 Admit | `strikes=0 ⇒ until=zero`；`egress.Get` 在全冷却时返回 `NoCandidate`，**禁止回退直连** |
+| **High-1** 租约生命周期未定义 | TTL 10min + `sync.Once` + 跨出口重试先 `Observe(abandoned)` |
+| **High-2** S2 的 190 个 5h 迁移未定义 | 迁移为 `strikes=1, until=now+5m`，5m 后 canary 恢复 |
