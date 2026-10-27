@@ -1,6 +1,6 @@
 # 节点系统 v5.3：一次全局重构（资格 · 选择 · 可观测）
 
-> **状态：DRAFT v5.3，待 R8-delta-2 复核。** 相对 v5.2 的核心修正：熔断从「60s 窗口 + 比例」改成 **「首个 429 即冷却」**，单位回到 **pair**。依据是真实日志回放：653e×mimo 的 429 从 **1,106 → 5**，41d×mimo **402 → 4**，4ad×mimo **20 → 1**，而 653e×deepseek 的 **0 个 429 完全不受影响**。
+> **状态：DRAFT v5.4，待 R8-delta-3 复核。** 相对 v5.2 的核心修正：熔断从「60s 窗口 + 比例」改成 **「首个 429 即冷却」**，单位回到 **pair**。依据是真实日志回放：653e×mimo 的 429 从 **1,106 → 5**，41d×mimo **402 → 4**，4ad×mimo **20 → 1**，而 653e×deepseek 的 **0 个 429 完全不受影响**。
 > 前情：T1/T2/T3 已写进 `test`（HEAD `da85f2b`），生产仍是 10-26 15:16 旧镜像。v3.x 被 R3/R4/R5 判过度设计；v4.1 被 R6 认可；v5/v5.1 被 R8 判 NO-GO；v5.2 被 R8-delta 判 6 个 blocker。
 
 ## 1. 现状为什么必须重构
@@ -220,13 +220,13 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
  "epoch":"2026-10-27T12:00:00+08:00",
  "pairs":{"model|egress":{"a":8,"b":2,"lastOK":0,"lastFail":0,"lastDecay":0,
                           "strikes":0,"until":0,"trips24h":[]}},
- "egress":{"fp":{"lifecycle":"active","consecFail":0,"deadUntil":0,"lastProbe":0,
-                 "directUntil":0}},
+ "egress":{"fp":{"lifecycle":"active","consecFail":0,"deadUntil":0,"lastProbe":0}},
+ "direct":{"until":0},
  "subs":{"sub":{"until":0,"reason":"403","n403":0,"last403":0,"pairs":[]}}}
 ```
 
 - 时间一律 int64 毫秒；`trips24h` 按 24h 滚动清理、cap 16（仅内存上限，不参与裁决）；`inflight` **不持久化**。
-- `direct` 的 pair key 写作 `model|direct`；egress 段不存 `direct`（无生命周期），只存 `directUntil` 字段于顶层 `direct` 键。
+- `direct` 的 pair key 写作 `model|direct`；egress 段不存 `direct`（无生命周期），整条直连的冷却存顶层 `direct.until`。
 - 上限：pair 最多 50k（活跃子集），空闲 30min 清理，**不淘汰 blocked**。
 - 迁移：旧 `NodeExhausted` 且 quota ⇒ `strikes=1, until=now+5m`；保留 dead/rejected；旧 `shape_drift` 状态丢弃。
 - **重启语义**：`strikes/until/trips24h` 保留；`inflight` 清零，最坏多放行 K 个请求（接受）。
