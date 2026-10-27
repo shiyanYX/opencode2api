@@ -46,6 +46,14 @@ type CallEvent struct {
 	SuppressedBy         string   `json:"suppressed_by,omitempty"`
 	WouldBeEgress        string   `json:"would_be_egress,omitempty"`
 	SuppressedCandidates []string `json:"suppressed_candidates,omitempty"`
+
+	// v5 shadow 事件字段（W1）。只在 type=v5_shadow/v5_outcome 时非零；
+	// 独立字段而不是塞 Detail，便于面板/回放直接解析。
+	Predicted string `json:"predicted,omitempty"`
+	Actual    string `json:"actual,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+	Class     string `json:"class,omitempty"`
+	Agree     *bool  `json:"agree,omitempty"`
 }
 
 type CallRecord struct {

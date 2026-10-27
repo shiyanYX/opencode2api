@@ -3003,6 +3003,14 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		// I2：本 attempt 实际发出的 UA 版本由本请求自己携带（builder 不再读全局），
 		// 否则 C1 的「失败 attempt 与确认 attempt 版本相同」不是不变量。
 		attemptVer := ocClientVersion()
+		v5Seen := false
+		v5Observe := func(status int, body []byte, err error) {
+			if v5Seen {
+				return
+			}
+			v5Seen = true
+			v5ObserveUpstream(ctx, modelID, egResult, status, body, err, attemptVer)
+		}
 		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp, attemptVer)
 		if err != nil {
 			return nil, 500, nil, err
@@ -3035,6 +3043,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			firstByteTimeout := noteAttemptTransportError(ctx, proxyPool, nodeFp, err)
+			v5Observe(0, nil, err)
 			lastErr = err
 			lastStatus = 0
 			retryReason := "transport_error"
@@ -3075,6 +3084,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
 			// 真实 2xx 是 probation 的唯一证据：拿到即转 available（其他状态无副作用）。
 			proxyPool.recordNodeSuccess(nodeFp)
+			v5Observe(resp.StatusCode, nil, nil)
 			// 该出口真的拿到 2xx ⇒ 喂给熔断闸门的恢复滞回（连续 2 次 + 间隔 ≥60s）。
 			// 这是本版解闩权的唯一来源：不再靠节点池状态推断该出口是否恢复。
 			quotaHaltGuard.observeSuccess(egResult.EgressKey())
@@ -3138,6 +3148,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+		v5Observe(resp.StatusCode, errBody, nil)
 
 		// T2：每次 FreeTier 403 都进池级窗口（未确认也计数，用于 halt）；达到阈值立即 fail-fast。
 		if resp.StatusCode == http.StatusForbidden && isFreeTierErrorBody(errBody) && nodeFp != "" {
@@ -3520,6 +3531,14 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		}
 		// I2：同非流式——版本由本请求携带，见上方注释。
 		attemptVer := ocClientVersion()
+		v5Seen := false
+		v5Observe := func(status int, body []byte, err error) {
+			if v5Seen {
+				return
+			}
+			v5Seen = true
+			v5ObserveUpstream(ctx, modelID, egResult, status, body, err, attemptVer)
+		}
 		up, err := buildOCRequestWithEndpoint(modelID, bodyMap, auth, useGoEndpoint, nodeFp, attemptVer)
 		if err != nil {
 			return nil, 500, nil, err
@@ -3549,6 +3568,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		durationMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			firstByteTimeout := noteAttemptTransportError(ctx, proxyPool, nodeFp, err)
+			v5Observe(0, nil, err)
 			retryReason := "transport_error"
 			canRetry := attempt+1 < maxUpstreamRetries
 			if !canRetry {
@@ -3587,6 +3607,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			callLogEvent(ctx, "connect_ok", nodeFp, "")
 			// 真实 2xx 是 probation 的唯一证据：拿到即转 available（其他状态无副作用）。
 			proxyPool.recordNodeSuccess(nodeFp)
+			v5Observe(resp.StatusCode, nil, nil)
 			// 同上：流式路径也必须喂恢复滞回，否则只有一半流量能积累恢复证据。
 			quotaHaltGuard.observeSuccess(egResult.EgressKey())
 			shapeDriftObserveSuccess(modelID, egResult.EgressKey(), time.Now())
@@ -3636,6 +3657,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		errBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		logUpstreamError(ctx, modelID, resp.StatusCode, errBody)
+		v5Observe(resp.StatusCode, errBody, nil)
 
 		// T2：每次 FreeTier 403 都进池级窗口（未确认也计数，用于 halt）；达到阈值立即 fail-fast。
 		if resp.StatusCode == http.StatusForbidden && isFreeTierErrorBody(errBody) && nodeFp != "" {
@@ -7718,6 +7740,9 @@ type statsRangeResponse struct {
 	// 会让那个 JSON 多出一个键，直接违约。而这个指标的语义本来就是**窗口内**的
 	// （它由小时桶折叠而来），放在带 range 的响应里才是自洽的。
 	UnmappedRequests UnmappedRequestsStats `json:"unmapped_requests"`
+
+	// V5 是 W1 影子接线字段：只在 range 响应上出现，off 时为 nil 并被 omitempty 隐藏。
+	V5 *V5Stats `json:"v5,omitempty"`
 }
 
 // UnmappedRequestsStats 是 /api/stats?range= 里 unmapped_requests 的形状。
@@ -7769,6 +7794,7 @@ func statsRangeResponseFor(rng string) statsRangeResponse {
 		Count:   uc,
 		ByModel: topUnmappedModels(ub, unmappedTopN),
 	}
+	out.V5 = v5StatsForResponse()
 	// ---- F1（Task 39）：展示层只输出「窗口内有成功」的模型 ----
 	//
 	// 用户口径：「概览的图表啥的只显示有成功的模型」。判据放在**后端出口**，
