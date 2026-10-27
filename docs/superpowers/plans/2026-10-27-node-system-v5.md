@@ -75,10 +75,10 @@ probe:
 ```text
 任意 429（含 FreeUsageLimitError）
   -> strikes = min(strikes+1, 4)
-  -> until   = now + ladder[strikes]        // 60s / 2m / 5m / 5m
+  -> until   = now + ladder[strikes-1]      // 60s / 2m / 5m / 5m
   -> trips24h 追加一条
 任意 2xx
-  -> strikes = 0；until = 0；consec429 = 0
+  -> strikes = 0；until = 0
 strikes 将要超过 4（即连续第 5 次 429，期间无任何 2xx）
   -> until = now + 24h（hard block），strikes 保持 4
 ```
@@ -201,7 +201,7 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `pair_cooldown_ladder` | 60s/2m/5m/5m | 首个 429 起的冷却递进，长度 4 |
-| `pair_trips_24h_cap` | 6 | 24h 冷却次数上限（需同时 strikes==4）→ hard block(24h) |
+| `pair_trips_24h_cap` | 16 | 仅内存上限/展示，不参与裁决；hard block 由「连续第 5 次 429」触发 |
 | `pair_hard_block` | 24h | 超限后的封锁时长 |
 | `egress_inflight_max` | 8 | 每出口在途上限（唯一口径） |
 | `direct_cooldown` | 60s | 直连 429 后整条直连冷却 |
@@ -299,4 +299,4 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 | **D3** probe 无单飞；190 个正常 2xx 不减 strikes | `probeMu + nextProbeAt` 单飞；**任意 2xx 即 strikes=0**，不需要等 probe |
 | **D4** `win*` cap 64 不精确、缺字段 | **删除 win 窗口**；新增 `lastDecay`、`sub.n403/last403`、`egress.directUntil`、`epoch`；`trips24h` cap 16 |
 | **D5** direct 429 未真正并入 | `pair=(model,direct)` + `egress.directUntil` 双写；`TestDirectCooldown` |
-| **D6** egress 熔断误伤其他 model；strikes 越界；trips24h=3 过硬 | **熔断回 pair**，653e×deepseek 实测 0 个 429 不受影响；strikes 上限 4；hard block 需 `trips24h>=6 且 strikes==4`，有 2xx 即清零 |
+| **D6** egress 熔断误伤其他 model；strikes 越界；trips24h=3 过硬 | **熔断回 pair**，653e×deepseek 实测 0 个 429 不受影响；strikes 上限 4；hard block 只看「连续第 5 次 429」，有 2xx 即清零（v5.4） |
