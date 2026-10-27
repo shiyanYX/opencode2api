@@ -3133,7 +3133,7 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 			)
 			// confirm-then-mark 的【确认侧】：只有「换了节点后成功」才 mark 原节点。
 			// 失败路径永不到这里 ⇒ 形态回归时池子零损伤。版本必须与失败那次一致（C1）。
-			if pendingBadFp != "" {
+			if !v5LegacyGatesBypassed() && pendingBadFp != "" {
 				if pendingVer != attemptVer {
 					callLogEvent(ctx, "freetier_confirm_rejected_version_changed", pendingBadFp,
 						fmt.Sprintf("failed_ver=%s confirm_ver=%s", pendingVer, attemptVer))
@@ -3665,7 +3665,7 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 			)
 			// 流式侧的「成功」是【响应头级】确认（body 一行未读；实测 connect_ok 里
 			// 0.67% 最终仍失败）——这是 v2 明确接受并记录在案的取舍（§6.2），不是疏漏。
-			if pendingBadFp != "" {
+			if !v5LegacyGatesBypassed() && pendingBadFp != "" {
 				if pendingVer != attemptVer {
 					callLogEvent(ctx, "freetier_confirm_rejected_version_changed", pendingBadFp,
 						fmt.Sprintf("failed_ver=%s confirm_ver=%s", pendingVer, attemptVer))

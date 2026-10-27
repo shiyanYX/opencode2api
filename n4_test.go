@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -636,5 +638,175 @@ func TestProbeObserveReleasesOnce(t *testing.T) {
 	defer a.mu.Unlock()
 	if len(a.probeActive) != 0 || a.probing || len(a.sems["node:e1"]) != 0 {
 		t.Fatalf("double observe residue: active=%v probing=%v sem=%d", a.probeActive, a.probing, len(a.sems["node:e1"]))
+	}
+}
+
+const f6FormRegressionBody = `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode."}}`
+const f6OKBody = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"}}]}\n\ndata: [DONE]\n\n"
+
+type f6RoundTripper func(*http.Request) (*http.Response, error)
+
+func (f f6RoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func f6Fixture(t *testing.T, behave map[string]func(*http.Request) (int, string)) (map[string]*ProxyNode, func()) {
+	t.Helper()
+	oldPool, oldEgress := proxyPool, egress
+	oldVer, oldGood := ocClientVer, ocVersionGood
+	oldInit, oldNSR := ocInitDone, noSessionRefresh
+	oldHook := testNodeClient
+	oldV5Path := v5StatePath
+	v5StatePath = filepath.Join(t.TempDir(), "v5_state.json")
+
+	p := newProxyPool(filepath.Join(t.TempDir(), "proxy_state.json"))
+	nodes := []*ProxyNode{
+		{Name: "n-A", Protocol: "socks5", Address: "127.0.0.1", Port: 11001},
+		{Name: "n-B", Protocol: "socks5", Address: "127.0.0.1", Port: 11002},
+		{Name: "n-C", Protocol: "socks5", Address: "127.0.0.1", Port: 11003},
+	}
+	p.setNodes(nodes)
+	for _, n := range nodes {
+		n.State = NodeAvailable
+		n.MarkedAt, n.CooldownUntil, n.LastUsedAt, n.LastProbeAt = time.Time{}, time.Time{}, time.Time{}, time.Time{}
+		n.LastError, n.GateState, n.LatencyMs = "", GateStateUnknown, 0
+	}
+	proxyPool = p
+	egress = NewEgressClient(http.DefaultClient)
+	ocInitDone = true
+	ocClientVer = pinnedOCVersion
+	ocVersionGood = pinnedOCVersion
+	noSessionRefresh = true
+	testNodeClient = func(n *ProxyNode) *http.Client {
+		be := behave[n.Name]
+		if be == nil {
+			be = func(*http.Request) (int, string) { return http.StatusOK, f6OKBody }
+		}
+		return &http.Client{Transport: f6RoundTripper(func(r *http.Request) (*http.Response, error) {
+			code, body := be(r)
+			return &http.Response{StatusCode: code, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{"Content-Type": []string{"application/json"}}, Request: r}, nil
+		})}
+	}
+	byName := map[string]*ProxyNode{}
+	for _, n := range nodes {
+		byName[n.Name] = n
+	}
+	cleanup := func() {
+		proxyPool, egress = oldPool, oldEgress
+		ocClientVer, ocVersionGood = oldVer, oldGood
+		ocInitDone, noSessionRefresh = oldInit, oldNSR
+		testNodeClient = oldHook
+		resetV5ForTest()
+		v5StatePath = oldV5Path
+	}
+	return byName, cleanup
+}
+
+type f6Snap struct {
+	State     NodeState
+	MarkedAt  time.Time
+	Cooldown  time.Time
+	LastError string
+	GateState string
+}
+
+func f6Snapshot(byName map[string]*ProxyNode) map[string]f6Snap {
+	out := map[string]f6Snap{}
+	for name, n := range byName {
+		out[name] = f6Snap{n.State, n.MarkedAt, n.CooldownUntil, n.LastError, n.GateState}
+	}
+	return out
+}
+
+func f6Events(ctx context.Context) []CallEvent {
+	cr := callRecorderFrom(ctx)
+	if cr == nil {
+		return nil
+	}
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	return append([]CallEvent(nil), cr.rec.Events...)
+}
+
+func f6Call(t *testing.T) (int, []CallEvent) {
+	t.Helper()
+	body := []byte(`{"model":"space-bunny-free","messages":[{"role":"user","content":"hi"}],"max_tokens":8}`)
+	ctx := beginCallLog(context.Background(), "/v1/chat/completions", "space-bunny-free", false, "public")
+	_, status, _, err := callOpenCodeAPI(ctx, body, "space-bunny-free", UpstreamAuth{Mode: AuthRoutePublic})
+	if err != nil && status == 0 {
+		t.Fatalf("callOpenCodeAPI err=%v status=0", err)
+	}
+	return status, f6Events(ctx)
+}
+
+func TestF6ForceSkipsFreeTierConfirm(t *testing.T) {
+	t.Setenv("NODE_SYSTEM", "force")
+	resetV5ForTest()
+	byName, cleanup := f6Fixture(t, map[string]func(*http.Request) (int, string){
+		"n-A": func(*http.Request) (int, string) { return http.StatusOK, f6OKBody },
+		"n-B": func(*http.Request) (int, string) { return http.StatusForbidden, f6FormRegressionBody },
+		"n-C": func(*http.Request) (int, string) { return http.StatusOK, f6OKBody },
+	})
+	defer cleanup()
+	before := f6Snapshot(byName)
+	phase := 0
+	hook := func(model string) []Candidate {
+		if phase < 2 {
+			phase++
+			return []Candidate{{Egress: nodeEgressKey(byName["n-B"].Fingerprint), Sub: "n-B", Model: model}}
+		}
+		phase++
+		return []Candidate{{Egress: nodeEgressKey(byName["n-A"].Fingerprint), Sub: "n-A", Model: model}}
+	}
+	for i := 0; i < 20; i++ {
+		resetV5ForTest()
+		phase = 0
+		v5CandidatesHook = hook
+		status, evs := f6Call(t)
+		if status != http.StatusOK {
+			t.Fatalf("iteration %d status=%d", i, status)
+		}
+		for _, e := range evs {
+			if strings.HasPrefix(e.Type, "freetier_confirm_") || e.Type == "freetier_node_confirmed_bad" {
+				t.Fatalf("iteration %d force emitted %s", i, e.Type)
+			}
+		}
+	}
+	after := f6Snapshot(byName)
+	for name := range before {
+		if before[name] != after[name] {
+			t.Fatalf("force confirmation changed %s: %+v -> %+v", name, before[name], after[name])
+		}
+	}
+	proxyPool.mu.RLock()
+	subs := len(proxyPool.sub403)
+	proxyPool.mu.RUnlock()
+	if subs != 0 || proxyPool.poolHalted(time.Now()) {
+		t.Fatalf("force confirmation polluted pool: subs=%d halted=%v", subs, proxyPool.poolHalted(time.Now()))
+	}
+}
+
+func TestF6OffStillConfirms(t *testing.T) {
+	t.Setenv("NODE_SYSTEM", "off")
+	resetV5ForTest()
+	byName, cleanup := f6Fixture(t, map[string]func(*http.Request) (int, string){
+		"n-A": func(*http.Request) (int, string) { return http.StatusForbidden, f6FormRegressionBody },
+		"n-B": func(*http.Request) (int, string) { return http.StatusOK, f6OKBody },
+		"n-C": func(*http.Request) (int, string) { return http.StatusOK, f6OKBody },
+	})
+	defer cleanup()
+	status, evs := f6Call(t)
+	if status != http.StatusOK {
+		t.Fatalf("status=%d", status)
+	}
+	if byName["n-A"].State != NodeExhausted {
+		t.Fatalf("n-A=%s, want exhausted", byName["n-A"].State)
+	}
+	found := false
+	for _, e := range evs {
+		if e.Type == "freetier_node_confirmed_bad" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("off confirmation event missing: %v", evs)
 	}
 }
