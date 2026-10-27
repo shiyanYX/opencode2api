@@ -356,3 +356,33 @@ sticky 会话粘住，失败才换；换出口排除同 sub、同 /24
 | **D4** `win*` cap 64 不精确、缺字段 | **删除 win 窗口**；新增 `lastDecay`、`sub.n403/last403`、顶层 `direct.until`、`epoch`；`trips24h` cap 16 |
 | **D5** direct 429 未真正并入 | `pair=(model,direct)` + 顶层 `direct.until` 双写；`TestDirectCooldown` |
 | **D6** egress 熔断误伤其他 model；strikes 越界；trips24h=3 过硬 | **熔断回 pair**，653e×deepseek 实测 0 个 429 不受影响；strikes 上限 4；hard block 只看「连续第 5 次 429」，有 2xx 即清零（v5.4） |
+
+## 13. v5.7 修正（生产日志驱动，2026-10-27）
+
+### 13.1 依据（10-24 / 10-26 / 10-27 三天真实日志）
+
+- 173 个节点被 429 过，共 27,702 次 429。
+- 429 后同一节点（任意 model）**1 小时内成功 0/589；48 小时内恢复 0%；72 小时内 49.7%；最终 54.9% 会回来**。
+- 同一 pair 连续两次 429 的间隔 **99% 在 10 分钟内**（中位数 0 秒）——60s 冷却阶梯是重复 429 的主因。
+- 09:10–09:40、11:00–12:22、14:30–15:07 三段 100% 失败期间，实际只有 **1–7 个节点在服务**；state 里 212 个节点（117 available / 75 dead / 20 exhausted）。
+- 结论：可用容量远小于名义容量；必须**少烧、慢恢复、全池熔断**。
+
+### 13.2 规则变更
+
+1. **429 冷却阶梯改为 30m / 2h / 8h / 24h / 72h（封顶）**，`strikes` 在任意 2xx 时清零。删除 60s/2m/5m 阶梯与额外 hard block（阶梯本身即上限）。
+2. **取消 pair 专用 probe**。`until` 到期后以 **score × 0.05** 重新参与选路（半开），连续 2 次 2xx 恢复正常权重；再次 429 走下一级。
+3. **全池闸（winter gate）**：5 分钟窗口内 **≥3 个不同 egress** 出现 429 → 全池暂停 60s，连续触发翻倍到 15min。暂停期间零 attempt，直接返回 429 + `Retry-After: 60`。
+4. **闸的退出**：暂停期间每 60s 用 **direct 作免费金丝雀**（不消耗节点）；direct 成功才允许 1 次节点探测；节点 2xx 才解除暂停。direct 失败则继续暂停，不碰节点。
+5. **`NoCandidate` 不再回退直连**：所有 pair 冷却时返回 429 + `Retry-After: 60`（计划 §7 原语义），direct 仅是普通 candidate。
+6. **每请求 attempt 上限 2**（force）：首次失败换出口，第二次失败即返回。
+7. **状态持久化**：`/data/v5_state.json`，变更后 2s 防抖落盘，启动时加载；文件损坏则从空状态开始并记事件。
+8. **force 下旁路旧状态写入**：`recordNodeSuccess`、`quotaHaltGuard.observeSuccess/observeFailure`、`shapeDriftObserve*` 一律不写。
+
+### 13.3 断言
+
+- `TestPairLadder`：连续 429 依次产生 30m/2h/8h/24h/72h；中间任意 2xx 归零。
+- `TestNoReburnWithin10m`：真实夹具回放，同一 pair 10 分钟内第二次 429 = 0。
+- `TestGateTrips`：5 分钟 3 个不同 egress 429 → 暂停；暂停期零 attempt；direct 金丝雀成功后 1 次节点探测解除。
+- `TestNoCandidateNoDirect`：全冷却时 `Get` 不返回直连，main 返回 429 + Retry-After。
+- `TestMaxTwoAttempts`：force 下单个请求最多 2 次上游 attempt。
+- `TestV5StatePersist`：保存后重启（重载）`until/strikes/gate` 一致。
