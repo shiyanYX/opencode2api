@@ -171,7 +171,7 @@ func (rt *v5Runtime) persistIfDue(now time.Time) {
 	rt.persistMu.Unlock()
 
 	rt.adm.mu.Lock()
-	err := SaveNodeStateV5(path, rt.adm.st)
+	err := SaveNodeStateV5(path, rt.adm.st, rt.adm)
 	rt.adm.mu.Unlock()
 	if err != nil {
 		slog.Warn("v5_state_save_failed", "path", path, "error", err)

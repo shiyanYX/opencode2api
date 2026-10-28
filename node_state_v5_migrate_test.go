@@ -43,7 +43,7 @@ func TestR8Migration190(t *testing.T) {
 	}
 
 	got := MigrateV2(src, now)
-	if got == nil || got.Version != 5 {
+	if got == nil || got.Version != nodeStateV6Version {
 		t.Fatalf("migrate returned %#v", got)
 	}
 	if len(got.Pairs) != 190 {

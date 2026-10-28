@@ -7,15 +7,34 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const (
-	nodeStateV5Version  = 5
+	nodeStateV6Version  = 6
+	nodeStateV5Version  = nodeStateV6Version
+	nodeStateV6MaxQuota = 4096
+	nodeStateV6MaxSeen  = 64
 	nodeStateV5MaxPairs = 50000
 	nodeStateV5Idle     = 30 * time.Minute
 	nodeStateV5TripCap  = 16
 )
+
+// quotaDropped counts new quota keys rejected because all 4096 slots are
+// active. It is intentionally package-level and atomic, never a writable global.
+var quotaDropped atomic.Int64
+
+func quotaKey(sub, model string) string { return sub + "|" + model }
+
+type QuotaState struct {
+	Until int64            `json:"until"`
+	Since int64            `json:"since"`
+	Seen  map[string]int64 `json:"seen"`
+	Hits  int              `json:"hits"`
+	Nodes int              `json:"nodes"`
+}
 
 // NodeStateV5 is the persisted data layer for the v5 node system.
 // All timestamps are Unix milliseconds; inflight is deliberately not stored.
@@ -27,6 +46,9 @@ type NodeStateV5 struct {
 	Direct  *DirectState            `json:"direct"`
 	Subs    map[string]*SubState    `json:"subs"`
 	Gate    *GateState              `json:"gate"`
+	Quota   map[string]*QuotaState  `json:"quota"`
+
+	migrationFailed bool
 }
 
 type PairState struct {
@@ -52,6 +74,7 @@ type GateState struct {
 	Egresses      map[string]int64 `json:"egresses,omitempty"`
 	NextCanary    int64            `json:"nextCanary"`
 	CanaryOK      bool             `json:"canaryOK"`
+	CanaryLevel   int              `json:"canaryLevel"`
 	NodeProbeUsed bool             `json:"nodeProbeUsed"`
 	// 5 分钟窗口计数器：B1 触发必须同时满足 distinct >=3、样本 >=10、失败率 >=50%。
 	WindowStart int64 `json:"windowStart"`
@@ -91,6 +114,7 @@ func NewNodeStateV5(now time.Time) *NodeStateV5 {
 		Direct:  &DirectState{},
 		Subs:    map[string]*SubState{},
 		Gate:    &GateState{Egresses: map[string]int64{}},
+		Quota:   map[string]*QuotaState{},
 	}
 }
 
@@ -102,6 +126,7 @@ func emptyNodeStateV5() *NodeStateV5 {
 		Direct:  &DirectState{},
 		Subs:    map[string]*SubState{},
 		Gate:    &GateState{Egresses: map[string]int64{}},
+		Quota:   map[string]*QuotaState{},
 	}
 }
 
@@ -118,7 +143,8 @@ func LoadNodeStateV5(path string) *NodeStateV5 {
 }
 
 // loadNodeStateV5 returns the load error so the runtime can emit one event on
-// corrupt/unsupported state. A missing file is not an error.
+// corrupt/unsupported state. A missing file is not an error. Version 5 files
+// are migrated to v6 and backed up before being rewritten.
 func loadNodeStateV5(path string) (*NodeStateV5, error) {
 	st := emptyNodeStateV5()
 	if path == "" {
@@ -129,45 +155,35 @@ func loadNodeStateV5(path string) (*NodeStateV5, error) {
 		if errors.Is(err, os.ErrNotExist) {
 			return st, nil
 		}
+		st.migrationFailed = true
 		return st, err
 	}
-	var loaded NodeStateV5
-	if err := json.Unmarshal(data, &loaded); err != nil {
+	var meta struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		st.migrationFailed = true
 		return st, err
 	}
-	if loaded.Version != nodeStateV5Version {
-		return st, fmt.Errorf("v5 state version %d, want %d", loaded.Version, nodeStateV5Version)
+	switch meta.Version {
+	case nodeStateV6Version:
+		var loaded NodeStateV5
+		if err := json.Unmarshal(data, &loaded); err != nil {
+			st.migrationFailed = true
+			return st, err
+		}
+		loaded.Version = nodeStateV6Version
+		initNodeStateV5(&loaded)
+		return &loaded, nil
+	case 5:
+		return migrateV5File(path, data, st)
+	default:
+		st.migrationFailed = true
+		return st, fmt.Errorf("node state version %d, want %d", meta.Version, nodeStateV6Version)
 	}
-	if loaded.Pairs == nil {
-		loaded.Pairs = map[string]*PairState{}
-	}
-	if loaded.Egress == nil {
-		loaded.Egress = map[string]*EgressState{}
-	}
-	if loaded.Direct == nil {
-		loaded.Direct = &DirectState{}
-	}
-	if loaded.Subs == nil {
-		loaded.Subs = map[string]*SubState{}
-	}
-	if loaded.Gate == nil {
-		loaded.Gate = &GateState{}
-	}
-	if loaded.Gate.Egresses == nil {
-		loaded.Gate.Egresses = map[string]int64{}
-	}
-	return &loaded, nil
 }
 
-// SaveNodeStateV5 atomically writes node_state_v5.json (temp file + rename, 0644).
-func SaveNodeStateV5(path string, st *NodeStateV5) error {
-	if st == nil {
-		return errors.New("nil node state")
-	}
-	if path == "" {
-		return errors.New("empty node state path")
-	}
-	st.Version = nodeStateV5Version
+func initNodeStateV5(st *NodeStateV5) {
 	if st.Pairs == nil {
 		st.Pairs = map[string]*PairState{}
 	}
@@ -186,6 +202,116 @@ func SaveNodeStateV5(path string, st *NodeStateV5) error {
 	if st.Gate.Egresses == nil {
 		st.Gate.Egresses = map[string]int64{}
 	}
+	if st.Quota == nil {
+		st.Quota = map[string]*QuotaState{}
+	}
+}
+
+func migrateV5File(path string, data []byte, failed *NodeStateV5) (*NodeStateV5, error) {
+	var old NodeStateV5
+	if err := json.Unmarshal(data, &old); err != nil {
+		failed.migrationFailed = true
+		return failed, err
+	}
+	out := migrateV5State(&old, Now())
+	backup := v5BackupPath(path)
+	if err := os.WriteFile(backup, data, 0o644); err != nil {
+		failed.migrationFailed = true
+		return failed, fmt.Errorf("backup v5 state: %w", err)
+	}
+	if err := writeNodeStateFile(path, out); err != nil {
+		failed.migrationFailed = true
+		return failed, err
+	}
+	return out, nil
+}
+
+func v5BackupPath(path string) string {
+	if strings.HasSuffix(path, ".json") {
+		return strings.TrimSuffix(path, ".json") + ".v5.bak"
+	}
+	return path + ".v5.bak"
+}
+
+func migrateV5State(old *NodeStateV5, now time.Time) *NodeStateV5 {
+	out := emptyNodeStateV5()
+	out.Epoch = old.Epoch
+	out.Egress = old.Egress
+	if out.Egress == nil {
+		out.Egress = map[string]*EgressState{}
+	}
+	out.Direct = old.Direct
+	if out.Direct == nil {
+		out.Direct = &DirectState{}
+	}
+	out.Gate = old.Gate
+	if out.Gate == nil {
+		out.Gate = &GateState{}
+	}
+	if out.Gate.Egresses == nil {
+		out.Gate.Egresses = map[string]int64{}
+	}
+	out.Subs = map[string]*SubState{}
+	out.Quota = map[string]*QuotaState{}
+	nowMS := now.UnixMilli()
+	for key, p := range old.Pairs {
+		if p == nil {
+			continue
+		}
+		idx := strings.LastIndex(key, "|")
+		if idx < 0 {
+			continue
+		}
+		egress := key[idx+1:]
+		if egress == "direct" || p.Until > nowMS || p.Strikes != 0 || p.A+p.B < 3 {
+			continue
+		}
+		nk := PairKey(legacyPairModel, egress)
+		dst := out.Pairs[nk]
+		if dst == nil {
+			dst = &PairState{}
+			out.Pairs[nk] = dst
+		}
+		dst.A += p.A
+		dst.B += p.B
+		if p.LastOK > dst.LastOK {
+			dst.LastOK = p.LastOK
+		}
+		if p.LastFail > dst.LastFail {
+			dst.LastFail = p.LastFail
+		}
+		if p.LastDecay > dst.LastDecay {
+			dst.LastDecay = p.LastDecay
+		}
+	}
+	return out
+}
+
+// SaveNodeStateV5 atomically writes node_state_v5.json (temp file + rename, 0644).
+// A nil admission or a failed migration is a hard error: callers must never
+// silently replace a state file they failed to read/migrate.
+func SaveNodeStateV5(path string, st *NodeStateV5, admission *Admission) error {
+	if admission == nil {
+		return errors.New("nil admission")
+	}
+	if st == nil {
+		return errors.New("nil node state")
+	}
+	if st.migrationFailed {
+		return errors.New("node state migration failed; refusing to save")
+	}
+	return writeNodeStateFile(path, st)
+}
+
+func writeNodeStateFile(path string, st *NodeStateV5) error {
+	if st == nil {
+		return errors.New("nil node state")
+	}
+	if path == "" {
+		return errors.New("empty node state path")
+	}
+	st.Version = nodeStateV6Version
+	initNodeStateV5(st)
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
@@ -215,6 +341,157 @@ func SaveNodeStateV5(path string, st *NodeStateV5) error {
 		return fmt.Errorf("rename node state: %w", err)
 	}
 	return nil
+}
+
+// setQuotaLocked inserts or updates one quota key. It returns false when a new
+// key is rejected because all slots are held by active gates.
+func (st *NodeStateV5) setQuotaLocked(key string, q *QuotaState) bool {
+	if st == nil || key == "" || q == nil {
+		return false
+	}
+	if st.Quota == nil {
+		st.Quota = map[string]*QuotaState{}
+	}
+	if q.Seen == nil {
+		q.Seen = map[string]int64{}
+	}
+	now := Now().UnixMilli()
+	window := int64((10 * time.Minute) / time.Millisecond)
+	trimQuotaSeen(q)
+	if _, exists := st.Quota[key]; exists {
+		st.Quota[key] = q
+		return true
+	}
+	// Always clear fully expired windows before applying the cap.
+	for k, v := range st.Quota {
+		if v != nil && v.Until <= now && v.Since+window <= now {
+			delete(st.Quota, k)
+		}
+	}
+	if len(st.Quota) < nodeStateV6MaxQuota {
+		st.Quota[key] = q
+		return true
+	}
+	// Then evict only an expired gate, oldest Since first. Never evict active.
+	var oldestKey string
+	var oldestSince int64
+	for k, v := range st.Quota {
+		if v == nil || v.Until > now {
+			continue
+		}
+		if oldestKey == "" || v.Since < oldestSince {
+			oldestKey, oldestSince = k, v.Since
+		}
+	}
+	if oldestKey != "" {
+		delete(st.Quota, oldestKey)
+		st.Quota[key] = q
+		return true
+	}
+	quotaDropped.Add(1)
+	return false
+}
+
+func trimQuotaSeen(q *QuotaState) {
+	if q == nil {
+		return
+	}
+	for len(q.Seen) > nodeStateV6MaxSeen {
+		var oldestKey string
+		var oldest int64
+		for k, ts := range q.Seen {
+			if oldestKey == "" || ts < oldest {
+				oldestKey, oldest = k, ts
+			}
+		}
+		delete(q.Seen, oldestKey)
+	}
+}
+
+// QuotaDropped returns the number of quota events dropped by the cap.
+func QuotaDropped() int64 { return quotaDropped.Load() }
+
+func (a *Admission) pairUntilLocked(model, egress string) int64 {
+	if a == nil || a.st == nil || egress == "" {
+		return 0
+	}
+	if p := a.st.Pairs[PairKey(model, egress)]; p != nil {
+		return p.Until
+	}
+	if p := a.st.Pairs[PairKey(legacyPairModel, egress)]; p != nil {
+		return p.Until
+	}
+	return 0
+}
+
+func (a *Admission) egressDeadUntil(egress string) int64 {
+	if a == nil || a.st == nil || egress == "" {
+		return 0
+	}
+	if e := a.st.Egress[egress]; e != nil {
+		return e.DeadUntil
+	}
+	return 0
+}
+
+func (a *Admission) quotaUntilLocked(sub, model string) int64 {
+	if a == nil || a.st == nil || sub == "" {
+		return 0
+	}
+	if q := a.st.Quota[quotaKey(sub, model)]; q != nil {
+		return q.Until
+	}
+	return 0
+}
+
+func (a *Admission) directUntilLocked() int64 {
+	if a == nil || a.st == nil || a.st.Direct == nil {
+		return 0
+	}
+	return a.st.Direct.Until
+}
+
+func (a *Admission) subUntilLocked(sub string) int64 {
+	if a == nil || a.st == nil || sub == "" {
+		return 0
+	}
+	if s := a.st.Subs[sub]; s != nil {
+		return s.Until
+	}
+	return 0
+}
+
+func (a *Admission) minQuotaUntilLocked(model string) int64 {
+	if a == nil || a.st == nil || model == "" {
+		return 0
+	}
+	var min int64
+	for key, q := range a.st.Quota {
+		idx := strings.LastIndex(key, "|")
+		if idx < 0 || key[idx+1:] != model || q == nil || q.Until == 0 {
+			continue
+		}
+		if min == 0 || q.Until < min {
+			min = q.Until
+		}
+	}
+	return min
+}
+
+func (a *Admission) noCandidateRetry(model string) (time.Duration, string) {
+	minUntil := a.minQuotaUntilLocked(model)
+	if minUntil == 0 {
+		return 60 * time.Second, "no_candidate"
+	}
+	now := Now()
+	if a != nil {
+		now = a.now()
+	}
+	d := time.Duration(minUntil-now.UnixMilli()) * time.Millisecond
+	if d < time.Second {
+		d = time.Second
+	}
+	return d, "no_candidate"
 }
 
 // pruneLocked trims trips24h, removes idle unblocked pairs, and enforces the

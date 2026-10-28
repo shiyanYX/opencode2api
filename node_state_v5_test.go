@@ -41,7 +41,7 @@ func TestR8StateRoundTrip(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "node_state_v5.json")
-	if err := SaveNodeStateV5(path, st); err != nil {
+	if err := SaveNodeStateV5(path, st, NewAdmission(st, 8, nil)); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	got := LoadNodeStateV5(path)
@@ -65,8 +65,8 @@ func TestR8StateRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("json: %v", err)
 	}
-	if doc.Version != 5 {
-		t.Fatalf("version = %d, want 5", doc.Version)
+	if doc.Version != nodeStateV6Version {
+		t.Fatalf("version = %d, want %d", doc.Version, nodeStateV6Version)
 	}
 	p := doc.Pairs[pairKey]
 	if p.LastOK == 0 || p.LastFail == 0 || p.LastDecay == 0 || len(p.Trips24h) != 1 {
@@ -85,7 +85,7 @@ func TestR8RestartBlocked(t *testing.T) {
 	st.Pairs[key] = &PairState{Strikes: 2, Hard: 1, Until: until}
 
 	path := filepath.Join(t.TempDir(), "node_state_v5.json")
-	if err := SaveNodeStateV5(path, st); err != nil {
+	if err := SaveNodeStateV5(path, st, NewAdmission(st, 8, nil)); err != nil {
 		t.Fatalf("save: %v", err)
 	}
 	got := LoadNodeStateV5(path)
@@ -147,7 +147,7 @@ func TestR8CorruptFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := LoadNodeStateV5(path)
-	if got == nil || got.Version != 5 || len(got.Pairs) != 0 || len(got.Egress) != 0 {
+	if got == nil || got.Version != nodeStateV6Version || len(got.Pairs) != 0 || len(got.Egress) != 0 {
 		t.Fatalf("corrupt load = %#v, want empty v5 state", got)
 	}
 
@@ -155,7 +155,7 @@ func TestR8CorruptFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	got = LoadNodeStateV5(path)
-	if got == nil || got.Version != 5 || len(got.Pairs) != 0 {
+	if got == nil || got.Version != nodeStateV6Version || len(got.Pairs) != 0 {
 		t.Fatalf("version mismatch load = %#v, want empty v5 state", got)
 	}
 }
