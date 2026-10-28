@@ -458,9 +458,8 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 			return
 		}
 		a.observeGateOutcomeLocked(at, class, now, nowMS)
-		if a.gateLocked(now).Active && (class == Outcome429 || class == OutcomeQuotaUnknown) {
-			return
-		}
+		// Manual probes are the only evidence channel while the gate is active;
+		// never discard their quota signal just because the gate is open.
 		a.observeUpstreamLocked(at, class, now, nowMS, true)
 	case AttemptGateProbe, AttemptCanary:
 		a.observeGateOutcomeLocked(at, class, now, nowMS)
@@ -1077,6 +1076,15 @@ func canaryBackoff(level int) time.Duration {
 
 // ObserveManualProbe is the single entry for operator/scheduled probes. It
 // never acquires or releases a lease and never changes inflight counters.
+// SetProbeCountsTowardGate hot-reloads whether manual probes count toward the
+// winter gate. It takes a.mu itself so callers do not rely on admission lock
+// ordering.
+func (a *Admission) SetProbeCountsTowardGate(v bool) {
+	a.mu.Lock()
+	a.probeCountsTowardGate = v
+	a.mu.Unlock()
+}
+
 func (a *Admission) ObserveManualProbe(at *Attempt, class OutcomeClass) {
 	if at == nil {
 		return
@@ -1092,6 +1100,41 @@ func (a *Admission) ObserveManualProbe(at *Attempt, class OutcomeClass) {
 	}
 	a.mu.Unlock()
 	a.Observe(at, class)
+	if class == Outcome429 || class == OutcomeQuotaUnknown {
+		a.activateManualQuota(at, class)
+	}
+}
+
+// activateManualQuota makes an explicit probe's quota signal immediately
+// authoritative. Normal traffic still needs the ordinary 2-egress/3-hit
+// evidence, but a manual probe is a deliberate single-egress test.
+func (a *Admission) activateManualQuota(at *Attempt, class OutcomeClass) {
+	if at == nil || at.Egress == "" || (class != Outcome429 && class != OutcomeQuotaUnknown) {
+		return
+	}
+	sub := at.Sub
+	if sub == "" {
+		sub = at.sub
+	}
+	if sub == "" || sub == "direct" || at.Model == "" {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	nowMS := now.UnixMilli()
+	key := quotaKey(sub, at.Model)
+	q := a.st.Quota[key]
+	if q == nil {
+		q = &QuotaState{Since: nowMS, Seen: map[string]int64{}, Nodes: at.Nodes}
+	}
+	if q.Until <= nowMS {
+		q.Until = now.Add(quotaGateWindow).UnixMilli()
+	}
+	if q.Nodes == 0 {
+		q.Nodes = at.Nodes
+	}
+	a.st.setQuotaLockedAt(key, q, nowMS)
 }
 
 func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, now time.Time, nowMS int64) {

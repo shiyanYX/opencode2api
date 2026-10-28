@@ -232,3 +232,45 @@ func TestAdmitErrorQuotaRetryAndHTTP(t *testing.T) {
 		t.Fatalf("retry-after=%q want 60", h.Get("Retry-After"))
 	}
 }
+
+func TestManualProbeQuotaWhileGateActive(t *testing.T) {
+	a, _, st := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Sub: "sub", Model: "m"})
+	st.Gate.Active = true
+	st.Gate.PausedUntil = a.now().Add(10 * time.Minute).UnixMilli()
+	at := &Attempt{Model: "m", Egress: "node:e1", Sub: "sub", Stage: ProbeStageRequest}
+	a.ObserveManualProbe(at, Outcome429)
+	q := st.Quota[quotaKey("sub", "m")]
+	if q == nil || q.Until <= a.now().UnixMilli() {
+		t.Fatalf("quota=%+v, want active quota during gate", q)
+	}
+	if !st.Gate.Active || st.Gate.PausedUntil == 0 {
+		t.Fatalf("manual probe must not clear active gate: %+v", st.Gate)
+	}
+}
+
+func TestProbeGateConfigHotReload(t *testing.T) {
+	resetV5ForTest()
+	t.Setenv("NODE_SYSTEM", "force")
+	rt := v5GetRuntime()
+	if rt == nil {
+		t.Fatal("runtime not created")
+	}
+	defer resetV5ForTest()
+	at := &Attempt{Model: "m", Egress: "node:e1", Sub: "sub"}
+	v5ApplyProbeGateConfig(true)
+	rt.adm.ObserveManualProbe(at, Outcome2xx)
+	if !at.GateCount {
+		t.Fatal("GateCount did not follow hot-reloaded true")
+	}
+	at2 := &Attempt{Model: "m", Egress: "node:e1", Sub: "sub"}
+	v5ApplyProbeGateConfig(false)
+	rt.adm.ObserveManualProbe(at2, Outcome2xx)
+	if at2.GateCount {
+		t.Fatal("GateCount did not follow hot-reloaded false")
+	}
+	resetV5ForTest()
+	v5ApplyProbeGateConfig(true) // nil runtime must be a no-op
+	if v5RT != nil {
+		t.Fatal("hot-reload created a runtime")
+	}
+}

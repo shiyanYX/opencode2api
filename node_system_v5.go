@@ -149,6 +149,18 @@ func v5GetRuntime() *v5Runtime {
 	return v5RT
 }
 
+// v5ApplyProbeGateConfig updates an already-created runtime in place. It must
+// not create a runtime (config may be applied before NODE_SYSTEM is enabled).
+func v5ApplyProbeGateConfig(v bool) {
+	v5RTMu.Lock()
+	rt := v5RT
+	v5RTMu.Unlock()
+	if rt == nil {
+		return
+	}
+	rt.adm.SetProbeCountsTowardGate(v)
+}
+
 // markDirty records a state mutation; the actual write is debounced by
 // persistIfDue (2s) so a burst of 429s does not fsync on every attempt.
 func (rt *v5Runtime) markDirty() {

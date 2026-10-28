@@ -1414,6 +1414,7 @@ func applyConfig(cfg AppConfig) {
 		proxyPool.probeInterval = 0 // 未设 → 默认 15min
 	}
 	proxyPool.probeURL = cfg.NodeHealthProbeURL
+	v5ApplyProbeGateConfig(cfg.ProbeCountsTowardGate)
 }
 
 var (
