@@ -78,6 +78,7 @@ type GateState struct {
 	NextCanary    int64            `json:"nextCanary"`
 	CanaryOK      bool             `json:"canaryOK"`
 	CanaryLevel   int              `json:"canaryLevel"`
+	Epoch         int64            `json:"epoch"`
 	NodeProbeUsed bool             `json:"nodeProbeUsed"`
 	// 5 分钟窗口计数器：B1 触发必须同时满足 distinct >=3、样本 >=10、失败率 >=50%。
 	WindowStart int64 `json:"windowStart"`

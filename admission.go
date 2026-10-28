@@ -75,6 +75,7 @@ type Attempt struct {
 	// GateCount controls the winter gate 5-minute window. Normal traffic must
 	// set it explicitly; probe/gate/canary attempts never count.
 	GateCount bool
+	GateEpoch int64
 	Stage     ProbeStage
 	Sub       string
 	Nodes     int
@@ -226,6 +227,7 @@ func (a *Admission) AdmitPreferred(model string, exclude map[string]bool, prefer
 				return nil, "all_inflight"
 			}
 			at.Nodes = a.nodesForSubLocked(model, c.Sub)
+			a.stampGateEpochLocked(at)
 			return at, ""
 		}
 	}
@@ -242,6 +244,7 @@ func (a *Admission) AdmitPreferred(model string, exclude map[string]bool, prefer
 		at, ok := a.acquireLocked(c, model, true)
 		if ok {
 			at.Nodes = a.nodesForSubLocked(model, c.Sub)
+			a.stampGateEpochLocked(at)
 			return at, ""
 		}
 	}
@@ -252,10 +255,18 @@ func (a *Admission) AdmitPreferred(model string, exclude map[string]bool, prefer
 		at, ok := a.acquireLocked(c, model, false)
 		if ok {
 			at.Nodes = a.nodesForSubLocked(model, c.Sub)
+			a.stampGateEpochLocked(at)
 			return at, ""
 		}
 	}
 	return nil, "all_inflight"
+}
+
+func (a *Admission) stampGateEpochLocked(at *Attempt) {
+	if at == nil {
+		return
+	}
+	at.GateEpoch = a.gateLocked(a.now()).Epoch
 }
 
 // retryCandidatesLocked applies only static filters (empty egress/exclude), so
@@ -1230,6 +1241,9 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 	if !at.GateCount {
 		return
 	}
+	if at.GateEpoch != g.Epoch {
+		return
+	}
 
 	// Tumbling 5-minute sample window.
 	if g.WindowStart == 0 || nowMS-g.WindowStart >= gateWindow.Milliseconds() {
@@ -1266,6 +1280,7 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 		pause = gateMaxPause
 	}
 	g.Active = true
+	g.Epoch++
 	g.PausedUntil = nowMS + pause.Milliseconds()
 	g.NextCanary = g.PausedUntil
 	g.NextNodeProbe = nowMS + gateEscapeDelay.Milliseconds()
@@ -1281,6 +1296,7 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 
 func (a *Admission) clearGateLocked(nowMS int64) {
 	g := a.gateLocked(a.now())
+	g.Epoch++
 	g.Active = false
 	g.PausedUntil = 0
 	g.CanaryOK = false

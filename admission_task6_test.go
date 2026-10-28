@@ -183,3 +183,44 @@ func TestShadowQuotaLogThrottled(t *testing.T) {
 		t.Fatalf("enforce moved shadow counter: %d -> %d", before, a.shadowQuotaBlocks)
 	}
 }
+
+func TestGateEpochStaleInFlight(t *testing.T) {
+	a, clock, st := newAdmissionTest(t, 20,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s"},
+		Candidate{Egress: "node:e3", Model: "m", Sub: "s"},
+	)
+	at, reason := a.AdmitPreferred("m", nil, "")
+	if at == nil {
+		t.Fatalf("admit: %s", reason)
+	}
+	if at.GateEpoch != st.Gate.Epoch {
+		t.Fatalf("attempt epoch=%d gate=%d", at.GateEpoch, st.Gate.Epoch)
+	}
+
+	// Simulate a clear while ten attempts are already in flight.
+	a.clearGateLocked(clock.Now().UnixMilli())
+	for i := 0; i < 10; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3)), GateCount: true, GateEpoch: 0}, Outcome5xx)
+	}
+	if st.Gate.Active {
+		t.Fatalf("stale in-flight 5xx rebuilt gate: %+v", st.Gate)
+	}
+
+	// Attempts stamped with the new epoch can rebuild it.
+	for i := 0; i < 10; i++ {
+		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3)), GateCount: true, GateEpoch: st.Gate.Epoch}, Outcome5xx)
+	}
+	if !st.Gate.Active {
+		t.Fatalf("new-epoch 5xx did not rebuild gate: %+v", st.Gate)
+	}
+	if st.Gate.Epoch < 2 {
+		t.Fatalf("trip did not advance epoch: %+v", st.Gate)
+	}
+
+	// A stale 2xx from before the trip must not clear the new gate.
+	a.Observe(&Attempt{Model: "m", Egress: "node:e1", GateCount: true, GateEpoch: 0}, Outcome2xx)
+	if !st.Gate.Active {
+		t.Fatal("stale 2xx cleared new gate")
+	}
+}
