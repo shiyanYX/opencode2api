@@ -653,6 +653,7 @@ func f6Fixture(t *testing.T, behave map[string]func(*http.Request) (int, string)
 		byName[n.Name] = n
 	}
 	cleanup := func() {
+		p.waitStateSaves()
 		proxyPool, egress = oldPool, oldEgress
 		ocClientVer, ocVersionGood = oldVer, oldGood
 		ocInitDone, noSessionRefresh = oldInit, oldNSR

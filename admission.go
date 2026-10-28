@@ -195,6 +195,14 @@ func (a *Admission) AdmitPreferred(model string, exclude map[string]bool, prefer
 		if onlySubBlocked {
 			return nil, "sub_quarantine"
 		}
+		// Quota is a real traffic gate, not merely a Retry-After hint.
+		for _, c := range raw {
+			if c.Sub != "" && !c.Direct && c.Egress != "direct" &&
+				a.quotaUntilLocked(c.Sub, model) > nowMS {
+				_, reason := a.retryAfterLocked(RetryRequest{Model: model, Exclude: exclude})
+				return nil, reason
+			}
+		}
 		return nil, "no_candidate"
 	}
 
@@ -268,7 +276,12 @@ func (a *Admission) eligibleCandidatesLocked(cands []Candidate, model string, no
 	out := make([]Candidate, 0, len(cands))
 	onlySubBlocked := true
 	for _, c := range cands {
-		ok, subBlocked := a.eligibleLocked(c, model, nowMS, probe)
+		var ok, subBlocked bool
+		if probe {
+			ok, subBlocked = a.eligibleForManualProbe(c, model, nowMS)
+		} else {
+			ok, subBlocked = a.eligibleForTraffic(c, model, nowMS)
+		}
 		if !ok {
 			if !subBlocked {
 				onlySubBlocked = false
@@ -618,10 +631,14 @@ func (a *Admission) observeManualProbeLocked(at *Attempt, class OutcomeClass, no
 }
 
 func (a *Admission) RetryAfter(req RetryRequest) (time.Duration, string) {
-	now := a.now()
-	nowMS := now.UnixMilli()
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.retryAfterLocked(req)
+}
+
+func (a *Admission) retryAfterLocked(req RetryRequest) (time.Duration, string) {
+	now := a.now()
+	nowMS := now.UnixMilli()
 	a.maybePruneLocked(now)
 
 	cands := a.retryCandidatesLocked(req.Model, req.Exclude)
@@ -688,9 +705,12 @@ func (a *Admission) RetryAfter(req RetryRequest) (time.Duration, string) {
 			reason = "pair"
 		}
 	}
-	if gateActive && retry < gateCanaryPeriod {
-		retry = gateCanaryPeriod
-		reason = "gate"
+	if gateActive {
+		gateRetry := a.GateRetryAfter()
+		if retry < gateRetry {
+			retry = gateRetry
+			reason = "gate"
+		}
 	}
 	if retry < time.Second {
 		retry = time.Second
@@ -740,23 +760,63 @@ func (a *Admission) startProbeTimerLocked(at *Attempt) {
 	})
 }
 
+// eligibleLocked is kept for legacy call sites only. Traffic and probe
+// paths use the explicit three entry points below.
 func (a *Admission) eligibleLocked(c Candidate, model string, nowMS int64, probe bool) (bool, bool) {
+	if probe {
+		return a.eligibleForManualProbe(c, model, nowMS)
+	}
+	return a.eligibleForTraffic(c, model, nowMS)
+}
+
+// eligibleForTraffic enforces all normal admission gates.
+func (a *Admission) eligibleForTraffic(c Candidate, model string, nowMS int64) (bool, bool) {
 	if c.Direct || c.Egress == "direct" {
 		if a.st.Direct != nil && a.st.Direct.Until > nowMS {
 			return false, false
 		}
+	} else {
+		if e := a.st.Egress[c.Egress]; e != nil && e.Lifecycle == "dead" && e.DeadUntil > nowMS {
+			return false, false
+		}
 	}
+	if c.Sub != "" && !c.Direct && c.Egress != "direct" && a.quotaUntilLocked(c.Sub, model) > nowMS {
+		return false, false
+	}
+	if p := a.pairLocked(model, c.Egress); p != nil && p.Until > nowMS {
+		return false, false
+	}
+	if c.Sub != "" {
+		if s := a.st.Subs[c.Sub]; s != nil && s.Until > nowMS {
+			return false, true
+		}
+	}
+	return true, false
+}
+
+// eligibleForGateProbe rejects dead nodes and quarantined subscriptions, but
+// skips pair and quota gates so the gate's single recovery probe can run.
+func (a *Admission) eligibleForGateProbe(c Candidate, model string, nowMS int64) (bool, bool) {
 	if !(c.Direct || c.Egress == "direct") {
 		if e := a.st.Egress[c.Egress]; e != nil && e.Lifecycle == "dead" && e.DeadUntil > nowMS {
 			return false, false
 		}
 	}
-	if !probe {
-		if p := a.pairLocked(model, c.Egress); p != nil && p.Until > nowMS {
-			return false, false
+	if c.Sub != "" {
+		if s := a.st.Subs[c.Sub]; s != nil && s.Until > nowMS {
+			return false, true
 		}
 	}
-	if c.Sub != "" && !probe {
+	return true, false
+}
+
+// eligibleForManualProbe deliberately ignores dead/probation, pair and quota
+// state so an operator can probe and revive a node. Only subscription
+// quarantine remains a hard stop.
+func (a *Admission) eligibleForManualProbe(c Candidate, model string, nowMS int64) (bool, bool) {
+	_ = model
+	_ = nowMS
+	if c.Sub != "" {
 		if s := a.st.Subs[c.Sub]; s != nil && s.Until > nowMS {
 			return false, true
 		}
@@ -1148,7 +1208,7 @@ func (a *Admission) AdmitGateProbe(model string) (*Attempt, string) {
 		if c.Direct || c.Egress == "" {
 			continue
 		}
-		if ok, _ := a.eligibleLocked(c, model, nowMS, true); ok {
+		if ok, _ := a.eligibleForGateProbe(c, model, nowMS); ok {
 			eligible = append(eligible, c)
 		}
 	}
