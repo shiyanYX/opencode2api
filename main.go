@@ -1069,6 +1069,7 @@ type AppConfig struct {
 	NodeHealthIntervalMinutes int    `json:"node_health_interval_minutes,omitempty"`
 	NodeHealthProbeURL        string `json:"node_health_probe_url,omitempty"`
 	ProbeModel                string `json:"probe_model,omitempty"`
+	ProbeCountsTowardGate     bool   `json:"probe_counts_toward_gate,omitempty"`
 
 	// ---- 缓存增强 ----
 	// PromptCacheRetention 注入上游的 prompt 前缀缓存保留时长：
@@ -2975,7 +2976,8 @@ func callOpenCodeAPI(ctx context.Context, upstreamBody []byte, modelID string, a
 		egResult := egress.Get(EgressRequest{Auth: auth, Model: modelID, Context: ctx, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
 		if egResult.NoCandidate {
 			callLogSuppressedAttempt(ctx, modelID, "", v5NoCandidateEventName(), EgressKeyDirect, nil)
-			return nil, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}}, fmt.Errorf("v5 gate: no candidate")
+			status, header, err := v5NoCandidateHTTP(egResult)
+			return nil, status, header, err
 		}
 		switchCandidates := proxyPool.lastSwitchCandidates()
 		if !v5LegacyGatesBypassed() && proxyPool.poolHalted(time.Now()) {
@@ -3527,7 +3529,8 @@ func callOpenCodeAPIStream(ctx context.Context, upstreamBody []byte, modelID str
 		egResult := egress.Get(EgressRequest{Auth: auth, Model: modelID, Context: ctx, ForceSwitch: nodeSwitchPending, BodyMap: bodyMap, RequiredRegion: requiredRegion, ExcludeEgress: blockedEgress})
 		if egResult.NoCandidate {
 			callLogSuppressedAttempt(ctx, modelID, "", v5NoCandidateEventName(), EgressKeyDirect, nil)
-			return nil, http.StatusTooManyRequests, http.Header{"Retry-After": {"60"}}, fmt.Errorf("v5 gate: no candidate")
+			status, header, err := v5NoCandidateHTTP(egResult)
+			return nil, status, header, err
 		}
 		switchCandidates := proxyPool.lastSwitchCandidates()
 		if !v5LegacyGatesBypassed() && proxyPool.poolHalted(time.Now()) {
@@ -7369,6 +7372,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"node_health_interval_minutes":  merged.NodeHealthIntervalMinutes,
 			"node_health_probe_url":         merged.NodeHealthProbeURL,
 			"probe_model":                   probeModelOrDefault(merged.ProbeModel),
+			"probe_counts_toward_gate":      merged.ProbeCountsTowardGate,
 			"prompt_cache_retention":        merged.PromptCacheRetention,
 			"cache_control_breakpoints":     merged.CacheControlBreakpoints,
 			"text_only_models":              merged.TextOnlyModels,

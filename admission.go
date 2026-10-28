@@ -118,6 +118,8 @@ type Admission struct {
 	lastPrune       int64
 	rr              int
 	exploreInflight map[string]int
+
+	probeCountsTowardGate bool
 }
 
 var pairCooldownLadder = [...]time.Duration{
@@ -456,6 +458,9 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 			return
 		}
 		a.observeGateOutcomeLocked(at, class, now, nowMS)
+		if a.gateLocked(now).Active && (class == Outcome429 || class == OutcomeQuotaUnknown) {
+			return
+		}
 		a.observeUpstreamLocked(at, class, now, nowMS, true)
 	case AttemptGateProbe, AttemptCanary:
 		a.observeGateOutcomeLocked(at, class, now, nowMS)
@@ -614,13 +619,17 @@ func (a *Admission) observeUpstreamLocked(at *Attempt, class OutcomeClass, now t
 			p.LastFail = nowMS
 		}
 	case OutcomeNetwork, OutcomeTimeout:
+		if manual && at.Stage == ProbeStagePreflight {
+			// Preflight failure declares the egress dead immediately and is
+			// not a pair observation.
+			a.markEgressDeadLocked(at.Egress, now)
+			return
+		}
 		if p := a.nodePairLocked(at.Egress); p != nil {
 			p.B++
 			p.LastFail = nowMS
 		}
-		// Manual request-stage network failures are weak evidence; only a
-		// preflight failure may declare the egress dead.
-		if !manual || at.Stage == ProbeStagePreflight {
+		if !manual {
 			a.egressFailureLocked(at.Egress, now)
 		}
 	}
@@ -889,6 +898,17 @@ func (a *Admission) egressFailureLocked(egress string, now time.Time) {
 	}
 }
 
+func (a *Admission) markEgressDeadLocked(egress string, now time.Time) {
+	if egress == "" || egress == "direct" {
+		return
+	}
+	e := a.egressLocked(egress)
+	e.Lifecycle = "dead"
+	e.DeadUntil = now.Add(30 * time.Minute).UnixMilli()
+	e.ConsecFail = 0
+	e.ConsecOK = 0
+}
+
 func (a *Admission) egressLocked(egress string) *EgressState {
 	if a.st.Egress == nil {
 		a.st.Egress = map[string]*EgressState{}
@@ -1053,6 +1073,25 @@ func canaryBackoff(level int) time.Duration {
 		level = len(ladder) - 1
 	}
 	return ladder[level]
+}
+
+// ObserveManualProbe is the single entry for operator/scheduled probes. It
+// never acquires or releases a lease and never changes inflight counters.
+func (a *Admission) ObserveManualProbe(at *Attempt, class OutcomeClass) {
+	if at == nil {
+		return
+	}
+	a.mu.Lock()
+	at.Kind = AttemptManualProbe
+	at.GateCount = a.probeCountsTowardGate
+	if at.Sub == "" {
+		at.Sub = at.sub
+	}
+	if at.Nodes == 0 && at.Sub != "" {
+		at.Nodes = a.nodesForSubLocked(at.Model, at.Sub)
+	}
+	a.mu.Unlock()
+	a.Observe(at, class)
 }
 
 func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, now time.Time, nowMS int64) {

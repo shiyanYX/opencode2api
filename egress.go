@@ -49,6 +49,9 @@ type EgressResult struct {
 	// NoCandidate 由 force 选路返回：本轮不允许发送，main 必须回 429+Retry-After，
 	// 绝不能把 Client 当成直连回退。
 	NoCandidate bool
+	// NoCandidateReason/RetryAfter are the single AdmitError values carried to main.
+	NoCandidateReason string
+	RetryAfter        time.Duration
 }
 
 // V5 返回 force 选路取得的租约。旧路径/shadow 为 nil。
@@ -151,7 +154,8 @@ func (eg *EgressClient) Get(r EgressRequest) EgressResult {
 		if ctx == nil {
 			ctx = context.Background()
 		}
-		if at, ok := v5AdmitContext(ctx, r.Model, r.RequiredRegion, r.ExcludeEgress); ok {
+		at, aerr := v5AdmitContext(ctx, r.Model, r.RequiredRegion, r.ExcludeEgress)
+		if at != nil {
 			if at.Direct {
 				return EgressResult{Client: eg.direct, Direct: true, v5: at}
 			}
@@ -163,9 +167,13 @@ func (eg *EgressClient) Get(r EgressRequest) EgressResult {
 			}
 			v5DropAttempt(at)
 			v5Fallback(ctx, r.Model, "node_missing")
+			aerr = &AdmitError{Reason: "no_candidate", RetryAfter: time.Second, Status: http.StatusTooManyRequests}
+		}
+		if aerr == nil {
+			aerr = &AdmitError{Reason: "no_candidate", RetryAfter: time.Second, Status: http.StatusTooManyRequests}
 		}
 		// force 下没有租约就是 NoCandidate：由 main 返回 429，绝不直连。
-		return EgressResult{Client: eg.direct, NoCandidate: true}
+		return EgressResult{Client: eg.direct, NoCandidate: true, NoCandidateReason: aerr.Reason, RetryAfter: aerr.RetryAfter}
 	}
 
 	// 节点池活跃 → 从池中选取

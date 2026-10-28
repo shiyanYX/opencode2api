@@ -57,12 +57,14 @@ type probeManager struct {
 	results    map[string]probeResult
 	job        *probeJob
 	lastAllEnd time.Time
+	observe    func(ProxyNode, probeResult, string)
 }
 
 func newProbeManager() *probeManager {
 	return &probeManager{
 		lastSingle: make(map[string]time.Time),
 		results:    make(map[string]probeResult),
+		observe:    v5ObserveProbeResult,
 	}
 }
 
@@ -77,10 +79,18 @@ func (m *probeManager) Single(ctx context.Context, node ProxyNode, model, health
 	m.mu.Unlock()
 
 	res := probeOne(ctx, node, model, healthURL)
+	if ctx.Err() != nil && res.Class == probeClassUnreachable {
+		res.Class = "canceled"
+		res.Error = "canceled"
+	}
 
 	m.mu.Lock()
 	m.results[node.Fingerprint] = res
 	m.mu.Unlock()
+	if res.Class != "canceled" && m.observe != nil {
+		m.observe(node, res, model)
+	}
+	v5PersistProbeResults()
 	return res, nil
 }
 
@@ -163,11 +173,11 @@ func (m *probeManager) run(ctx context.Context, job *probeJob, nodes []ProxyNode
 			}
 			res := probeOne(ctx, node, model, healthURL)
 
-			m.mu.Lock()
-			if job.canceled && ctx.Err() != nil && res.Class == probeClassUnreachable {
+			if ctx.Err() != nil && res.Class == probeClassUnreachable {
 				res.Class = "canceled"
 				res.Error = "canceled"
 			}
+			m.mu.Lock()
 			job.results = append(job.results, res)
 			if res.Class != "canceled" {
 				m.results[res.Fingerprint] = res
@@ -175,6 +185,9 @@ func (m *probeManager) run(ctx context.Context, job *probeJob, nodes []ProxyNode
 			job.done++
 			job.summary[res.Class]++
 			m.mu.Unlock()
+			if res.Class != "canceled" && m.observe != nil {
+				m.observe(node, res, model)
+			}
 		}(node)
 	}
 	wg.Wait()
@@ -197,6 +210,7 @@ func (m *probeManager) run(ctx context.Context, job *probeJob, nodes []ProxyNode
 	job.finishedAt = probeClock()
 	m.lastAllEnd = job.finishedAt
 	m.mu.Unlock()
+	v5PersistProbeResults()
 }
 
 func (m *probeManager) Status(jobID string) (probeJobView, bool) {

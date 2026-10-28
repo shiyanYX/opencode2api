@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"net"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -134,10 +136,12 @@ func v5GetRuntime() *v5Runtime {
 		st = NewNodeStateV5(time.Now())
 	}
 	now := time.Now()
+	adm := NewAdmission(st, 8, v5Candidates)
+	adm.probeCountsTowardGate = loadConfig(configPath).ProbeCountsTowardGate
 	v5RT = &v5Runtime{
 		started:    now,
 		shadowOnly: true,
-		adm:        NewAdmission(st, 8, v5Candidates),
+		adm:        adm,
 		statePath:  v5StatePath,
 		lastSave:   now,
 		byClass:    map[string]int64{},
@@ -282,6 +286,54 @@ func classifyV5(status int, errBody []byte, err error, attemptVer, pinnedVer str
 
 // v5ObserveUpstream 是唯一的影子入口：每个 attempt 恰好调用一次。
 // off 直接返回；shadow 只写内存计数和 call_log，不取信号量、不阻塞。
+func probeOutcomeClass(res probeResult) (OutcomeClass, bool) {
+	switch res.Class {
+	case probeClassOK:
+		return Outcome2xx, true
+	case probeClassQuota:
+		return Outcome429, true
+	case probeClassQuotaUnknown:
+		return OutcomeQuotaUnknown, true
+	case probeClassDenied:
+		return Outcome403, true
+	case probeClassError:
+		return Outcome5xx, true
+	case probeClassUnreachable:
+		if res.Stage == string(ProbeStagePreflight) {
+			return OutcomeNetwork, true
+		}
+		return OutcomeTimeout, true
+	default:
+		return "", false
+	}
+}
+
+func v5ObserveProbeResult(node ProxyNode, res probeResult, model string) {
+	class, ok := probeOutcomeClass(res)
+	if !ok {
+		return
+	}
+	rt := v5GetRuntime()
+	if rt == nil {
+		return
+	}
+	at := &Attempt{
+		Model:  model,
+		Egress: nodeEgressKey(node.Fingerprint),
+		Sub:    subKeyOf(node.Name),
+		Stage:  ProbeStage(res.Stage),
+	}
+	rt.adm.ObserveManualProbe(at, class)
+	rt.markDirty()
+}
+
+func v5PersistProbeResults() {
+	if rt := v5GetRuntime(); rt != nil {
+		rt.markDirty()
+		rt.persistIfDue(time.Now())
+	}
+}
+
 func v5ObserveUpstream(ctx context.Context, modelID string, eg EgressResult, status int, errBody []byte, err error, attemptVer string) {
 	mode := v5Enabled()
 	at := eg.V5()
@@ -437,36 +489,15 @@ func v5DropAttempt(at *Attempt) {
 
 // v5Admit 保留给测试/旧调用方的三参入口；Get 使用带 context 的版本以落 fallback 事件。
 func v5Admit(model, region string, exclude map[string]bool) (*Attempt, bool) {
-	return v5AdmitContext(context.Background(), model, region, exclude)
+	at, err := v5AdmitContext(context.Background(), model, region, exclude)
+	return at, err == nil
 }
 
-func v5AdmitContext(ctx context.Context, model, region string, exclude map[string]bool) (*Attempt, bool) {
+func v5AdmitContext(ctx context.Context, model, region string, exclude map[string]bool) (*Attempt, *AdmitError) {
 	rt := v5GetRuntime()
 	if rt == nil {
 		v5Fallback(ctx, model, "disabled")
-		return nil, false
-	}
-
-	// The pool-wide winter gate blocks normal traffic. The only exceptions are
-	// the periodic direct canary and the one node probe after a direct 2xx.
-	if rt.adm.GatePaused() {
-		if rt.adm.GateCanaryDue() {
-			if at, reason := rt.adm.AdmitCanary(model); at != nil {
-				return at, true
-			} else if reason != "" && reason != "canary_wait" {
-				v5Winter(ctx, model, "canary_"+reason)
-			}
-		}
-		if rt.adm.GateNodeProbeReady() {
-			at, reason := rt.adm.AdmitGateProbe(model)
-			if at != nil {
-				return at, true
-			}
-			v5Winter(ctx, model, "node_probe_"+reason)
-		} else {
-			v5Winter(ctx, model, "gate_paused")
-		}
-		return nil, false
+		return nil, &AdmitError{Reason: "halt", RetryAfter: time.Minute, Status: http.StatusServiceUnavailable}
 	}
 
 	ex := make(map[string]bool, len(exclude)+1)
@@ -482,6 +513,28 @@ func v5AdmitContext(ctx context.Context, model, region string, exclude map[strin
 		}
 	}
 
+	// The pool-wide winter gate blocks normal traffic. The only exceptions are
+	// the periodic direct canary and the one node probe after a direct 2xx.
+	if rt.adm.GatePaused() {
+		if rt.adm.GateCanaryDue() {
+			if at, reason := rt.adm.AdmitCanary(model); at != nil {
+				return at, nil
+			} else if reason != "" && reason != "canary_wait" {
+				v5Winter(ctx, model, "canary_"+reason)
+			}
+		}
+		if rt.adm.GateNodeProbeReady() {
+			at, reason := rt.adm.AdmitGateProbe(model)
+			if at != nil {
+				return at, nil
+			}
+			v5Winter(ctx, model, "node_probe_"+reason)
+		} else {
+			v5Winter(ctx, model, "gate_paused")
+		}
+		return nil, v5AdmitError(rt, model, ex)
+	}
+
 	prefer := ""
 	if fp := proxyPool.manualFp(); fp != "" {
 		prefer = nodeEgressKey(fp)
@@ -492,9 +545,38 @@ func v5AdmitContext(ctx context.Context, model, region string, exclude map[strin
 	at, reason := rt.adm.AdmitPreferred(model, ex, prefer)
 	if at == nil {
 		v5NoCandidate(ctx, model, reason)
-		return nil, false
+		return nil, v5AdmitError(rt, model, ex)
 	}
-	return at, true
+	return at, nil
+}
+
+func v5AdmitError(rt *v5Runtime, model string, exclude map[string]bool) *AdmitError {
+	if rt == nil {
+		return &AdmitError{Reason: "halt", RetryAfter: time.Minute, Status: http.StatusServiceUnavailable}
+	}
+	retry, reason := rt.adm.RetryAfter(RetryRequest{Model: model, Exclude: exclude})
+	return &AdmitError{Reason: reason, RetryAfter: retry, Status: statusFor(reason)}
+}
+
+func statusFor(reason string) int {
+	if reason == "halt" {
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusTooManyRequests
+}
+
+// v5NoCandidateHTTP is the single mapping from a force NoCandidate lease
+// decision to the HTTP response. Retry-After is rounded up to whole seconds.
+func v5NoCandidateHTTP(res EgressResult) (int, http.Header, error) {
+	reason := res.NoCandidateReason
+	if reason == "" {
+		reason = "no_candidate"
+	}
+	secs := int64((res.RetryAfter + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	return statusFor(reason), http.Header{"Retry-After": {fmt.Sprintf("%d", secs)}}, fmt.Errorf("v5 gate: %s", reason)
 }
 
 // v5Winter records that the pool-wide 429 gate stopped normal selection.

@@ -19,9 +19,9 @@ func TestClassifyProbeResponse(t *testing.T) {
 		{200, `{"ok":true}`, "ok"},
 		{204, ``, "ok"},
 		{429, `{"error":{"type":"FreeUsageLimitError","message":"free usage limit"}}`, "quota"},
-		{429, `{"error":{"type":"rate_limit"}}`, "error"},
+		{429, `{"error":{"type":"rate_limit"}}`, "quota_unknown"},
 		{403, `{"error":{"message":"free tier not available","type":"FreeTierError"}}`, "denied"},
-		{403, `{"unrelated":1}`, "error"},
+		{403, `{"unrelated":1}`, "denied"},
 		{502, `bad gateway`, "error"},
 	}
 	for _, c := range cases {
@@ -45,8 +45,8 @@ func TestProbeOnePreflightFailureSendsNoModelRequest(t *testing.T) {
 	defer func() { probeClientFor = defaultProbeClient }()
 
 	got := probeOne(context.Background(), ProxyNode{Fingerprint: "fp1"}, "m", "https://opencode.ai/zen/v1/models")
-	if got.Class != probeClassUnreachable || modelHits.Load() != 0 {
-		t.Fatalf("got %+v modelHits=%d, want unreachable/0", got, modelHits.Load())
+	if got.Class != probeClassUnreachable || got.Stage != string(ProbeStagePreflight) || modelHits.Load() != 0 {
+		t.Fatalf("got %+v modelHits=%d, want unreachable/preflight/0", got, modelHits.Load())
 	}
 }
 
@@ -64,8 +64,8 @@ func TestProbeOnePreflightStatusFailureSendsNoModelRequest(t *testing.T) {
 	defer func() { probeClientFor = defaultProbeClient }()
 
 	got := probeOne(context.Background(), ProxyNode{Fingerprint: "fp1"}, "m", "https://opencode.ai/zen/v1/models")
-	if got.Class != probeClassUnreachable || modelHits.Load() != 0 {
-		t.Fatalf("got %+v modelHits=%d, want unreachable/0", got, modelHits.Load())
+	if got.Class != probeClassError || got.Stage != string(ProbeStagePreflight) || modelHits.Load() != 0 {
+		t.Fatalf("got %+v modelHits=%d, want error/preflight/0", got, modelHits.Load())
 	}
 }
 

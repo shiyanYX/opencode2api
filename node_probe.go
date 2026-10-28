@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	probeClassOK          = "ok"
-	probeClassQuota       = "quota"
-	probeClassDenied      = "denied"
-	probeClassUnreachable = "unreachable"
-	probeClassError       = "error"
+	probeClassOK           = "ok"
+	probeClassQuota        = "quota"
+	probeClassDenied       = "denied"
+	probeClassUnreachable  = "unreachable"
+	probeClassError        = "error"
+	probeClassQuotaUnknown = "quota_unknown"
 )
 
 const (
@@ -25,6 +26,7 @@ const (
 type probeResult struct {
 	Fingerprint string    `json:"fingerprint"`
 	Class       string    `json:"class"`
+	Stage       string    `json:"stage"`
 	Status      int       `json:"status"`
 	LatencyMS   int64     `json:"latency_ms"`
 	Error       string    `json:"error"`
@@ -39,12 +41,25 @@ func classifyProbeResponse(status int, body []byte) string {
 		if ok, _ := classifyQuota(status, body); ok {
 			return probeClassQuota
 		}
-		return probeClassError
+		return probeClassQuotaUnknown
 	case status == http.StatusForbidden:
-		if isFreeTierErrorBody(body) {
-			return probeClassDenied
-		}
+		return probeClassDenied
+	default:
 		return probeClassError
+	}
+}
+
+func classifyProbePreflight(status int, body []byte) string {
+	switch {
+	case status >= 200 && status < 300:
+		return probeClassOK
+	case status == http.StatusTooManyRequests:
+		if ok, _ := classifyQuota(status, body); ok {
+			return probeClassQuota
+		}
+		return probeClassQuotaUnknown
+	case status == http.StatusForbidden:
+		return probeClassDenied
 	default:
 		return probeClassError
 	}
@@ -57,7 +72,7 @@ var defaultProbeClient = func(fp string) *http.Client {
 var probeClientFor = defaultProbeClient
 
 func probeOne(ctx context.Context, node ProxyNode, model, healthURL string) probeResult {
-	res := probeResult{Fingerprint: node.Fingerprint, At: time.Now()}
+	res := probeResult{Fingerprint: node.Fingerprint, Stage: string(ProbeStagePreflight), At: time.Now()}
 	client := probeClientFor(node.Fingerprint)
 	if client == nil {
 		res.Class = probeClassUnreachable
@@ -82,15 +97,17 @@ func probeOne(ctx context.Context, node ProxyNode, model, healthURL string) prob
 		res.Error = err.Error()
 		return res
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(preResp.Body, probeBodyLimit))
+	preBody, _ := io.ReadAll(io.LimitReader(preResp.Body, probeBodyLimit))
 	preResp.Body.Close()
 	if preResp.StatusCode < 200 || preResp.StatusCode >= 300 {
-		res.Class = probeClassUnreachable
+		res.Stage = string(ProbeStagePreflight)
+		res.Class = classifyProbePreflight(preResp.StatusCode, preBody)
 		res.Status = preResp.StatusCode
 		res.Error = fmt.Sprintf("preflight status %d", preResp.StatusCode)
 		return res
 	}
 
+	res.Stage = string(ProbeStageRequest)
 	bodyMap := map[string]any{
 		"messages":   []any{map[string]any{"role": "user", "content": "ping"}},
 		"max_tokens": 1,
