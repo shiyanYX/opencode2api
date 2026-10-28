@@ -17,8 +17,16 @@ const (
 func nodeAvailability(oldState string, v *v5NodeView, p *probeResult, now time.Time) (string, string) {
 	nowMS := now.UnixMilli()
 	if v != nil {
-		if v.Lifecycle == "dead" && v.DeadUntil > nowMS {
-			return availabilityDead, "节点已停用"
+		if v.Lifecycle == "dead" {
+			// DeadUntil==0 是迁移/手动标记留下的无期限停用；有期限的停用在
+			// 30 分钟冷却到期后回到「可尝试」，此时以最新探测为准。
+			if v.DeadUntil == 0 || v.DeadUntil > nowMS {
+				return availabilityDead, "节点已停用"
+			}
+			if a, r := probeAvailability(p); a != "" {
+				return a, r
+			}
+			return availabilityUntested, "冷却结束待复探"
 		}
 		if v.QuotaUntil != nil && *v.QuotaUntil > nowMS {
 			return availabilityQuota, "配额冷却中"

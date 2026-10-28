@@ -25,6 +25,8 @@ func TestNodeAvailabilityPriority(t *testing.T) {
 	}{
 		{"dead future", "available", &v5NodeView{Lifecycle: "dead", DeadUntil: future}, probeOK, "dead"},
 		{"dead expired falls to probe", "available", &v5NodeView{Lifecycle: "dead", DeadUntil: past}, probeOK, "ok"},
+		{"dead migrated no deadline", "available", &v5NodeView{Lifecycle: "dead"}, probeOK, "dead"},
+		{"dead expired no probe", "available", &v5NodeView{Lifecycle: "dead", DeadUntil: past}, nil, "untested"},
 		{"quota beats cooling", "available", &v5NodeView{QuotaUntil: &quota, PairUntil: future, Lifecycle: "active"}, probeOK, "quota"},
 		{"pair cooling", "available", &v5NodeView{PairUntil: future, Lifecycle: "active"}, probeOK, "cooling"},
 		{"gate cooling", "available", &v5NodeView{Gate: &v5NodeGateView{Active: true}, Lifecycle: "active"}, probeOK, "cooling"},
