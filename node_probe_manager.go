@@ -57,6 +57,8 @@ type probeManager struct {
 	results    map[string]probeResult
 	job        *probeJob
 	lastAllEnd time.Time
+	statePath  string
+	savedAt    time.Time
 	observe    func(ProxyNode, probeResult, string)
 }
 
@@ -90,6 +92,7 @@ func (m *probeManager) Single(ctx context.Context, node ProxyNode, model, health
 	if res.Class != "canceled" && m.observe != nil {
 		m.observe(node, res, model)
 	}
+	m.saveState()
 	v5PersistProbeResults()
 	return res, nil
 }
@@ -210,6 +213,7 @@ func (m *probeManager) run(ctx context.Context, job *probeJob, nodes []ProxyNode
 	job.finishedAt = probeClock()
 	m.lastAllEnd = job.finishedAt
 	m.mu.Unlock()
+	m.saveState()
 	v5PersistProbeResults()
 }
 

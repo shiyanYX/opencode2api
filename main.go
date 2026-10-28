@@ -7673,6 +7673,14 @@ type nodeAdminView struct {
 	nodeScoreView
 }
 
+func probeSavedAtValue() any {
+	t := nodeProber.SavedAt()
+	if t.IsZero() {
+		return nil
+	}
+	return t.Format(time.RFC3339)
+}
+
 func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -7728,6 +7736,8 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
+			"probe_model":       probeModelOrDefault(loadConfig(configPath).ProbeModel),
+			"probe_saved_at":    probeSavedAtValue(),
 			"active_fp":         pick,
 			"active_name":       activeName,
 			"manual_fp":         manual,
@@ -8078,6 +8088,7 @@ func main() {
 		slog.Warn("failed to save config", "path", configPath, "error", err)
 	}
 	initCallLog(configPath)
+	nodeProber.configure(probeStatePathFor(configPath))
 	// task-67：节点打分（加载 scoring_state.json + 回填历史调用日志 + 后台轮询）
 	initNodeScoring(configPath)
 	// 调用日志保留策略（gzip 归档 + 按天删除），仅 daily 模式；每小时一次。

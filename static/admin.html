@@ -631,6 +631,7 @@ input,select,textarea{font-family:inherit;color:inherit}
       <button class="btn btn-primary" onclick="reloadSubs()">重新加载订阅</button>
       <button class="btn btn-ghost" onclick="resetAllMarks()">解除全部标记</button>
       <button id="probeAllBtn" class="btn btn-ghost" onclick="probeAllPrimary()">全量测试</button>
+      <span id="probeModelLabel" class="muted" style="font-size:11px;margin-left:6px"></span>
       <div id="probeAllProgress" class="usage-bar" style="display:none;width:140px;min-width:90px;flex:0 1 180px"><i style="width:0%"></i></div>
       <button class="btn btn-ghost" onclick="loadNodes()">刷新节点</button>
       <span id="nodeStatus" class="muted" style="font-size:11px"></span>
@@ -1013,9 +1014,10 @@ async function loadConfig(){
     cfg=c;
   }catch(e){noteCore(false,'config');showToast('配置加载失败: '+e.message,'error')}
 }
+let probeModel='';
 async function loadNodes(){
-  if(DEMO_MODE){nodeData=DEMO.nodes.map(n=>({...n}));subData=DEMO.subscriptions.filter(s=>s.url!=='webshare API').map(s=>({...s}));wsData=DEMO.subscriptions.filter(s=>s.url==='webshare API').map(s=>({name:s.name,nodes:s.nodes,last_updated_at:s.last_updated_at}));renderOverview({nodes:nodeData,healthy:nodeData.filter(n=>n.state==='available').length,exhausted_count:nodeData.filter(n=>n.state==='exhausted').length,dead_count:nodeData.filter(n=>n.state==='dead').length,active_name:nodeData.find(n=>n.active)?.name||'',manual_name:''});renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable();return}
-  try{const d=await fetchJSON('/api/nodes',{core:'nodes'});nodeData=d.nodes||[];subData=(d.subscriptions||[]).filter(s=>s.url!=='webshare API');applyWsSnapshot(d.subscriptions||[]);renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable()}catch(e){
+  if(DEMO_MODE){probeModel='';const pl=q('#probeModelLabel');if(pl)pl.textContent='探测模型：未配置';nodeData=DEMO.nodes.map(n=>({...n}));subData=DEMO.subscriptions.filter(s=>s.url!=='webshare API').map(s=>({...s}));wsData=DEMO.subscriptions.filter(s=>s.url==='webshare API').map(s=>({name:s.name,nodes:s.nodes,last_updated_at:s.last_updated_at}));renderOverview({nodes:nodeData,healthy:nodeData.filter(n=>n.state==='available').length,exhausted_count:nodeData.filter(n=>n.state==='exhausted').length,dead_count:nodeData.filter(n=>n.state==='dead').length,active_name:nodeData.find(n=>n.active)?.name||'',manual_name:''});renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable();return}
+  try{const d=await fetchJSON('/api/nodes',{core:'nodes'});probeModel=d.probe_model||'';const pl=q('#probeModelLabel');if(pl)pl.textContent='探测模型：'+(probeModel||'未配置');nodeData=d.nodes||[];subData=(d.subscriptions||[]).filter(s=>s.url!=='webshare API');applyWsSnapshot(d.subscriptions||[]);renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable()}catch(e){
     // 保留上一次渲染好的行：整表清空会把「拿不到」渲染成「这个网关一个节点都没有」。
     const tb=q('#nodeTable tbody');
     if(tb)tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="10" class="empty-hint">未更新：'+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>');
@@ -1760,7 +1762,7 @@ function showNodeDetail(fp){
   const gate=v&&v.gate;
   const rows=[
     ['判定原因',n.availability_reason?esc(n.availability_reason):missing],
-    ['可用性',probeTagHtml(n)],
+    ['可用性',probeTagHtml(n)+(probeModel?' <span class="muted">基于 '+esc(probeModel)+' 探测</span>':'')],
     ['旧评分（独立口径，仅供参考）',n.score!=null?esc(String(n.score))+' / '+esc(n.tier||'-'):missing],
     ['配额至',v&&v.quota?'<code>'+esc(v.quota.model)+'</code> · '+esc(new Date(v.quota.until).toLocaleString()):missing],
     ['熔断',v?(gate?(gate.active?'熔断中':'正常'):missing):missing],
