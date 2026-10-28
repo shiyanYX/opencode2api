@@ -9,13 +9,31 @@ import (
 type OutcomeClass string
 
 const (
-	Outcome2xx     OutcomeClass = "2xx"
-	Outcome429     OutcomeClass = "429"
-	Outcome403     OutcomeClass = "403"
-	OutcomeNetwork OutcomeClass = "network"
-	OutcomeTimeout OutcomeClass = "timeout"
-	Outcome5xx     OutcomeClass = "5xx"
-	OutcomeCancel  OutcomeClass = "cancel"
+	Outcome2xx          OutcomeClass = "2xx"
+	Outcome429          OutcomeClass = "429"
+	Outcome403          OutcomeClass = "403"
+	OutcomeNetwork      OutcomeClass = "network"
+	OutcomeTimeout      OutcomeClass = "timeout"
+	Outcome5xx          OutcomeClass = "5xx"
+	OutcomeCancel       OutcomeClass = "cancel"
+	OutcomeQuotaUnknown OutcomeClass = "quota_unknown"
+)
+
+type AttemptKind uint8
+
+const (
+	AttemptNormal AttemptKind = iota
+	AttemptManualProbe
+	AttemptProbe
+	AttemptGateProbe
+	AttemptCanary
+)
+
+type ProbeStage string
+
+const (
+	ProbeStagePreflight ProbeStage = "preflight"
+	ProbeStageRequest   ProbeStage = "request"
 )
 
 type Candidate struct {
@@ -30,6 +48,13 @@ type Attempt struct {
 	Model  string
 	Egress string
 	Direct bool
+	Kind   AttemptKind
+	// GateCount controls the winter gate 5-minute window. Normal traffic must
+	// set it explicitly; probe/gate/canary attempts never count.
+	GateCount bool
+	Stage     ProbeStage
+	Sub       string
+	Nodes     int
 	// gateProbe 标记这是 winter gate 的节点探测；任何非 2xx 都必须重置探测状态。
 	gateProbe bool
 
@@ -307,6 +332,9 @@ func (a *Admission) AdmitLifecycleProbe() (*Attempt, string) {
 			at := &Attempt{
 				Egress:    egress,
 				Direct:    egress == "direct",
+				Kind:      AttemptProbe,
+				GateCount: false,
+				Stage:     ProbeStageRequest,
 				release:   func() { <-sem },
 				probe:     true,
 				probeKey:  egress,
@@ -349,87 +377,181 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 		a.probing = len(a.probeActive) > 0
 	}
 	// Empty egress has no pair and no gate sample; it must never create a
-	// PairKey(model, "") or advance the gate window (F2).
+	// PairKey(model, "") or advance the gate window.
 	if at.Egress == "" {
 		return
 	}
 
-	if at.lifecycle {
-		a.observeLifecycleLocked(at, class, now, nowMS)
+	switch at.Kind {
+	case AttemptManualProbe, AttemptProbe:
+		if at.lifecycle {
+			a.observeLifecycleLocked(at, class, now, nowMS)
+			return
+		}
+		a.observeGateOutcomeLocked(at, class, now, nowMS)
+		a.observeUpstreamLocked(at, class, now, nowMS, true)
+	case AttemptGateProbe, AttemptCanary:
+		a.observeGateOutcomeLocked(at, class, now, nowMS)
+	default:
+		if at.lifecycle {
+			a.observeLifecycleLocked(at, class, now, nowMS)
+			return
+		}
+		wasActive := a.gateLocked(now).Active
+		a.observeGateOutcomeLocked(at, class, now, nowMS)
+		// Normal traffic is not served while the winter gate is active. If the
+		// gate just tripped on this 429, still suppress the quota write; a 2xx
+		// that happens to be the decisive sample still updates its pair.
+		if wasActive || (a.gateLocked(now).Active && (class == Outcome429 || class == OutcomeQuotaUnknown)) {
+			return
+		}
+		a.observeUpstreamLocked(at, class, now, nowMS, false)
+	}
+}
+
+var pair403Ladder = [5]time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute, time.Hour, 6 * time.Hour}
+
+const quotaGateWindow = 10 * time.Minute
+
+func (a *Admission) nodePairLocked(egress string) *PairState {
+	if egress == "" {
+		return nil
+	}
+	key := PairKey("*", egress)
+	p := a.st.Pairs[key]
+	if p == nil {
+		p = &PairState{}
+		a.st.Pairs[key] = p
+	}
+	return p
+}
+
+func (a *Admission) clearQuotaLocked(sub, model string) {
+	if sub == "" || sub == "direct" {
 		return
 	}
-	a.observeGateOutcomeLocked(at, class, now, nowMS)
+	delete(a.st.Quota, quotaKey(sub, model))
+}
 
+func (a *Admission) recordQuotaLocked(sub, model, egress string, nodes int, now time.Time) {
+	if sub == "" || sub == "direct" || egress == "" || model == "" {
+		return
+	}
+	if a.st.Quota == nil {
+		a.st.Quota = map[string]*QuotaState{}
+	}
+	nowMS := now.UnixMilli()
+	key := quotaKey(sub, model)
+	q := a.st.Quota[key]
+	if q == nil {
+		q = &QuotaState{Since: nowMS, Seen: map[string]int64{}, Nodes: nodes}
+		a.st.Quota[key] = q
+	} else {
+		// Nodes is the current candidate count for this subscription; it is
+		// refreshed on every quota event, including while the gate is active.
+		q.Nodes = nodes
+	}
+	if q.Seen == nil {
+		q.Seen = map[string]int64{}
+	}
+	window := quotaGateWindow.Milliseconds()
+	if nowMS-q.Since >= window {
+		q.Since = nowMS
+		q.Seen = map[string]int64{}
+		q.Hits = 0
+	}
+	q.Seen[egress] = nowMS
+	q.Hits++
+	cutoff := q.Since + window
+	for k, ts := range q.Seen {
+		if ts < cutoff {
+			delete(q.Seen, k)
+		}
+	}
+	if len(q.Seen) >= 2 || (q.Nodes <= 1 && q.Hits >= 3) {
+		if q.Until <= nowMS {
+			q.Until = now.Add(quotaGateWindow).UnixMilli()
+		}
+	}
+}
+
+func (a *Admission) observeUpstreamLocked(at *Attempt, class OutcomeClass, now time.Time, nowMS int64, manual bool) {
+	sub := at.Sub
+	if sub == "" {
+		sub = at.sub
+	}
 	switch class {
 	case Outcome2xx:
 		p := a.writePairLocked(at.Model, at.Egress)
 		a.decayPairLocked(p, nowMS)
 		p.A++
 		p.LastOK = nowMS
-		// Half-open: after a cooldown expires, the pair returns at 0.05 weight
-		// and needs two consecutive 2xx before it is fully trusted again.
-		// A 2xx that arrives while the pair is still cooling (an older lease)
-		// must not shorten the cooldown.
-		if p.Strikes > 0 && p.Until > 0 {
-			if p.Until <= nowMS {
-				p.OKStreak++
-				if p.OKStreak >= 2 {
-					p.Strikes = 0
-					p.Hard = 0
-					p.Until = 0
-					p.OKStreak = 0
-				}
+		if p.Strikes > 0 && p.Until > 0 && p.Until <= nowMS {
+			p.OKStreak++
+			if p.OKStreak >= 2 {
+				p.Strikes = 0
+				p.Hard = 0
+				p.Until = 0
+				p.OKStreak = 0
 			}
+		} else if p.Strikes > 0 && p.Until > nowMS {
+			// An older lease must not shorten an active cooldown.
 		} else {
 			p.Strikes = 0
 			p.Hard = 0
 			p.Until = 0
 			p.OKStreak = 0
 		}
-		if at.probe {
-			a.clearSubLocked(at.sub)
-			a.probeBackoff = probeBackoffLadder[0]
-		}
 		a.egressConnectedLocked(at.Egress)
-		if at.Direct && a.st.Direct != nil {
+		a.clearQuotaLocked(sub, at.Model)
+		if !manual && at.Direct && a.st.Direct != nil {
 			a.st.Direct.Until = 0
 		}
-	case Outcome429:
-		a.egressConnectedLocked(at.Egress)
-		p := a.writePairLocked(at.Model, at.Egress)
-		a.decayPairLocked(p, nowMS)
-		p.B++
-		p.LastFail = nowMS
-		p.OKStreak = 0
-		if at.probe {
-			minUntil := nowMS + a.probeBackoff.Milliseconds()
-			if p.Until < minUntil {
-				p.Until = minUntil
-			}
-			a.advanceProbeBackoffLocked()
-		} else {
-			p.Strikes++
-			if p.Strikes > len(pairCooldownLadder) {
-				p.Strikes = len(pairCooldownLadder)
-			}
-			p.Until = now.Add(pairCooldownLadder[p.Strikes-1]).UnixMilli()
-			p.Trips24h = append(p.Trips24h, nowMS)
-			p.Trips24h = pruneTrips(p.Trips24h, now.Add(-24*time.Hour).UnixMilli())
+	case Outcome429, OutcomeQuotaUnknown:
+		// 429 is not a pair failure: quota state is per (sub, model).
+		if sub != "" {
+			a.recordQuotaLocked(sub, at.Model, at.Egress, at.Nodes, now)
 		}
-		if at.Direct {
+		if !manual && at.Direct {
 			if a.st.Direct == nil {
 				a.st.Direct = &DirectState{}
 			}
 			a.st.Direct.Until = now.Add(60 * time.Second).UnixMilli()
 		}
 	case Outcome403:
-		a.egressConnectedLocked(at.Egress)
-		a.observe403Locked(at, now, nowMS)
+		p := a.nodePairLocked(at.Egress)
+		if p != nil {
+			p.B++
+			p.LastFail = nowMS
+			p.Strike++
+			if p.Strike > len(pair403Ladder) {
+				p.Strike = len(pair403Ladder)
+			}
+			until := now.Add(pair403Ladder[p.Strike-1]).UnixMilli()
+			if until > p.Until {
+				p.Until = until
+			}
+		}
 	case Outcome5xx:
-		a.egressConnectedLocked(at.Egress)
+		if p := a.nodePairLocked(at.Egress); p != nil {
+			p.B++
+			p.LastFail = nowMS
+		}
 	case OutcomeNetwork, OutcomeTimeout:
-		a.egressFailureLocked(at.Egress, now)
+		if p := a.nodePairLocked(at.Egress); p != nil {
+			p.B++
+			p.LastFail = nowMS
+		}
+		// Manual request-stage network failures are weak evidence; only a
+		// preflight failure may declare the egress dead.
+		if !manual || at.Stage == ProbeStagePreflight {
+			a.egressFailureLocked(at.Egress, now)
+		}
 	}
+}
+
+func (a *Admission) observeManualProbeLocked(at *Attempt, class OutcomeClass, now time.Time, nowMS int64) {
+	a.observeUpstreamLocked(at, class, now, nowMS, true)
 }
 
 func (a *Admission) RetryAfter(model string) time.Duration {
@@ -479,9 +601,13 @@ func (a *Admission) RetryAfter(model string) time.Duration {
 
 func (a *Admission) attemptLocked(c Candidate, model string, probe, lifecycle, explore bool, sem chan struct{}) *Attempt {
 	return &Attempt{
-		Model:  model,
-		Egress: c.Egress,
-		Direct: c.Direct || c.Egress == "direct",
+		Model:     model,
+		Egress:    c.Egress,
+		Direct:    c.Direct || c.Egress == "direct",
+		Kind:      AttemptNormal,
+		GateCount: true,
+		Stage:     ProbeStageRequest,
+		Sub:       c.Sub,
 		release: func() {
 			<-sem
 			// 探索名额也属于租约的一部分；releaseAttempt 不经过 Observe 时
@@ -560,9 +686,6 @@ func (a *Admission) writePairLocked(model, egress string) *PairState {
 	if p == nil {
 		p = &PairState{}
 		a.st.Pairs[key] = p
-	}
-	if model != "*" {
-		delete(a.st.Pairs, PairKey("*", egress))
 	}
 	return p
 }
@@ -713,20 +836,13 @@ func (a *Admission) observeLifecycleLocked(at *Attempt, class OutcomeClass, now 
 	case Outcome2xx:
 		a.egressConnectedLocked(at.Egress)
 		a.probeBackoff = probeBackoffLadder[0]
-	case Outcome429:
-		a.egressConnectedLocked(at.Egress)
-		a.advanceProbeBackoffLocked()
-	case Outcome403:
-		a.egressConnectedLocked(at.Egress)
-		a.observe403Locked(at, now, nowMS)
-	case Outcome5xx:
-		a.egressConnectedLocked(at.Egress)
 	case OutcomeNetwork, OutcomeTimeout:
 		e.Lifecycle = "dead"
 		e.DeadUntil = now.Add(30 * time.Minute).UnixMilli()
 		e.ConsecFail = 0
 		e.ConsecOK = 0
 	}
+	// 429/403/5xx are deliberately not written for lifecycle probes.
 }
 
 func (a *Admission) advanceProbeBackoffLocked() {
@@ -784,53 +900,64 @@ func (a *Admission) GatePaused() bool {
 // GateRetryAfter is the fixed client-facing retry interval while the gate is active.
 func (a *Admission) GateRetryAfter() time.Duration { return gateCanaryPeriod }
 
+func canaryBackoff(level int) time.Duration {
+	ladder := [...]time.Duration{60 * time.Second, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 15 * time.Minute}
+	if level < 0 {
+		level = 0
+	}
+	if level >= len(ladder) {
+		level = len(ladder) - 1
+	}
+	return ladder[level]
+}
+
 func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, now time.Time, nowMS int64) {
 	g := a.gateLocked(now)
-	// Empty egress is not a real attempt: do not touch the window, distinct
-	// set, gate state, or pair ledger (F2).
 	if at.Egress == "" {
 		return
 	}
+	kind := at.Kind
+	if kind == AttemptNormal && at.gateProbe {
+		kind = AttemptGateProbe
+	}
 	if g.Active {
-		switch {
-		case class == Outcome2xx && at.Direct:
-			// Direct canary succeeded: permit exactly one node probe.
-			g.CanaryOK = true
-			g.NodeProbeUsed = false
-			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
-		case class == Outcome2xx && !at.Direct && (at.gateProbe || g.CanaryOK):
-			// Node probe succeeded: the pool is no longer in winter.
-			a.clearGateLocked(nowMS)
-			return
-		case class != Outcome2xx && at.gateProbe:
-			// Any failed node probe (429/403/5xx/network/timeout/cancel/other)
-			// must reopen the state machine, otherwise both canary and node
-			// probe entrances can stay closed forever.
+		switch kind {
+		case AttemptCanary:
+			if class == Outcome2xx {
+				g.CanaryOK = true
+				g.NodeProbeUsed = false
+				g.CanaryLevel = 0
+				g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
+				if a.st.Direct != nil {
+					a.st.Direct.Until = 0
+				}
+			} else {
+				g.CanaryOK = false
+				g.NodeProbeUsed = false
+				g.NextCanary = nowMS + canaryBackoff(g.CanaryLevel).Milliseconds()
+				if g.CanaryLevel < 4 {
+					g.CanaryLevel++
+				}
+			}
+		case AttemptGateProbe:
+			if class == Outcome2xx {
+				a.clearGateLocked(nowMS)
+				return
+			}
 			g.CanaryOK = false
 			g.NodeProbeUsed = false
 			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
 			g.NextNodeProbe = nowMS + gateEscapePeriod.Milliseconds()
-			return
-		case class != Outcome2xx && at.Direct:
-			// Direct canary failed: retry it after one minute, keep the
-			// 10-minute time escape for a node probe.
-			g.CanaryOK = false
-			g.NodeProbeUsed = false
-			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
-			return
-		case class != Outcome2xx && !at.Direct && g.CanaryOK:
-			// Probe admitted after a canary but failed for a non-429 reason.
-			g.CanaryOK = false
-			g.NodeProbeUsed = false
-			g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
-			g.NextNodeProbe = nowMS + gateEscapePeriod.Milliseconds()
-			return
+		default:
+			// Normal/manual attempts never mutate an active gate.
 		}
 		return
 	}
+	if !at.GateCount {
+		return
+	}
 
-	// Tumbling 5-minute sample window. This is intentionally reset at the
-	// boundary so the failure ratio is based on a bounded, cheap counter.
+	// Tumbling 5-minute sample window.
 	if g.WindowStart == 0 || nowMS-g.WindowStart >= gateWindow.Milliseconds() {
 		g.WindowStart = nowMS
 		g.Attempts = 0
@@ -838,7 +965,7 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 		g.Egresses = map[string]int64{}
 	}
 	g.Attempts++
-	if class == Outcome429 {
+	if class == Outcome429 || class == OutcomeQuotaUnknown {
 		g.Failures++
 		cutoff := nowMS - gateWindow.Milliseconds()
 		for k, ts := range g.Egresses {
@@ -848,8 +975,6 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 		}
 		g.Egresses[at.Egress] = nowMS
 	}
-	// Thresholds are evaluated on every attempt, not only on a 429. This
-	// makes the 10th attempt decisive even when it is a 2xx (F1).
 	if len(g.Egresses) < gateDistinct {
 		return
 	}
@@ -870,6 +995,7 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 	g.NextNodeProbe = nowMS + gateEscapeDelay.Milliseconds()
 	g.CanaryOK = false
 	g.NodeProbeUsed = false
+	g.CanaryLevel = 0
 	g.Egresses = map[string]int64{}
 	g.WindowStart = nowMS
 	g.Attempts = 0
@@ -883,6 +1009,7 @@ func (a *Admission) clearGateLocked(nowMS int64) {
 	g.PausedUntil = 0
 	g.CanaryOK = false
 	g.NodeProbeUsed = false
+	g.CanaryLevel = 0
 	g.NextCanary = 0
 	g.NextNodeProbe = 0
 	g.Egresses = map[string]int64{}
@@ -951,6 +1078,8 @@ func (a *Admission) AdmitGateProbe(model string) (*Attempt, string) {
 		case sem <- struct{}{}:
 			g.NodeProbeUsed = true
 			at := a.attemptLocked(c, model, false, false, false, sem)
+			at.Kind = AttemptGateProbe
+			at.GateCount = false
 			at.gateProbe = true
 			return at, ""
 		default:
@@ -983,7 +1112,10 @@ func (a *Admission) AdmitCanary(model string) (*Attempt, string) {
 	select {
 	case sem <- struct{}{}:
 		g.NextCanary = nowMS + gateCanaryPeriod.Milliseconds()
-		return a.attemptLocked(Candidate{Egress: EgressKeyDirect, Direct: true, Model: model}, model, false, false, false, sem), ""
+		at := a.attemptLocked(Candidate{Egress: EgressKeyDirect, Direct: true, Model: model}, model, false, false, false, sem)
+		at.Kind = AttemptCanary
+		at.GateCount = false
+		return at, ""
 	default:
 		return nil, "all_inflight"
 	}
