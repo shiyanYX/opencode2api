@@ -76,14 +76,32 @@ func classifyProbePreflight(status int, body []byte) string {
 	}
 }
 
+func probeCallLogEnabled() bool {
+	callLog.mu.RLock()
+	defer callLog.mu.RUnlock()
+	return callLog.path != ""
+}
+
 var defaultProbeClient = func(fp string) *http.Client {
 	return bunClientFor(proxyPool.getClient(fp))
 }
 
 var probeClientFor = defaultProbeClient
 
-func probeOne(ctx context.Context, node ProxyNode, model, healthURL string) probeResult {
-	res := probeResult{Fingerprint: node.Fingerprint, Stage: string(ProbeStagePreflight), At: time.Now()}
+func probeOne(ctx context.Context, node ProxyNode, model, healthURL string) (res probeResult) {
+	res = probeResult{Fingerprint: node.Fingerprint, Stage: string(ProbeStagePreflight), At: time.Now()}
+	if probeCallLogEnabled() {
+		ctx = beginCallLog(ctx, "/api/nodes/probe", model, false, "probe")
+		defer func() {
+			status := res.Status
+			if status == 0 && res.Class == probeClassOK {
+				status = http.StatusOK
+			}
+			callLogEvent(ctx, "probe", node.Fingerprint,
+				fmt.Sprintf("class=%s stage=%s status=%d latency=%dms", res.Class, res.Stage, res.Status, res.LatencyMS))
+			callLogFinish(ctx, status, res.Error, 0, 0, 0, 0)
+		}()
+	}
 	client := probeClientFor(node.Fingerprint)
 	if client == nil {
 		res.Class = probeClassUnreachable

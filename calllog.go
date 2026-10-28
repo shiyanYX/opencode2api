@@ -2137,7 +2137,7 @@ func writeCallLogLine(path string, line []byte) (int64, error) {
 // 只改落盘副本，内存环与无参数 /api/call-log 响应保持完整字段（老行不受影响）。
 func diskRecordForWrite(rec CallRecord) CallRecord {
 	d := rec
-	if !d.HasIssue() {
+	if !d.HasIssue() && d.RouteMode != "probe" {
 		d.Events = nil
 	}
 	if d.Path == defaultCallPath {
@@ -2234,7 +2234,7 @@ func (s *callLogStore) append(rec CallRecord) {
 	diskRec := rec
 	if s.dir != "" {
 		diskRec = diskRecordForWrite(rec)
-	} else if !diskRec.HasIssue() {
+	} else if !diskRec.HasIssue() && diskRec.RouteMode != "probe" {
 		diskRec.Events = nil
 	}
 	var line []byte

@@ -619,9 +619,12 @@ input,select,textarea{font-family:inherit;color:inherit}
   <section id="page-nodes" class="page" data-od-id="nodes">
     <div class="filter-chips" id="stateChips">
       <button class="chip active" data-f="all" onclick="setFilter('all')">全部 <span class="cnt" id="cntAll"></span></button>
-      <button class="chip" data-f="available" onclick="setFilter('available')">可用 <span class="cnt" id="cntAvail"></span></button>
-      <button class="chip" data-f="exhausted" onclick="setFilter('exhausted')">已耗尽 <span class="cnt" id="cntExh"></span></button>
-      <button class="chip" data-f="dead" onclick="setFilter('dead')">故障 <span class="cnt" id="cntDead"></span></button>
+      <button class="chip" data-f="ok" onclick="setFilter('ok')">可用 <span class="cnt" id="cntAvail"></span></button>
+      <button class="chip" data-f="quota" onclick="setFilter('quota')">配额 <span class="cnt" id="cntQuota"></span></button>
+      <button class="chip" data-f="cooling" onclick="setFilter('cooling')">冷却 <span class="cnt" id="cntCooling"></span></button>
+      <button class="chip" data-f="dead" onclick="setFilter('dead')">停用 <span class="cnt" id="cntDead"></span></button>
+      <button class="chip" data-f="unreachable" onclick="setFilter('unreachable')">不可达 <span class="cnt" id="cntUnreachable"></span></button>
+      <button class="chip" data-f="untested" onclick="setFilter('untested')">未测 <span class="cnt" id="cntUntested"></span></button>
     </div>
     <div class="actions">
       <button class="btn btn-primary" onclick="reloadSubs()">重新加载订阅</button>
@@ -1702,8 +1705,9 @@ function trendDemo(rng){
    节点池
    ============================================================ */
 function setFilter(f){filter=f;qa('#stateChips .chip').forEach(c=>c.classList.toggle('active',c.dataset.f===f));renderNodeTable()}
-const badgeMap={available:'<span class="badge available"><span class="bdot"></span>可用</span>',exhausted:'<span class="badge exhausted"><span class="bdot"></span>已耗尽</span>',dead:'<span class="badge dead"><span class="bdot"></span>故障</span>',idle:'<span class="badge idle"><span class="bdot"></span>未知</span>'};
-function badgeHtml(s){return badgeMap[s]||badgeMap.idle}
+const badgeMap={ok:'<span class="badge available"><span class="bdot"></span>可用</span>',quota:'<span class="badge exhausted"><span class="bdot"></span>配额</span>',cooling:'<span class="badge exhausted"><span class="bdot"></span>冷却</span>',dead:'<span class="badge dead"><span class="bdot"></span>停用</span>',unreachable:'<span class="badge dead"><span class="bdot"></span>不可达</span>',denied:'<span class="badge dead"><span class="bdot"></span>拒绝</span>',untested:'<span class="badge idle"><span class="bdot"></span>未测</span>'};
+function badgeHtml(s){return badgeMap[s]||badgeMap.untested}
+function availOf(n){return n.availability||({available:'ok',exhausted:'cooling',dead:'dead'}[n.state]||'untested')}
 function fmtAgo(iso){
   const t=Date.parse(iso);if(!Number.isFinite(t))return '-';
   const sec=Math.max(0,Math.floor((Date.now()-t)/1000));
@@ -1755,7 +1759,9 @@ function showNodeDetail(fp){
   const missing='<span class="muted">未提供</span>';
   const gate=v&&v.gate;
   const rows=[
+    ['判定原因',n.availability_reason?esc(n.availability_reason):missing],
     ['可用性',probeTagHtml(n)],
+    ['旧评分（force 下冻结）',n.score!=null?esc(String(n.score))+' / '+esc(n.tier||'-'):missing],
     ['配额至',v&&v.quota?'<code>'+esc(v.quota.model)+'</code> · '+esc(new Date(v.quota.until).toLocaleString()):missing],
     ['熔断',v?(gate?(gate.active?'熔断中':'正常'):missing):missing],
     ['Canary level',gate?esc(String(gate.canary_level)):missing],
@@ -1774,15 +1780,18 @@ function showNodeDetail(fp){
   overlay.onclick=e=>{if(e.target===overlay)close()};
 }
 function renderNodeTable(){
-  const tb=q('#nodeTable tbody');const rows=nodeData.filter(n=>filter==='all'||n.state===filter);
+  const tb=q('#nodeTable tbody');const rows=nodeData.filter(n=>filter==='all'||availOf(n)===filter);
   q('#cntAll').textContent=nodeData.length;
-  q('#cntAvail').textContent=nodeData.filter(n=>n.state==='available').length;
-  q('#cntExh').textContent=nodeData.filter(n=>n.state==='exhausted').length;
-  q('#cntDead').textContent=nodeData.filter(n=>n.state==='dead').length;
+  q('#cntAvail').textContent=nodeData.filter(n=>availOf(n)==='ok').length;
+  q('#cntQuota').textContent=nodeData.filter(n=>availOf(n)==='quota').length;
+  q('#cntCooling').textContent=nodeData.filter(n=>availOf(n)==='cooling').length;
+  q('#cntDead').textContent=nodeData.filter(n=>availOf(n)==='dead').length;
+  q('#cntUnreachable').textContent=nodeData.filter(n=>availOf(n)==='unreachable').length;
+  q('#cntUntested').textContent=nodeData.filter(n=>availOf(n)==='untested').length;
   if(!rows.length){tb.innerHTML='<tr><td colspan="10" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}
   tb.innerHTML=rows.map(n=>{
     const lat=(n.latency_ms!=null&&n.latency_ms>=0)?'<span class="num '+latClass(n.latency_ms)+'">'+n.latency_ms+' ms</span>':(n.latency_ms!=null&&n.latency_ms<0?'<span class="muted">超时</span>':'<span class="muted">-</span>');
-    return '<tr class="'+(n.active?'hl':'')+'"><td><span class="node-name" style="cursor:pointer" title="查看详情" onclick="showNodeDetail(\''+n.fingerprint+'\')">'+esc(n.name)+(n.active?'<span class="tag cur">当前</span>':'')+(n.manual?'<span class="tag man">手动</span>':'')+'</span></td><td><span class="proto">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="num">'+lat+'</td><td>'+probeTagHtml(n)+'</td><td>'+quotaCell(n)+'</td><td>'+fuseCell(n)+'</td><td class="num muted">'+esc(fmtTime(n.cooldown_until))+'</td><td class="err">'+esc(n.last_error||'-')+'</td><td class="acts"><button class="btn btn-sm btn-primary" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-sm btn-ghost" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button> <button class="btn btn-sm btn-ghost" onclick="probeNode(\''+n.fingerprint+'\',this)">测试</button></td></tr>';
+    return '<tr class="'+(n.active?'hl':'')+'"><td><span class="node-name" style="cursor:pointer" title="查看详情" onclick="showNodeDetail(\''+n.fingerprint+'\')">'+esc(n.name)+(n.active?'<span class="tag cur">当前</span>':'')+(n.manual?'<span class="tag man">手动</span>':'')+'</span></td><td><span class="proto">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(availOf(n))+'</td><td class="num">'+lat+'</td><td>'+probeTagHtml(n)+'</td><td>'+quotaCell(n)+'</td><td>'+fuseCell(n)+'</td><td class="num muted">'+esc(fmtTime(n.cooldown_until))+'</td><td class="err">'+esc(n.last_error||'-')+'</td><td class="acts"><button class="btn btn-sm btn-primary" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-sm btn-ghost" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button> <button class="btn btn-sm btn-ghost" onclick="probeNode(\''+n.fingerprint+'\',this)">测试</button></td></tr>';
   }).join('');
 }
 async function nodeAction(action,fp){

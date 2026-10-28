@@ -7650,22 +7650,24 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 
 // nodeAdminView API 视图：只读字段 + 当前/手动标记 + 健康探测结果。
 type nodeAdminView struct {
-	Name          string       `json:"name"`
-	Protocol      string       `json:"protocol"`
-	Address       string       `json:"address"`
-	Port          int          `json:"port"`
-	Fingerprint   string       `json:"fingerprint"`
-	State         string       `json:"state"`
-	MarkedAt      string       `json:"marked_at,omitempty"`
-	CooldownUntil *string      `json:"cooldown_until"` // null = 无冷却（裁定 5：零值后端归一化）
-	LastError     *string      `json:"last_error"`     // null = 无错误（task-67 契约：string|null）
-	LastUsedAt    string       `json:"last_used_at,omitempty"`
-	LatencyMs     int64        `json:"latency_ms,omitempty"`
-	LastProbeAt   *string      `json:"last_probe_at"` // null = 从未探测（裁定 5：零值后端归一化）
-	Active        bool         `json:"active"`
-	Manual        bool         `json:"manual"`
-	Probe         *probeResult `json:"probe"`
-	V5            *v5NodeView  `json:"v5"`
+	Name               string       `json:"name"`
+	Protocol           string       `json:"protocol"`
+	Address            string       `json:"address"`
+	Port               int          `json:"port"`
+	Fingerprint        string       `json:"fingerprint"`
+	State              string       `json:"state"`
+	MarkedAt           string       `json:"marked_at,omitempty"`
+	CooldownUntil      *string      `json:"cooldown_until"` // null = 无冷却（裁定 5：零值后端归一化）
+	LastError          *string      `json:"last_error"`     // null = 无错误（task-67 契约：string|null）
+	LastUsedAt         string       `json:"last_used_at,omitempty"`
+	LatencyMs          int64        `json:"latency_ms,omitempty"`
+	LastProbeAt        *string      `json:"last_probe_at"` // null = 从未探测（裁定 5：零值后端归一化）
+	Active             bool         `json:"active"`
+	Manual             bool         `json:"manual"`
+	Probe              *probeResult `json:"probe"`
+	V5                 *v5NodeView  `json:"v5"`
+	Availability       string       `json:"availability"`
+	AvailabilityReason string       `json:"availability_reason"`
 
 	// task-67：打分字段（字段名是前端契约，见 docs/research/node-scoring-spec.md §5.1）
 	nodeScoreView
@@ -7682,7 +7684,7 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 		probeSnap := nodeProber.Snapshot()
 		activeName, manualName := "", ""
 		out := make([]nodeAdminView, 0, len(nodes))
-		health := map[string]int{"available": 0, "exhausted": 0, "dead": 0}
+		health := map[string]int{}
 		for _, n := range nodes {
 			if n.Fingerprint == pick {
 				activeName = n.Name
@@ -7702,11 +7704,12 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 				v.Probe = &probeCopy
 			}
 			v.V5 = v5NodeViewFor(n.Fingerprint, subKeyOf(n.Name), scoringNow)
+			v.Availability, v.AvailabilityReason = nodeAvailability(n.State.String(), v.V5, v.Probe, scoringNow)
+			health[v.Availability]++
 			if n.LastError != "" {
 				e := n.LastError
 				v.LastError = &e
 			}
-			health[v.State]++
 			if !n.MarkedAt.IsZero() {
 				v.MarkedAt = n.MarkedAt.Format(time.RFC3339)
 			}
@@ -7725,16 +7728,18 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
-			"active_fp":       pick,
-			"active_name":     activeName,
-			"manual_fp":       manual,
-			"manual_name":     manualName,
-			"healthy":         health["available"],
-			"exhausted_count": health["exhausted"],
-			"dead_count":      health["dead"],
-			"nodes":           out,
-			"subscriptions":   subManager.snapshot(),
-			"node_alert":      nodeAlerts.snapshot(),
+			"active_fp":         pick,
+			"active_name":       activeName,
+			"manual_fp":         manual,
+			"manual_name":       manualName,
+			"healthy":           health[availabilityOK],
+			"exhausted_count":   health[availabilityQuota] + health[availabilityCooling],
+			"dead_count":        health[availabilityDead],
+			"unreachable_count": health[availabilityUnreachable],
+			"untested_count":    health[availabilityUntested],
+			"nodes":             out,
+			"subscriptions":     subManager.snapshot(),
+			"node_alert":        nodeAlerts.snapshot(),
 			// task-67：打分快照元信息（前端显示「分数更新于 X」）
 			"computed_at": scoringNow.Format(time.RFC3339),
 			"scoring": map[string]any{

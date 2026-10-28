@@ -1019,6 +1019,7 @@ type v5NodeView struct {
 	Quota      *v5NodeQuotaView `json:"quota,omitempty"`
 	Gate       *v5NodeGateView  `json:"gate"`
 	Lifecycle  string           `json:"lifecycle"`
+	DeadUntil  int64            `json:"dead_until,omitempty"`
 }
 
 func v5NodeViewFor(fp, sub string, now time.Time) *v5NodeView {
@@ -1039,6 +1040,7 @@ func v5NodeViewFor(fp, sub string, now time.Time) *v5NodeView {
 	}
 	if e := rt.adm.st.Egress[egress]; e != nil {
 		view.Lifecycle = e.Lifecycle
+		view.DeadUntil = e.DeadUntil
 	}
 	var earliest *v5NodeQuotaView
 	for key, q := range rt.adm.st.Quota {
