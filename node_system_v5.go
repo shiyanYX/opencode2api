@@ -898,7 +898,7 @@ func (a *Admission) ObserveVirtual(model, egress, sub string, class OutcomeClass
 func (a *Admission) SnapshotCounts() (coolingPairs, quarantinedSubs int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	now := a.clock.Now().UnixMilli()
+	now := a.now().UnixMilli()
 	for _, p := range a.st.Pairs {
 		if p != nil && p.Until > now {
 			coolingPairs++

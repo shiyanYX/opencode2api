@@ -220,3 +220,15 @@ func TestV5CandidateBuild(t *testing.T) {
 		t.Fatalf("direct candidate=%+v", got[2])
 	}
 }
+
+// SnapshotCounts 必须走 a.now()：生产 Admission 的 clock 为 nil，
+// 直接调 a.clock.Now() 会让面板 /api/stats 触发 nil 解引用 panic。
+func TestSnapshotCountsNilClock(t *testing.T) {
+	st := NewNodeStateV5(Now())
+	st.Pairs[PairKey(legacyPairModel, "node:x")] = &PairState{Until: Now().Add(time.Minute).UnixMilli()}
+	a := NewAdmission(st, 2, nil)
+	cooling, subs := a.SnapshotCounts()
+	if cooling != 1 || subs != 0 {
+		t.Fatalf("SnapshotCounts = (%d,%d), want (1,0)", cooling, subs)
+	}
+}
