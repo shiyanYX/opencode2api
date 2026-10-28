@@ -1069,7 +1069,7 @@ type AppConfig struct {
 	NodeHealthIntervalMinutes int    `json:"node_health_interval_minutes,omitempty"`
 	NodeHealthProbeURL        string `json:"node_health_probe_url,omitempty"`
 	ProbeModel                string `json:"probe_model,omitempty"`
-	ProbeCountsTowardGate     bool   `json:"probe_counts_toward_gate,omitempty"`
+	ProbeCountsTowardGate     *bool  `json:"probe_counts_toward_gate,omitempty"`
 
 	// ---- 缓存增强 ----
 	// PromptCacheRetention 注入上游的 prompt 前缀缓存保留时长：
@@ -1414,7 +1414,7 @@ func applyConfig(cfg AppConfig) {
 		proxyPool.probeInterval = 0 // 未设 → 默认 15min
 	}
 	proxyPool.probeURL = cfg.NodeHealthProbeURL
-	v5ApplyProbeGateConfig(cfg.ProbeCountsTowardGate)
+	v5ApplyProbeGateConfig(cfg.ProbeCountsTowardGate != nil && *cfg.ProbeCountsTowardGate)
 }
 
 var (
@@ -7373,7 +7373,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"node_health_interval_minutes":  merged.NodeHealthIntervalMinutes,
 			"node_health_probe_url":         merged.NodeHealthProbeURL,
 			"probe_model":                   probeModelOrDefault(merged.ProbeModel),
-			"probe_counts_toward_gate":      merged.ProbeCountsTowardGate,
+			"probe_counts_toward_gate":      merged.ProbeCountsTowardGate != nil && *merged.ProbeCountsTowardGate,
 			"prompt_cache_retention":        merged.PromptCacheRetention,
 			"cache_control_breakpoints":     merged.CacheControlBreakpoints,
 			"text_only_models":              merged.TextOnlyModels,
@@ -7450,6 +7450,7 @@ type configPatch struct {
 	CacheControlBreakpoints    *bool                `json:"cache_control_breakpoints"`
 	TextOnlyModels             []string             `json:"text_only_models"`
 	Socks5Sticky               *bool                `json:"socks5_sticky"`
+	ProbeCountsTowardGate      *bool                `json:"probe_counts_toward_gate"`
 	ApiKey                     *string              `json:"api_key"`
 	TruncationStopReason       *string              `json:"truncation_stop_reason"`
 }
@@ -7525,6 +7526,9 @@ func mergeAppConfig(base, patch AppConfig) AppConfig {
 	}
 	if patch.Socks5Sticky != nil {
 		out.Socks5Sticky = patch.Socks5Sticky
+	}
+	if patch.ProbeCountsTowardGate != nil {
+		out.ProbeCountsTowardGate = patch.ProbeCountsTowardGate
 	}
 	if patch.TruncationStopReason != "" {
 		out.TruncationStopReason = patch.TruncationStopReason
@@ -7603,6 +7607,9 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	}
 	if patch.Socks5Sticky != nil {
 		out.Socks5Sticky = patch.Socks5Sticky
+	}
+	if patch.ProbeCountsTowardGate != nil {
+		out.ProbeCountsTowardGate = patch.ProbeCountsTowardGate
 	}
 	if patch.ApiKey != nil {
 		out.ApiKey = *patch.ApiKey

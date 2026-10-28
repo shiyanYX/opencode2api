@@ -202,7 +202,11 @@ func TestProbeCountsTowardGateConfig(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if got := loadConfig(path).ProbeCountsTowardGate; got != want {
+		got := false
+		if p := loadConfig(path).ProbeCountsTowardGate; p != nil {
+			got = *p
+		}
+		if got != want {
 			t.Fatalf("config=%v want %v", got, want)
 		}
 	}

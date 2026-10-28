@@ -137,7 +137,9 @@ func v5GetRuntime() *v5Runtime {
 	}
 	now := time.Now()
 	adm := NewAdmission(st, 8, v5Candidates)
-	adm.probeCountsTowardGate = loadConfig(configPath).ProbeCountsTowardGate
+	if p := loadConfig(configPath).ProbeCountsTowardGate; p != nil {
+		adm.probeCountsTowardGate = *p
+	}
 	v5RT = &v5Runtime{
 		started:    now,
 		shadowOnly: true,
