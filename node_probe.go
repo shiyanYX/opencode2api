@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -76,6 +77,12 @@ func classifyProbePreflight(status int, body []byte) string {
 	}
 }
 
+var probeReqSeq uint64
+
+func newProbeReqID() string {
+	return fmt.Sprintf("req_probe_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&probeReqSeq, 1))
+}
+
 func probeCallLogEnabled() bool {
 	callLog.mu.RLock()
 	defer callLog.mu.RUnlock()
@@ -91,6 +98,7 @@ var probeClientFor = defaultProbeClient
 func probeOne(ctx context.Context, node ProxyNode, model, healthURL string) (res probeResult) {
 	res = probeResult{Fingerprint: node.Fingerprint, Stage: string(ProbeStagePreflight), At: time.Now()}
 	if probeCallLogEnabled() {
+		ctx = context.WithValue(ctx, reqIDKey, newProbeReqID())
 		ctx = beginCallLog(ctx, "/api/nodes/probe", model, false, "probe")
 		defer func() {
 			status := res.Status

@@ -12,12 +12,14 @@ func TestNodesAvailabilityStatsAndFields(t *testing.T) {
 	p := setupProbeHTTP(t, []*ProxyNode{
 		{Name: "sub::n1", Protocol: "socks5", Address: "10.0.0.1", Port: 1080},
 		{Name: "sub::n2", Protocol: "socks5", Address: "10.0.0.2", Port: 1080},
+		{Name: "sub::n3", Protocol: "socks5", Address: "10.0.0.3", Port: 1080},
 	})
 	t.Setenv("NODE_SYSTEM", "off")
 	nodes := p.snapshot()
 	nodeProber.mu.Lock()
 	nodeProber.results[nodes[0].Fingerprint] = probeResult{Fingerprint: nodes[0].Fingerprint, Class: probeClassUnreachable, Stage: string(ProbeStageRequest), At: time.Now()}
 	nodeProber.results[nodes[1].Fingerprint] = probeResult{Fingerprint: nodes[1].Fingerprint, Class: probeClassOK, Stage: string(ProbeStageRequest), At: time.Now()}
+	nodeProber.results[nodes[2].Fingerprint] = probeResult{Fingerprint: nodes[2].Fingerprint, Class: probeClassDenied, Stage: string(ProbeStageRequest), At: time.Now()}
 	nodeProber.mu.Unlock()
 
 	rr := httptest.NewRecorder()
@@ -31,6 +33,7 @@ func TestNodesAvailabilityStatsAndFields(t *testing.T) {
 		Dead        int             `json:"dead_count"`
 		Unreachable int             `json:"unreachable_count"`
 		Untested    int             `json:"untested_count"`
+		Denied      int             `json:"denied_count"`
 		Nodes       []nodeAdminView `json:"nodes"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
@@ -46,7 +49,7 @@ func TestNodesAvailabilityStatsAndFields(t *testing.T) {
 	if got := byFP[nodes[1].Fingerprint].Availability; got != availabilityOK {
 		t.Fatalf("ok availability=%q", got)
 	}
-	if resp.Healthy != 1 || resp.Unreachable != 1 || resp.Untested != 0 || resp.Dead != 0 || resp.Exhausted != 0 {
+	if resp.Healthy != 1 || resp.Unreachable != 1 || resp.Denied != 1 || resp.Untested != 0 || resp.Dead != 0 || resp.Exhausted != 0 {
 		t.Fatalf("stats=%+v", resp)
 	}
 	if byFP[nodes[0].Fingerprint].AvailabilityReason == "" {

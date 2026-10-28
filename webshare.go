@@ -127,7 +127,7 @@ func webshareTransientError(err error) bool {
 		return true
 	}
 	var ne net.Error
-	return errors.As(err, &ne)
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 func fetchWebsharePage(ctx context.Context, client *http.Client, w WebshareConfig, page int) (webshareListResponse, error) {

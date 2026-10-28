@@ -623,6 +623,7 @@ input,select,textarea{font-family:inherit;color:inherit}
       <button class="chip" data-f="quota" onclick="setFilter('quota')">配额 <span class="cnt" id="cntQuota"></span></button>
       <button class="chip" data-f="cooling" onclick="setFilter('cooling')">冷却 <span class="cnt" id="cntCooling"></span></button>
       <button class="chip" data-f="dead" onclick="setFilter('dead')">停用 <span class="cnt" id="cntDead"></span></button>
+      <button class="chip" data-f="denied" onclick="setFilter('denied')">拒绝 <span class="cnt" id="cntDenied"></span></button>
       <button class="chip" data-f="unreachable" onclick="setFilter('unreachable')">不可达 <span class="cnt" id="cntUnreachable"></span></button>
       <button class="chip" data-f="untested" onclick="setFilter('untested')">未测 <span class="cnt" id="cntUntested"></span></button>
     </div>
@@ -1786,6 +1787,7 @@ function renderNodeTable(){
   q('#cntQuota').textContent=nodeData.filter(n=>availOf(n)==='quota').length;
   q('#cntCooling').textContent=nodeData.filter(n=>availOf(n)==='cooling').length;
   q('#cntDead').textContent=nodeData.filter(n=>availOf(n)==='dead').length;
+  q('#cntDenied').textContent=nodeData.filter(n=>availOf(n)==='denied').length;
   q('#cntUnreachable').textContent=nodeData.filter(n=>availOf(n)==='unreachable').length;
   q('#cntUntested').textContent=nodeData.filter(n=>availOf(n)==='untested').length;
   if(!rows.length){tb.innerHTML='<tr><td colspan="10" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}

@@ -14,6 +14,7 @@ func TestNodeAvailabilityPriority(t *testing.T) {
 	probeUnreach := &probeResult{Class: probeClassUnreachable, Stage: string(ProbeStagePreflight)}
 	probeTimeout := &probeResult{Class: probeClassUnreachable, Stage: string(ProbeStageRequest)}
 	probeDenied := &probeResult{Class: probeClassDenied, Stage: string(ProbeStageRequest)}
+	probeError := &probeResult{Class: probeClassError, Stage: string(ProbeStageRequest)}
 
 	cases := []struct {
 		name string
@@ -30,6 +31,7 @@ func TestNodeAvailabilityPriority(t *testing.T) {
 		{"probe unreachable preflight", "available", &v5NodeView{Lifecycle: "active"}, probeUnreach, "unreachable"},
 		{"probe unreachable request", "available", &v5NodeView{Lifecycle: "active"}, probeTimeout, "unreachable"},
 		{"probe denied", "available", &v5NodeView{Lifecycle: "active"}, probeDenied, "denied"},
+		{"probe 5xx", "available", &v5NodeView{Lifecycle: "active"}, probeError, "unreachable"},
 		{"probe ok", "available", &v5NodeView{Lifecycle: "active"}, probeOK, "ok"},
 		{"v5 no probe", "available", &v5NodeView{Lifecycle: "active"}, nil, "untested"},
 		{"v5 missing old available", "available", nil, nil, "ok"},

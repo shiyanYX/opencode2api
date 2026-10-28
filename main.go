@@ -7737,6 +7737,7 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 			"dead_count":        health[availabilityDead],
 			"unreachable_count": health[availabilityUnreachable],
 			"untested_count":    health[availabilityUntested],
+			"denied_count":      health[availabilityDenied],
 			"nodes":             out,
 			"subscriptions":     subManager.snapshot(),
 			"node_alert":        nodeAlerts.snapshot(),
