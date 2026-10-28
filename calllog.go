@@ -2328,7 +2328,9 @@ func (s *callLogStore) append(rec CallRecord) {
 			// 漏掉推进 ⇒ 下次 backfill 会把这条再扫一遍（重复计数、单调发散）；
 			// 漏掉 absorbedRecords ⇒ 守恒判据差 1 ⇒ 每次查询触发一次全量重扫。
 			// 守恒式两表之和见 checkBucketConservation。
-			if false {
+			if rec.RouteMode == "probe" {
+				// 探测记录只落盘、可查看，不进任何统计桶。计入 unabsorbed
+				// 是为了守恒式 sum == absorbed - unabsorbed 仍然成立。
 				unabsorbedRecords++
 			} else if rec.Unmapped {
 				if unmappedBuckets == nil {
