@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -603,6 +604,35 @@ func statusFor(reason string) int {
 
 // v5NoCandidateHTTP is the single mapping from a force NoCandidate lease
 // decision to the HTTP response. Retry-After is rounded up to whole seconds.
+type v5FailureError struct {
+	reason     string
+	retryAfter time.Duration
+}
+
+func (e *v5FailureError) Error() string { return "v5 gate: " + e.reason }
+
+func (e *v5FailureError) errorType() string {
+	switch e.reason {
+	case "quota":
+		return "quota_exhausted"
+	case "gate", "halt":
+		return "gate"
+	default:
+		return "no_candidate"
+	}
+}
+
+func (e *v5FailureError) message() string {
+	switch e.errorType() {
+	case "quota_exhausted":
+		return "upstream quota exhausted"
+	case "gate":
+		return "upstream gate paused"
+	default:
+		return "no candidate available"
+	}
+}
+
 func v5NoCandidateHTTP(res EgressResult) (int, http.Header, error) {
 	reason := res.NoCandidateReason
 	if reason == "" {
@@ -612,7 +642,63 @@ func v5NoCandidateHTTP(res EgressResult) (int, http.Header, error) {
 	if secs < 1 {
 		secs = 1
 	}
-	return statusFor(reason), http.Header{"Retry-After": {fmt.Sprintf("%d", secs)}}, fmt.Errorf("v5 gate: %s", reason)
+	return statusFor(reason), http.Header{"Retry-After": {fmt.Sprintf("%d", secs)}},
+		&v5FailureError{reason: reason, retryAfter: res.RetryAfter}
+}
+
+func v5FailurePayload(err error) (*v5FailureError, int) {
+	var f *v5FailureError
+	if !errors.As(err, &f) {
+		return nil, 0
+	}
+	secs := int64((f.retryAfter + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	return f, int(secs)
+}
+
+func writeV5Failure(w http.ResponseWriter, status int, hdr http.Header, err error) bool {
+	f, secs := v5FailurePayload(err)
+	if f == nil {
+		return false
+	}
+	for k, vals := range hdr {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"message":       f.message(),
+		"type":          f.errorType(),
+		"retry_after_s": secs,
+	}})
+	return true
+}
+
+func writeV5FailureClaude(w http.ResponseWriter, status int, hdr http.Header, err error) bool {
+	f, secs := v5FailurePayload(err)
+	if f == nil {
+		return false
+	}
+	for k, vals := range hdr {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type": "error",
+		"error": map[string]any{
+			"message":       f.message(),
+			"type":          f.errorType(),
+			"retry_after_s": secs,
+		},
+	})
+	return true
 }
 
 // v5Winter records that the pool-wide 429 gate stopped normal selection.

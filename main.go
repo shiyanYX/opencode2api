@@ -4150,9 +4150,12 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 
 		headerWritten := false
 		for streamAttempt := 0; ; streamAttempt++ {
-			upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, req.Model, auth)
+			upResp, status, hdr, err := callOpenCodeAPIStream(clCtx, upstreamBody, req.Model, auth)
 			if err != nil || status < 200 || status >= 300 {
 				callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
+				if writeV5Failure(w, status, hdr, err) {
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				if upResp != nil {
@@ -4241,9 +4244,12 @@ func chatCompletionsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clCtx := beginCallLog(r.Context(), r.URL.Path, req.Model, false, authModeString(auth.Mode))
-	respBody, status, _, err := callOpenCodeAPI(clCtx, upstreamBody, req.Model, auth)
+	respBody, status, hdr, err := callOpenCodeAPI(clCtx, upstreamBody, req.Model, auth)
 	if err != nil || status < 200 || status >= 300 {
 		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
+		if writeV5Failure(w, status, hdr, err) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
@@ -5268,9 +5274,12 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, true, authModeString(auth.Mode))
 		var clPt, clCt, clCc, clCr int64
 		for attempt := 0; ; attempt++ {
-			upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
+			upResp, status, hdr, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
 			if err != nil || status < 200 || status >= 300 {
 				callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
+				if writeV5FailureClaude(w, status, hdr, err) {
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				if upResp != nil {
@@ -5305,9 +5314,12 @@ func claudeMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, false, authModeString(auth.Mode))
-	respBody, status, _, err := callOpenCodeAPI(clCtx, upstreamBody, chatReq.Model, auth)
+	respBody, status, hdr, err := callOpenCodeAPI(clCtx, upstreamBody, chatReq.Model, auth)
 	if err != nil || status < 200 || status >= 300 {
 		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
+		if writeV5FailureClaude(w, status, hdr, err) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
@@ -6516,9 +6528,12 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 		clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, true, authModeString(auth.Mode))
 		var rpt, rct, rcc, rcr int64
 		for attempt := 0; ; attempt++ {
-			upResp, status, _, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
+			upResp, status, hdr, err := callOpenCodeAPIStream(clCtx, upstreamBody, chatReq.Model, auth)
 			if err != nil || status < 200 || status >= 300 {
 				callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
+				if writeV5Failure(w, status, hdr, err) {
+					return
+				}
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(status)
 				if upResp != nil {
@@ -6555,9 +6570,12 @@ func responsesHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clCtx := beginCallLog(r.Context(), r.URL.Path, chatReq.Model, false, authModeString(auth.Mode))
-	respBody, status, _, err := callOpenCodeAPI(clCtx, upstreamBody, chatReq.Model, auth)
+	respBody, status, hdr, err := callOpenCodeAPI(clCtx, upstreamBody, chatReq.Model, auth)
 	if err != nil || status < 200 || status >= 300 {
 		callLogFinish(clCtx, status, fmt.Sprintf("upstream http %d", status), 0, 0, 0, 0)
+		if writeV5Failure(w, status, hdr, err) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		if len(respBody) > 0 {
