@@ -217,8 +217,19 @@ input,select,textarea{font-family:inherit;color:inherit}
 .tag.avail-quota{background:var(--orange-dim);color:var(--orange)}
 .tag.avail-denied{background:var(--purple-dim);color:var(--purple)}
 .tag.avail-unreachable{background:var(--surface-2);color:var(--text-ter)}
+.tag.avail-timeout{background:var(--orange-dim);color:var(--orange)}
 .tag.avail-canceled{background:var(--surface-2);color:var(--text-ter)}
 .tag.avail-error{background:var(--red-dim);color:var(--red)}
+.tag.v5-quota{background:var(--orange-dim);color:var(--orange)}
+.tag.v5-fuse{background:var(--purple-dim);color:var(--purple)}
+.tag.v5-cool{background:var(--blue-dim);color:var(--blue)}
+.tag.v5-dead{background:var(--red-dim);color:var(--red)}
+#nodeTable{table-layout:fixed}
+#nodeTable th,#nodeTable td{overflow:hidden;text-overflow:ellipsis}
+#nodeTable td{height:36px}
+#nodeTable .node-name,#nodeTable .err{max-width:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#nodeTable .acts{overflow:visible}
+.v5-model{display:block;margin-top:2px;font-size:10.5px;color:var(--text-ter);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .avail-meta{display:inline-block;margin-left:5px;font-size:10.5px;color:var(--text-ter);font-family:var(--mono);white-space:nowrap}
 .node-name{font-weight:600}
 .proto{font-family:var(--mono);font-size:12px;color:var(--text-sec)}
@@ -624,7 +635,7 @@ input,select,textarea{font-family:inherit;color:inherit}
     <div class="latdist" id="latdist"></div>
     <div class="card" style="padding:14px 0 6px">
       <div style="overflow-x:auto"><table class="tbl" id="nodeTable">
-        <thead><tr><th style="width:18%">名称</th><th style="width:8%">协议</th><th style="width:8%">状态</th><th class="num" style="width:8%">延迟</th><th style="width:17%">可用性</th><th style="width:13%">冷却至</th><th style="width:16%">最近错误</th><th style="width:12%">操作</th></tr></thead>
+        <thead><tr><th style="width:15%">名称</th><th style="width:6%">协议</th><th style="width:7%">状态</th><th class="num" style="width:7%">延迟</th><th style="width:13%">可用性</th><th style="width:9%">配额</th><th style="width:8%">熔断</th><th style="width:8%">冷却至</th><th style="width:9%">最近错误</th><th style="width:18%">操作</th></tr></thead>
         <tbody></tbody>
       </table></div>
     </div>
@@ -670,6 +681,7 @@ input,select,textarea{font-family:inherit;color:inherit}
         <div class="field"><label>健康检查间隔（分钟，0=默认15）</label><input id="q_health_interval" type="number" min="1" max="1440" value="15"></div>
         <div class="field"><label>健康检查探针 URL</label><input id="q_health_url" placeholder="https://opencode.ai/zen/v1/models"></div>
       </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:12px"><input id="probe_counts_toward_gate" type="checkbox"> 探测计入熔断窗口</label>
       <div class="muted" style="font-size:11.5px;margin-top:8px">403 且无上述签名视为耗尽；429 无签名不视为耗尽。耗尽冷却到期自动恢复（标记清除）；故障节点每分钟复探，探测成功即恢复。</div>
     </div>
     <div class="actions" style="margin-top:4px">
@@ -1002,7 +1014,7 @@ async function loadNodes(){
   try{const d=await fetchJSON('/api/nodes',{core:'nodes'});nodeData=d.nodes||[];subData=(d.subscriptions||[]).filter(s=>s.url!=='webshare API');applyWsSnapshot(d.subscriptions||[]);renderOverview(d);renderNodeTable();renderLatencyDist(nodeData);renderSubTable();renderWebshareTable()}catch(e){
     // 保留上一次渲染好的行：整表清空会把「拿不到」渲染成「这个网关一个节点都没有」。
     const tb=q('#nodeTable tbody');
-    if(tb)tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="8" class="empty-hint">未更新：'+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>');
+    if(tb)tb.insertAdjacentHTML('afterbegin','<tr class="stat-err-row"><td colspan="10" class="empty-hint">未更新：'+esc(e.message)+' <button class="btn btn-sm btn-ghost" onclick="loadNodes()">重试</button></td></tr>');
   }
 }
 /* GET /api/stats?range=<当前时间窗> 一次返回 models 聚合 + trends_by_model，
@@ -1699,15 +1711,66 @@ function fmtAgo(iso){
   if(sec<3600)return Math.floor(sec/60)+' 分钟前';
   return Math.floor(sec/3600)+' 小时前';
 }
-const probeTagMap={ok:['avail-ok','可用'],quota:['avail-quota','配额'],denied:['avail-denied','拒绝'],unreachable:['avail-unreachable','不可达'],canceled:['avail-canceled','取消'],error:['avail-error','错误']};
+const probeTagMap={ok:['avail-ok','可用'],quota:['avail-quota','配额 429'],quota_unknown:['avail-quota','配额 429'],denied:['avail-denied','403'],unreachable:['avail-unreachable','不可达'],timeout:['avail-timeout','超时'],canceled:['avail-canceled','取消'],error:['avail-error','错误']};
 function probeTagHtml(n){
   const p=n.probe;
   if(!p||!p.class)return '<span class="muted">未测试</span>';
-  const d=probeTagMap[p.class]||probeTagMap.error;
+  const key=(p.class==='unreachable'&&p.stage==='request')?'timeout':p.class;
+  const d=probeTagMap[key]||probeTagMap.error;
   let out='<span class="tag '+d[0]+'">'+d[1]+'</span>';
   if(p.class==='ok'&&p.latency_ms>0)out+='<span class="avail-meta">'+p.latency_ms+' ms</span>';
   if(p.at)out+='<span class="avail-meta">'+esc(fmtAgo(p.at))+'</span>';
   return out;
+}
+function fmtV5Remain(ms){
+  const sec=Math.max(0,Math.ceil((Number(ms)-Date.now())/1000));
+  if(sec>=3600){const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);return h+'小时'+(m?m+'分':'')}
+  if(sec>=60)return Math.floor(sec/60)+'分'+(sec%60?sec%60+'秒':'');
+  return sec+'秒';
+}
+function quotaCell(n){
+  if(!n.v5)return '<span class="muted">未提供</span>';
+  const q=n.v5.quota;
+  if(!q||!q.until)return '<span class="muted">未提供</span>';
+  return '<span class="tag v5-quota">'+esc(fmtV5Remain(q.until))+'</span>'+(q.model?'<span class="v5-model">'+esc(q.model)+'</span>':'');
+}
+function fuseCell(n){
+  if(!n.v5)return '<span class="muted">未提供</span>';
+  const v=n.v5,now=Date.now();
+  const pair=v.pair_until&&v.pair_until>now,gate=v.gate&&v.gate.active;
+  if(pair&&gate){
+    const gateEnd=v.gate.paused_until||0;
+    if(gateEnd&&gateEnd<v.pair_until)return '<span class="tag v5-fuse">熔断中</span>';
+    return '<span class="tag v5-cool">冷却 '+esc(fmtV5Remain(v.pair_until))+'</span>';
+  }
+  if(pair)return '<span class="tag v5-cool">冷却 '+esc(fmtV5Remain(v.pair_until))+'</span>';
+  if(gate)return '<span class="tag v5-fuse">熔断中</span>';
+  if(v.lifecycle==='dead')return '<span class="tag v5-dead">停用</span>';
+  return '<span class="muted">正常</span>';
+}
+function showNodeDetail(fp){
+  const n=nodeData.find(x=>x.fingerprint===fp);if(!n)return;
+  const v=n.v5,p=n.probe;
+  const missing='<span class="muted">未提供</span>';
+  const gate=v&&v.gate;
+  const rows=[
+    ['可用性',probeTagHtml(n)],
+    ['配额至',v&&v.quota?'<code>'+esc(v.quota.model)+'</code> · '+esc(new Date(v.quota.until).toLocaleString()):missing],
+    ['熔断',v?(gate?(gate.active?'熔断中':'正常'):missing):missing],
+    ['Canary level',gate?esc(String(gate.canary_level)):missing],
+    ['Next canary',gate&&gate.next_canary?esc(new Date(gate.next_canary).toLocaleString()):missing],
+    ['Node probe used',gate?esc(gate.node_probe_used?'是':'否'):missing],
+    ['Pair until',v&&v.pair_until?esc(new Date(v.pair_until).toLocaleString()):(v?'无冷却':missing)],
+    ['Lifecycle',v&&v.lifecycle?esc(v.lifecycle):(v?'未提供':missing)],
+    ['Probe stage',p&&p.stage?esc(p.stage):missing]
+  ];
+  const overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  overlay.innerHTML='<div style="background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:22px;width:440px;max-width:92vw;max-height:80vh;overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.3)"><div style="font-size:16px;font-weight:600;margin-bottom:10px">'+esc(n.name)+'</div>'+rows.map(r=>'<div style="display:flex;justify-content:space-between;gap:16px;padding:7px 0;border-bottom:1px solid var(--line);font-size:13px"><span class="muted">'+r[0]+'</span><span style="text-align:right;min-width:0;overflow-wrap:anywhere">'+r[1]+'</span></div>').join('')+'<div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn btn-ghost" id="v5DetailClose">关闭</button></div></div>';
+  document.body.appendChild(overlay);
+  const close=()=>overlay.remove();
+  overlay.querySelector('#v5DetailClose').onclick=close;
+  overlay.onclick=e=>{if(e.target===overlay)close()};
 }
 function renderNodeTable(){
   const tb=q('#nodeTable tbody');const rows=nodeData.filter(n=>filter==='all'||n.state===filter);
@@ -1715,10 +1778,10 @@ function renderNodeTable(){
   q('#cntAvail').textContent=nodeData.filter(n=>n.state==='available').length;
   q('#cntExh').textContent=nodeData.filter(n=>n.state==='exhausted').length;
   q('#cntDead').textContent=nodeData.filter(n=>n.state==='dead').length;
-  if(!rows.length){tb.innerHTML='<tr><td colspan="8" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}
+  if(!rows.length){tb.innerHTML='<tr><td colspan="10" class="empty-hint">'+(nodeData.length?'没有匹配状态的节点':'暂无节点（可在「订阅与配额」页添加）')+'</td></tr>';return}
   tb.innerHTML=rows.map(n=>{
     const lat=(n.latency_ms!=null&&n.latency_ms>=0)?'<span class="num '+latClass(n.latency_ms)+'">'+n.latency_ms+' ms</span>':(n.latency_ms!=null&&n.latency_ms<0?'<span class="muted">超时</span>':'<span class="muted">-</span>');
-    return '<tr class="'+(n.active?'hl':'')+'"><td><span class="node-name">'+esc(n.name)+(n.active?'<span class="tag cur">当前</span>':'')+(n.manual?'<span class="tag man">手动</span>':'')+'</span></td><td><span class="proto">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="num">'+lat+'</td><td>'+probeTagHtml(n)+'</td><td class="num muted">'+esc(fmtTime(n.cooldown_until))+'</td><td class="err">'+esc(n.last_error||'-')+'</td><td class="acts"><button class="btn btn-sm btn-primary" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-sm btn-ghost" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button> <button class="btn btn-sm btn-ghost" onclick="probeNode(\''+n.fingerprint+'\',this)">测试</button></td></tr>';
+    return '<tr class="'+(n.active?'hl':'')+'"><td><span class="node-name" style="cursor:pointer" title="查看详情" onclick="showNodeDetail(\''+n.fingerprint+'\')">'+esc(n.name)+(n.active?'<span class="tag cur">当前</span>':'')+(n.manual?'<span class="tag man">手动</span>':'')+'</span></td><td><span class="proto">'+esc(n.protocol)+'</span></td><td>'+badgeHtml(n.state)+'</td><td class="num">'+lat+'</td><td>'+probeTagHtml(n)+'</td><td>'+quotaCell(n)+'</td><td>'+fuseCell(n)+'</td><td class="num muted">'+esc(fmtTime(n.cooldown_until))+'</td><td class="err">'+esc(n.last_error||'-')+'</td><td class="acts"><button class="btn btn-sm btn-primary" onclick="nodeAction(\'switch\',\''+n.fingerprint+'\')">切换</button> <button class="btn btn-sm btn-ghost" onclick="nodeAction(\'reset\',\''+n.fingerprint+'\')">解除</button> <button class="btn btn-sm btn-ghost" onclick="probeNode(\''+n.fingerprint+'\',this)">测试</button></td></tr>';
   }).join('');
 }
 async function nodeAction(action,fp){
@@ -1959,9 +2022,9 @@ function renderQuota(c){
   q('#q_cooldown_h').value=c.node_cooldown_exhausted_hours||1;
   q('#q_cooldown_m').value=c.node_cooldown_dead_minutes||1;
   q('#q_health_interval').value=c.node_health_interval_minutes||15;
-  q('#q_health_url').value=c.node_health_probe_url||'';
+  q('#q_health_url').value=c.node_health_probe_url||'';q('#probe_counts_toward_gate').checked=!!c.probe_counts_toward_gate;
 }
-function collectQuota(){return{quota_error_signals:{error_types:q('#q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:q('#q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(q('#q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(q('#q_cooldown_h').value||'1',10),node_cooldown_dead_minutes:parseInt(q('#q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(q('#q_health_interval').value||'15',10),node_health_probe_url:q('#q_health_url').value.trim()}}
+function collectQuota(){return{quota_error_signals:{error_types:q('#q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:q('#q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(q('#q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(q('#q_cooldown_h').value||'1',10),node_cooldown_dead_minutes:parseInt(q('#q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(q('#q_health_interval').value||'15',10),node_health_probe_url:q('#q_health_url').value.trim(),probe_counts_toward_gate:q('#probe_counts_toward_gate').checked}}
 async function saveSubsConfig(){
   const st=q('#subSaveStatus');st.textContent='保存中…';
   if(DEMO_MODE){await new Promise(r=>setTimeout(r,350));collectSubs();collectNodes();st.textContent='已保存（演示）';showToast('订阅与节点已保存','success');return}
@@ -2067,7 +2130,7 @@ function collectSocks5(){const r=[];qa('#socks5Table tbody tr').forEach(tr=>{con
 function renderSocks5Select(){const sel=q('#activeSocks5');sel.innerHTML='<option value="">直连（不使用代理）</option>';(cfg.socks5_proxies||[]).forEach(p=>{if(p.addr){const opt=document.createElement('option');opt.value=p.addr;opt.textContent=p.name?p.name+' ('+p.addr+')':p.addr;sel.appendChild(opt)}});if((cfg.socks5_proxies||[]).length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cfg.active_socks5||'';q('#socks5_paid_direct').value=cfg.socks5_paid_direct?'1':'0'}
 async function saveConfig(){
   collectEfforts();collectAliases();collectSocks5();
-  const body={model_alias:cfg.model_alias,hidden_free_aliases:collectHidden(),edited_free_aliases:cfg.edited_free_aliases||{},reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:q('#force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:q('#activeSocks5').value,socks5_paid_direct:q('#socks5_paid_direct').value==='1',api_key:q('#apiKeyInput').value};
+  const body={model_alias:cfg.model_alias,hidden_free_aliases:collectHidden(),edited_free_aliases:cfg.edited_free_aliases||{},reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:q('#force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:q('#activeSocks5').value,socks5_paid_direct:q('#socks5_paid_direct').value==='1',api_key:q('#apiKeyInput').value,probe_counts_toward_gate:q('#probe_counts_toward_gate').checked};
   if(DEMO_MODE){cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存（演示）','success');return}
   try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}
 }

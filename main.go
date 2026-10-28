@@ -7630,6 +7630,7 @@ type nodeAdminView struct {
 	Active        bool         `json:"active"`
 	Manual        bool         `json:"manual"`
 	Probe         *probeResult `json:"probe"`
+	V5            *v5NodeView  `json:"v5"`
 
 	// task-67：打分字段（字段名是前端契约，见 docs/research/node-scoring-spec.md §5.1）
 	nodeScoreView
@@ -7665,6 +7666,7 @@ func adminNodesHandler(w http.ResponseWriter, r *http.Request) {
 				probeCopy := pr
 				v.Probe = &probeCopy
 			}
+			v.V5 = v5NodeViewFor(n.Fingerprint, subKeyOf(n.Name), scoringNow)
 			if n.LastError != "" {
 				e := n.LastError
 				v.LastError = &e

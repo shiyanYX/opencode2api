@@ -887,3 +887,73 @@ func (a *Admission) SnapshotCounts() (coolingPairs, quarantinedSubs int) {
 	}
 	return
 }
+
+// v5NodeQuotaView is the panel-facing projection of one subscription quota.
+type v5NodeQuotaView struct {
+	Until int64  `json:"until"`
+	Model string `json:"model"`
+}
+
+type v5NodeGateView struct {
+	Active        bool  `json:"active"`
+	PausedUntil   int64 `json:"paused_until"`
+	CanaryLevel   int   `json:"canary_level"`
+	NextCanary    int64 `json:"next_canary"`
+	NodeProbeUsed bool  `json:"node_probe_used"`
+}
+
+type v5NodeView struct {
+	PairUntil  int64            `json:"pair_until"`
+	QuotaUntil *int64           `json:"quota_until"`
+	Quota      *v5NodeQuotaView `json:"quota,omitempty"`
+	Gate       *v5NodeGateView  `json:"gate"`
+	Lifecycle  string           `json:"lifecycle"`
+}
+
+func v5NodeViewFor(fp, sub string, now time.Time) *v5NodeView {
+	if v5Enabled() == v5Off {
+		return nil
+	}
+	rt := v5GetRuntime()
+	if rt == nil || rt.adm == nil {
+		return nil
+	}
+	egress := "node:" + fp
+	nowMS := now.UnixMilli()
+	rt.adm.mu.Lock()
+	defer rt.adm.mu.Unlock()
+	view := &v5NodeView{}
+	if p := rt.adm.st.Pairs[PairKey(legacyPairModel, egress)]; p != nil {
+		view.PairUntil = p.Until
+	}
+	if e := rt.adm.st.Egress[egress]; e != nil {
+		view.Lifecycle = e.Lifecycle
+	}
+	var earliest *v5NodeQuotaView
+	for key, q := range rt.adm.st.Quota {
+		if sub == "" {
+			break
+		}
+		if q == nil || !strings.HasPrefix(key, sub+"|") || q.Until <= nowMS {
+			continue
+		}
+		model := strings.TrimPrefix(key, sub+"|")
+		if earliest == nil || q.Until < earliest.Until {
+			earliest = &v5NodeQuotaView{Until: q.Until, Model: model}
+		}
+	}
+	if earliest != nil {
+		u := earliest.Until
+		view.QuotaUntil = &u
+		view.Quota = earliest
+	}
+	g := rt.adm.gateLocked(now)
+	view.Gate = &v5NodeGateView{
+		Active:        g.Active,
+		PausedUntil:   g.PausedUntil,
+		CanaryLevel:   g.CanaryLevel,
+		NextCanary:    g.NextCanary,
+		NodeProbeUsed: g.NodeProbeUsed,
+	}
+	return view
+}
