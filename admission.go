@@ -18,7 +18,6 @@ const (
 	Outcome5xx          OutcomeClass = "5xx"
 	OutcomeCancel       OutcomeClass = "cancel"
 	OutcomeQuotaUnknown OutcomeClass = "quota_unknown"
-	OutcomeStream       OutcomeClass = "stream"
 )
 
 type AttemptKind uint8
@@ -123,6 +122,8 @@ type Admission struct {
 
 	probeCountsTowardGate bool
 	quotaGateEnforce      bool
+	shadowQuotaBlocks     uint64
+	lastShadowLog         int64
 }
 
 var pairCooldownLadder = [...]time.Duration{
@@ -805,7 +806,7 @@ func (a *Admission) eligibleForTraffic(c Candidate, model string, nowMS int64) (
 			if a.quotaGateEnforce {
 				return false, false
 			}
-			slog.Warn("v5_quota_shadow_block", "sub", c.Sub, "model", model, "until", qUntil, "nodes", a.nodesForSubLocked(model, c.Sub))
+			a.recordShadowQuotaBlockLocked(c.Sub, model, qUntil, nowMS)
 		}
 	}
 	if p := a.pairLocked(model, c.Egress); p != nil && p.Until > nowMS {
@@ -817,6 +818,17 @@ func (a *Admission) eligibleForTraffic(c Candidate, model string, nowMS int64) (
 		}
 	}
 	return true, false
+}
+
+// recordShadowQuotaBlockLocked counts every would-be quota block, but emits at
+// most one aggregate warning per 5 seconds to avoid log floods in shadow mode.
+func (a *Admission) recordShadowQuotaBlockLocked(sub, model string, until, nowMS int64) {
+	a.shadowQuotaBlocks++
+	if a.lastShadowLog != 0 && nowMS-a.lastShadowLog < 5000 {
+		return
+	}
+	a.lastShadowLog = nowMS
+	slog.Warn("v5_quota_shadow_blocks", "total", a.shadowQuotaBlocks, "sub", sub, "model", model, "until", until, "nodes", a.nodesForSubLocked(model, sub))
 }
 
 // eligibleForGateProbe rejects dead nodes and quarantined subscriptions, but
@@ -1228,7 +1240,7 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 	}
 	g.Attempts++
 	switch class {
-	case Outcome5xx, OutcomeNetwork, OutcomeTimeout, OutcomeStream:
+	case Outcome5xx, OutcomeNetwork, OutcomeTimeout:
 		// Quota (429/quota_unknown) and 403 are not egress-health failures.
 		g.Failures++
 		cutoff := nowMS - gateWindow.Milliseconds()

@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 )
@@ -131,5 +134,52 @@ func TestQuotaGateShadowAndEnforce(t *testing.T) {
 	d, reason := a.RetryAfter(RetryRequest{Model: "m"})
 	if reason != "quota" || d < 599*time.Second || d > 602*time.Second {
 		t.Fatalf("enforced quota retry=%v reason=%q", d, reason)
+	}
+}
+
+func TestShadowQuotaLogThrottled(t *testing.T) {
+	old := slog.Default()
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(old)
+
+	a, clock, st := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s"},
+		Candidate{Egress: "node:e3", Model: "m", Sub: "s"},
+	)
+	a.quotaGateEnforce = false
+	now := clock.Now().UnixMilli()
+	st.Quota[quotaKey("s", "m")] = &QuotaState{Until: now + 600000}
+	c := Candidate{Egress: "node:e1", Model: "m", Sub: "s"}
+	for i := 0; i < 3; i++ {
+		if ok, _ := a.eligibleForTraffic(c, "m", now); !ok {
+			t.Fatal("shadow quota must not block")
+		}
+	}
+	if a.shadowQuotaBlocks != 3 {
+		t.Fatalf("blocks=%d want 3", a.shadowQuotaBlocks)
+	}
+	if got := strings.Count(buf.String(), "v5_quota_shadow_blocks"); got != 1 || !strings.Contains(buf.String(), "total=1") {
+		t.Fatalf("first aggregate log=%q", buf.String())
+	}
+	// Within the throttle window only the counter moves.
+	a.eligibleForTraffic(c, "m", now+1000)
+	if a.shadowQuotaBlocks != 4 || strings.Count(buf.String(), "v5_quota_shadow_blocks") != 1 {
+		t.Fatalf("throttled blocks=%d log=%q", a.shadowQuotaBlocks, buf.String())
+	}
+	// Five seconds later one aggregate line carries the cumulative total.
+	a.eligibleForTraffic(c, "m", now+5000)
+	if a.shadowQuotaBlocks != 5 || strings.Count(buf.String(), "v5_quota_shadow_blocks") != 2 || !strings.Contains(buf.String(), "total=5") {
+		t.Fatalf("second aggregate blocks=%d log=%q", a.shadowQuotaBlocks, buf.String())
+	}
+	// Enforce mode must not record shadow hits.
+	a.quotaGateEnforce = true
+	before := a.shadowQuotaBlocks
+	if ok, _ := a.eligibleForTraffic(c, "m", now+6000); ok {
+		t.Fatal("enforce quota should block")
+	}
+	if a.shadowQuotaBlocks != before {
+		t.Fatalf("enforce moved shadow counter: %d -> %d", before, a.shadowQuotaBlocks)
 	}
 }
