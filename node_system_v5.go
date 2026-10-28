@@ -355,10 +355,11 @@ func v5ObserveProbeResult(node ProxyNode, res probeResult, model string) {
 		return
 	}
 	at := &Attempt{
-		Model:  model,
-		Egress: nodeEgressKey(node.Fingerprint),
-		Sub:    subKeyOf(node.Name),
-		Stage:  ProbeStage(res.Stage),
+		Model:    model,
+		Egress:   nodeEgressKey(node.Fingerprint),
+		Sub:      subKeyOf(node.Name),
+		Stage:    ProbeStage(res.Stage),
+		HardFail: !res.Timeout,
 	}
 	rt.adm.ObserveManualProbe(at, class)
 	rt.markDirty()

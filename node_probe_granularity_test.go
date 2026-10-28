@@ -13,7 +13,7 @@ import (
 
 func TestManualProbePreflightNetworkMarksDeadWithoutPair(t *testing.T) {
 	a, c, st := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Sub: "sub", Model: "m"})
-	at := &Attempt{Model: "m", Egress: "node:e1", Sub: "sub", Stage: ProbeStagePreflight}
+	at := &Attempt{Model: "m", Egress: "node:e1", Sub: "sub", Stage: ProbeStagePreflight, HardFail: true}
 	a.ObserveManualProbe(at, OutcomeNetwork)
 	e := st.Egress["node:e1"]
 	if e == nil || e.Lifecycle != "dead" {

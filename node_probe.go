@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"time"
 )
@@ -18,7 +20,7 @@ const (
 )
 
 const (
-	probePreflightTimeout = 1500 * time.Millisecond
+	probePreflightTimeout = 6 * time.Second
 	probeModelTimeout     = 20 * time.Second
 	probeBodyLimit        = 4096
 )
@@ -30,7 +32,16 @@ type probeResult struct {
 	Status      int       `json:"status"`
 	LatencyMS   int64     `json:"latency_ms"`
 	Error       string    `json:"error"`
+	Timeout     bool      `json:"timeout,omitempty"`
 	At          time.Time `json:"at"`
+}
+
+func probeErrorTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }
 
 func classifyProbeResponse(status int, body []byte) string {
@@ -94,6 +105,7 @@ func probeOne(ctx context.Context, node ProxyNode, model, healthURL string) prob
 	cancel()
 	if err != nil {
 		res.Class = probeClassUnreachable
+		res.Timeout = probeErrorTimeout(err)
 		res.Error = err.Error()
 		return res
 	}
@@ -126,6 +138,7 @@ func probeOne(ctx context.Context, node ProxyNode, model, healthURL string) prob
 	cancel()
 	if err != nil {
 		res.Class = probeClassUnreachable
+		res.Timeout = probeErrorTimeout(err)
 		res.Error = err.Error()
 		return res
 	}

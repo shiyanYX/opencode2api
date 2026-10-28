@@ -77,6 +77,7 @@ type Attempt struct {
 	GateCount bool
 	GateEpoch int64
 	Stage     ProbeStage
+	HardFail  bool
 	Sub       string
 	Nodes     int
 	// gateProbe 标记这是 winter gate 的节点探测；任何非 2xx 都必须重置探测状态。
@@ -597,7 +598,18 @@ func (a *Admission) observeUpstreamLocked(at *Attempt, class OutcomeClass, now t
 			p.Until = 0
 			p.OKStreak = 0
 		}
-		a.egressConnectedLocked(at.Egress)
+		if manual {
+			if e := a.egressLocked(at.Egress); e.Lifecycle == "dead" {
+				e.Lifecycle = "active"
+				e.DeadUntil = 0
+				e.ConsecFail = 0
+				e.ConsecOK = 0
+			} else {
+				a.egressConnectedLocked(at.Egress)
+			}
+		} else {
+			a.egressConnectedLocked(at.Egress)
+		}
 		a.clearQuotaLocked(sub, at.Model)
 		if !manual && at.Direct && a.st.Direct != nil {
 			a.st.Direct.Until = 0
@@ -641,9 +653,14 @@ func (a *Admission) observeUpstreamLocked(at *Attempt, class OutcomeClass, now t
 		}
 	case OutcomeNetwork, OutcomeTimeout:
 		if manual && at.Stage == ProbeStagePreflight {
-			// Preflight failure declares the egress dead immediately and is
-			// not a pair observation.
-			a.markEgressDeadLocked(at.Egress, now)
+			// Preflight hard evidence (connection refused/network error) is
+			// still decisive. Timeouts are weak evidence: two consecutive
+			// timeouts degrade the egress instead of killing it on one sample.
+			if at.HardFail {
+				a.markEgressDeadLocked(at.Egress, now)
+			} else {
+				a.egressWeakFailureLocked(at.Egress, now)
+			}
 			return
 		}
 		if p := a.nodePairLocked(at.Egress); p != nil {
@@ -920,6 +937,20 @@ func (a *Admission) egressConnectedLocked(egress string) {
 	case "active", "":
 		e.Lifecycle = "active"
 		e.ConsecOK = 0
+	}
+}
+
+func (a *Admission) egressWeakFailureLocked(egress string, now time.Time) {
+	if egress == "" || egress == "direct" {
+		return
+	}
+	e := a.egressLocked(egress)
+	e.ConsecFail++
+	e.ConsecOK = 0
+	if e.ConsecFail >= 2 {
+		e.Lifecycle = "dead"
+		e.DeadUntil = now.Add(30 * time.Minute).UnixMilli()
+		e.ConsecFail = 0
 	}
 }
 
