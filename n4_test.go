@@ -85,9 +85,9 @@ func TestMaxTwoAttempts(t *testing.T) {
 
 func TestV5StatePersist(t *testing.T) {
 	dir := t.TempDir()
-	oldPath := v5StatePath
-	v5StatePath = filepath.Join(dir, "v5_state.json")
-	t.Cleanup(func() { v5StatePath = oldPath; resetV5ForTest() })
+	oldConfig := configPath
+	configPath = filepath.Join(dir, "config.json")
+	t.Cleanup(func() { configPath = oldConfig; resetV5ForTest() })
 	t.Setenv("NODE_SYSTEM", "force")
 	resetV5ForTest()
 	v5CandidatesHook = forceTestCandidates("m", Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
@@ -97,7 +97,7 @@ func TestV5StatePersist(t *testing.T) {
 	}
 	rt.markDirty()
 	rt.persistNow()
-	if _, err := os.Stat(v5StatePath); err != nil {
+	if _, err := os.Stat(v5StatePathFor(configPath)); err != nil {
 		t.Fatalf("state file not written: %v", err)
 	}
 
@@ -615,8 +615,8 @@ func f6Fixture(t *testing.T, behave map[string]func(*http.Request) (int, string)
 	oldVer, oldGood := ocClientVer, ocVersionGood
 	oldInit, oldNSR := ocInitDone, noSessionRefresh
 	oldHook := testNodeClient
-	oldV5Path := v5StatePath
-	v5StatePath = filepath.Join(t.TempDir(), "v5_state.json")
+	oldConfig := configPath
+	configPath = filepath.Join(t.TempDir(), "config.json")
 
 	p := newProxyPool(filepath.Join(t.TempDir(), "proxy_state.json"))
 	nodes := []*ProxyNode{
@@ -657,7 +657,7 @@ func f6Fixture(t *testing.T, behave map[string]func(*http.Request) (int, string)
 		ocInitDone, noSessionRefresh = oldInit, oldNSR
 		testNodeClient = oldHook
 		resetV5ForTest()
-		v5StatePath = oldV5Path
+		configPath = oldConfig
 	}
 	return byName, cleanup
 }

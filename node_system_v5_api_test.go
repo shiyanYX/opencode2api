@@ -16,9 +16,9 @@ func TestNodesV5ViewSources(t *testing.T) {
 	})
 	nodes := p.snapshot()
 	fp := nodes[0].Fingerprint
-	oldPath := v5StatePath
-	v5StatePath = filepath.Join(t.TempDir(), "v5_state.json")
-	t.Cleanup(func() { v5StatePath = oldPath; resetV5ForTest() })
+	oldConfig := configPath
+	configPath = filepath.Join(t.TempDir(), "config.json")
+	t.Cleanup(func() { configPath = oldConfig; resetV5ForTest() })
 	resetV5ForTest()
 	t.Setenv("NODE_SYSTEM", "shadow")
 	rt := v5GetRuntime()

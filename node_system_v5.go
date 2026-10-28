@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -101,10 +102,16 @@ var (
 	// v5CandidatesHook 仅测试注入，生产为 nil。影子测试需要一个不依赖
 	// proxyPool 全局状态的候选集；不能在请求路径上留下可变 hook。
 	v5CandidatesHook func(string) []Candidate
-
-	// v5StatePath is a var so tests can redirect it; production persists under /data.
-	v5StatePath = "/data/v5_state.json"
 )
+
+// v5StatePathFor keeps the state file next to the active config, so a test
+// instance started with -config /tmp/x/config.json cannot touch /data/v5_state.json.
+func v5StatePathFor(configPath string) string {
+	if configPath == "" {
+		return "v5_state.json"
+	}
+	return filepath.Join(filepath.Dir(configPath), "v5_state.json")
+}
 
 func resetV5ForTest() {
 	v5RTMu.Lock()
@@ -128,9 +135,10 @@ func v5GetRuntime() *v5Runtime {
 	if v5Enabled() == v5Off {
 		return nil
 	}
-	st, loadErr := loadNodeStateV5(v5StatePath)
+	statePath := v5StatePathFor(configPath)
+	st, loadErr := loadNodeStateV5(statePath)
 	if loadErr != nil {
-		slog.Warn("v5_state_load_failed", "path", v5StatePath, "error", loadErr)
+		slog.Warn("v5_state_load_failed", "path", statePath, "error", loadErr)
 	}
 	if st == nil {
 		st = NewNodeStateV5(time.Now())
@@ -147,7 +155,7 @@ func v5GetRuntime() *v5Runtime {
 		started:    now,
 		shadowOnly: true,
 		adm:        adm,
-		statePath:  v5StatePath,
+		statePath:  statePath,
 		lastSave:   now,
 		byClass:    map[string]int64{},
 	}
