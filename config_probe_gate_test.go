@@ -101,3 +101,39 @@ func TestConfigPatchQuotaGateBool(t *testing.T) {
 		t.Fatal("subscription-only patch cleared quota gate")
 	}
 }
+
+func TestConfigPatchProbeModel(t *testing.T) {
+	setupProbeHTTP(t, nil)
+	post := func(body string) {
+		req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		adminConfigHandler(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("POST %s: %d %s", body, rr.Code, rr.Body.String())
+		}
+	}
+	get := func() string {
+		rr := httptest.NewRecorder()
+		adminConfigHandler(rr, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+		var body struct {
+			ProbeModel string `json:"probe_model"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.ProbeModel
+	}
+
+	post(`{"probe_model":"x"}`)
+	if got := get(); got != "x" {
+		t.Fatalf("GET probe_model=%q want x", got)
+	}
+	post(`{}`)
+	if got := get(); got != "x" {
+		t.Fatalf("empty patch changed probe_model=%q", got)
+	}
+	post(`{"probe_model":"  "}`)
+	if got := get(); got != defaultProbeModel {
+		t.Fatalf("blank probe_model=%q want default %q", got, defaultProbeModel)
+	}
+}

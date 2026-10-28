@@ -684,6 +684,7 @@ input,select,textarea{font-family:inherit;color:inherit}
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:12px">
         <div class="field"><label>健康检查间隔（分钟，0=默认15）</label><input id="q_health_interval" type="number" min="1" max="1440" value="15"></div>
         <div class="field"><label>健康检查探针 URL</label><input id="q_health_url" placeholder="https://opencode.ai/zen/v1/models"></div>
+        <div class="field"><label>测试模型（探测/测速）</label><select id="q_probe_model"></select></div>
       </div>
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:12px"><input id="probe_counts_toward_gate" type="checkbox"> 探测计入熔断窗口</label>
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:8px"><input id="quota_gate_enforce" type="checkbox"> 配额闸强制拦截（关闭时只记录影子证据）</label>
@@ -1152,6 +1153,7 @@ async function fetchModelList(){if(DEMO_MODE){modelList=DEMO.models.slice().sort
   else if(m.ok){const d=await m.json();modelList=(d.data||[]).map(x=>typeof x==='string'?x:x.id).filter(Boolean).sort();freeModelIDs=(d.free_models||[]).slice().sort()}
   else throw new Error('HTTP '+m.status);
   modelListStale(false);
+  populateProbeModelOptions(cfg.probe_model||'');
 }catch(e){
   // 保留上一份列表（它曾经是真的），但不能再【静默】保留：换订阅后拉取失败时，
   // 用户看到的是上一份的模型名，却以为那就是当前的。
@@ -2035,9 +2037,17 @@ function renderQuota(c){
   q('#q_cooldown_h').value=c.node_cooldown_exhausted_hours||1;
   q('#q_cooldown_m').value=c.node_cooldown_dead_minutes||1;
   q('#q_health_interval').value=c.node_health_interval_minutes||15;
-  q('#q_health_url').value=c.node_health_probe_url||'';q('#probe_counts_toward_gate').checked=!!c.probe_counts_toward_gate;q('#quota_gate_enforce').checked=!!c.quota_gate_enforce;
+  q('#q_health_url').value=c.node_health_probe_url||'';populateProbeModelOptions(c.probe_model||'');q('#probe_counts_toward_gate').checked=!!c.probe_counts_toward_gate;q('#quota_gate_enforce').checked=!!c.quota_gate_enforce;
 }
-function collectQuota(){return{quota_error_signals:{error_types:q('#q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:q('#q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(q('#q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(q('#q_cooldown_h').value||'1',10),node_cooldown_dead_minutes:parseInt(q('#q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(q('#q_health_interval').value||'15',10),node_health_probe_url:q('#q_health_url').value.trim(),probe_counts_toward_gate:q('#probe_counts_toward_gate').checked,quota_gate_enforce:q('#quota_gate_enforce').checked}}
+function populateProbeModelOptions(current){
+  const sel=q('#q_probe_model');if(!sel)return;
+  const ids=[...new Set([...(freeModelIDs||[]),...(modelList||[])])].filter(Boolean).sort();
+  const missing=current&&!ids.includes(current);
+  if(missing)ids.unshift(current);
+  sel.innerHTML=ids.map(id=>'<option value="'+esc(id)+'">'+esc(id)+(missing&&id===current?'（当前）':'')+'</option>').join('');
+  sel.value=current||ids[0]||'';
+}
+function collectQuota(){return{probe_model:q('#q_probe_model').value.trim(),quota_error_signals:{error_types:q('#q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:q('#q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(q('#q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(q('#q_cooldown_h').value||'1',10),node_cooldown_dead_minutes:parseInt(q('#q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(q('#q_health_interval').value||'15',10),node_health_probe_url:q('#q_health_url').value.trim(),probe_counts_toward_gate:q('#probe_counts_toward_gate').checked,quota_gate_enforce:q('#quota_gate_enforce').checked}}
 async function saveSubsConfig(){
   const st=q('#subSaveStatus');st.textContent='保存中…';
   if(DEMO_MODE){await new Promise(r=>setTimeout(r,350));collectSubs();collectNodes();st.textContent='已保存（演示）';showToast('订阅与节点已保存','success');return}

@@ -7473,6 +7473,7 @@ type configPatch struct {
 	Socks5Sticky               *bool                `json:"socks5_sticky"`
 	ProbeCountsTowardGate      *bool                `json:"probe_counts_toward_gate"`
 	QuotaGateEnforce           *bool                `json:"quota_gate_enforce"`
+	ProbeModel                 *string              `json:"probe_model"`
 	ApiKey                     *string              `json:"api_key"`
 	TruncationStopReason       *string              `json:"truncation_stop_reason"`
 }
@@ -7564,6 +7565,9 @@ func mergeAppConfig(base, patch AppConfig) AppConfig {
 // mergeConfigPatch 面板 POST：指针字段非 nil 即显式覆盖（含清零）。
 func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	out := base
+	if patch.ProbeModel != nil {
+		out.ProbeModel = strings.TrimSpace(*patch.ProbeModel)
+	}
 	if patch.ModelAlias != nil {
 		out.ModelAlias = patch.ModelAlias
 	}
