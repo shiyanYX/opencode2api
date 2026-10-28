@@ -383,7 +383,7 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 	}
 
 	switch at.Kind {
-	case AttemptManualProbe, AttemptProbe:
+	case AttemptManualProbe:
 		if at.lifecycle {
 			a.observeLifecycleLocked(at, class, now, nowMS)
 			return
@@ -417,7 +417,7 @@ func (a *Admission) nodePairLocked(egress string) *PairState {
 	if egress == "" {
 		return nil
 	}
-	key := PairKey("*", egress)
+	key := PairKey(legacyPairModel, egress)
 	p := a.st.Pairs[key]
 	if p == nil {
 		p = &PairState{}
@@ -482,7 +482,7 @@ func (a *Admission) observeUpstreamLocked(at *Attempt, class OutcomeClass, now t
 	}
 	switch class {
 	case Outcome2xx:
-		p := a.writePairLocked(at.Model, at.Egress)
+		p := a.nodePairLocked(at.Egress)
 		a.decayPairLocked(p, nowMS)
 		p.A++
 		p.LastOK = nowMS
@@ -490,6 +490,7 @@ func (a *Admission) observeUpstreamLocked(at *Attempt, class OutcomeClass, now t
 			p.OKStreak++
 			if p.OKStreak >= 2 {
 				p.Strikes = 0
+				p.Strike = 0
 				p.Hard = 0
 				p.Until = 0
 				p.OKStreak = 0
@@ -498,6 +499,7 @@ func (a *Admission) observeUpstreamLocked(at *Attempt, class OutcomeClass, now t
 			// An older lease must not shorten an active cooldown.
 		} else {
 			p.Strikes = 0
+			p.Strike = 0
 			p.Hard = 0
 			p.Until = 0
 			p.OKStreak = 0
@@ -675,19 +677,6 @@ func (a *Admission) pairLocked(model, egress string) *PairState {
 		return p
 	}
 	return a.st.Pairs[PairKey("*", egress)]
-}
-
-func (a *Admission) writePairLocked(model, egress string) *PairState {
-	if egress == "" {
-		return nil
-	}
-	key := PairKey(model, egress)
-	p := a.st.Pairs[key]
-	if p == nil {
-		p = &PairState{}
-		a.st.Pairs[key] = p
-	}
-	return p
 }
 
 func (a *Admission) semLocked(egress string) chan struct{} {

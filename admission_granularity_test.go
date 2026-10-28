@@ -143,3 +143,57 @@ func TestGranularityQuotaGate(t *testing.T) {
 		t.Fatalf("active gate extended: before=%d after=%d", before, q.Until)
 	}
 }
+
+func TestGranularityPairsOnlyWildcard(t *testing.T) {
+	a, clock, st := newAdmissionTest(t, 8,
+		Candidate{Egress: "node:e1", Model: "m", Sub: "s"},
+		Candidate{Egress: "node:e2", Model: "m", Sub: "s"},
+	)
+	a.Observe(normalAttempt("m", "node:e1"), Outcome2xx)
+	manual := normalAttempt("m", "node:e1")
+	manual.Kind = AttemptManualProbe
+	manual.GateCount = false
+	manual.Sub = "s"
+	a.Observe(manual, Outcome2xx)
+	a.Observe(normalAttempt("m", "node:e1"), Outcome403)
+	a.Observe(normalAttempt("m", "node:e2"), Outcome5xx)
+	a.Observe(normalAttempt("m", "node:e2"), Outcome429)
+	for key := range st.Pairs {
+		if len(key) < 2 || key[:2] != "*|" {
+			t.Fatalf("non-wildcard pair key %q (all=%+v)", key, st.Pairs)
+		}
+	}
+	if len(st.Subs) != 0 {
+		t.Fatalf("Subs written: %+v", st.Subs)
+	}
+
+	// A wildcard pair still needs two half-open successes to clear strikes.
+	p := st.Pairs[PairKey("*", "node:e1")]
+	if p == nil || p.Strike == 0 || p.Until == 0 {
+		t.Fatalf("403 strike missing: %+v", p)
+	}
+	p.Strikes = 1
+	p.Until = clock.Now().Add(-time.Millisecond).UnixMilli()
+	p.OKStreak = 0
+	a.Observe(normalAttempt("m", "node:e1"), Outcome2xx)
+	if p.Strikes != 1 || p.OKStreak != 1 {
+		t.Fatalf("first recovery 2xx = %+v", p)
+	}
+	a.Observe(normalAttempt("m", "node:e1"), Outcome2xx)
+	if p.Strikes != 0 || p.Strike != 0 || p.OKStreak != 0 || p.Until != 0 {
+		t.Fatalf("second recovery 2xx = %+v", p)
+	}
+}
+
+func TestGranularityProbeWithoutLifecycleUsesNormalSemantics(t *testing.T) {
+	a, clock, st := newAdmissionTest(t, 8)
+	st.Direct = &DirectState{Until: clock.Now().Add(time.Minute).UnixMilli()}
+	at := normalAttempt("m", "direct")
+	at.Kind = AttemptProbe
+	at.GateCount = false
+	at.Direct = true
+	a.Observe(at, Outcome2xx)
+	if st.Direct.Until != 0 {
+		t.Fatalf("AttemptProbe without lifecycle did not use normal direct-clear path: %+v", st.Direct)
+	}
+}
