@@ -10,8 +10,17 @@ import (
 // 口径与面板「healthy」一致（State == available），这样告警和面板显示的数字
 // 永远是同一个数，不会出现「面板说 115 个可用、告警说 0 个」的打架。
 func poolStateCounts() (avail, total int) {
+	now := time.Now()
+	probes := nodeProber.Snapshot()
 	for _, n := range proxyPool.snapshot() {
-		if n.State == NodeAvailable {
+		v := v5NodeViewFor(n.Fingerprint, subKeyOf(n.Name), now)
+		var p *probeResult
+		if pr, ok := probes[n.Fingerprint]; ok {
+			cp := pr
+			p = &cp
+		}
+		a, _ := nodeAvailability(n.State.String(), v, p, now)
+		if a == availabilityOK {
 			avail++
 		}
 		total++
@@ -44,13 +53,23 @@ func runNodeHealthLoop(ticks <-chan time.Time) {
 	}
 }
 
+var (
+	nodeHealthCheckDeadHook      = func(ctx context.Context) int { return proxyPool.checkDead(ctx) }
+	nodeHealthCheckAvailableHook = func(ctx context.Context) int { return proxyPool.checkAvailable(ctx) }
+	nodeHealthAlertHook          = evaluateNodeAlert
+)
+
 func runNodeHealthTick(next *time.Time) {
+	if v5LegacyGatesBypassed() {
+		nodeHealthAlertHook()
+		return
+	}
 	interval := proxyPool.healthInterval()
 	if interval <= 0 {
 		// probeInterval 负数表示禁用健康检查：不探测 ≠ 不告警。
 		// 出口整体不可用这件事照样要报，否则运维一拨开关就把告警一起拨瞎了。
 		slog.Debug("node health check disabled")
-		evaluateNodeAlert()
+		nodeHealthAlertHook()
 		return
 	}
 	now := time.Now()
@@ -58,7 +77,7 @@ func runNodeHealthTick(next *time.Time) {
 	// 每分钟：dead 节点复探
 	if proxyPool.hasDeadNodes() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		checked := proxyPool.checkDead(ctx)
+		checked := nodeHealthCheckDeadHook(ctx)
 		cancel()
 		slog.Debug("node dead re-probe done", "checked", checked)
 	}
@@ -68,13 +87,13 @@ func runNodeHealthTick(next *time.Time) {
 		*next = now.Add(interval)
 		if proxyPool.nodeCount() > 0 {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			checked := proxyPool.checkAvailable(ctx)
+			checked := nodeHealthCheckAvailableHook(ctx)
 			cancel()
 			slog.Info("node health check done", "checked", checked, "interval", interval.String())
 		}
 	}
 
-	evaluateNodeAlert()
+	nodeHealthAlertHook()
 }
 
 // evaluateNodeAlert 判一次节点层告警（C-5）。

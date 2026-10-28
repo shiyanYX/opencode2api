@@ -830,6 +830,9 @@ func (s *nodeScoringStore) revertPool403Locked(ts time.Time) {
 // observeCallRecordLocked 是归因实现（调用方持锁）。
 // historical=true 时用「证据年龄」作为衰减权重（回填历史日志）；实时记录权重为 1。
 func (s *nodeScoringStore) observeCallRecordLocked(rec CallRecord, ts time.Time, bucket int64, historical bool, now time.Time) {
+	if rec.RouteMode == "probe" {
+		return
+	}
 	b := s.bucketLocked(bucket)
 	b.Req++
 	if rec.Status == "fail" {
@@ -1406,6 +1409,9 @@ func (s *nodeScoringStore) backfillFromLog(since, cutoff, now time.Time) (int, e
 	s.mu.Unlock()
 	for _, seg := range segs {
 		if err := forEachCallLogRecord(seg, func(rec CallRecord) bool {
+			if rec.RouteMode == "probe" {
+				return true
+			}
 			ts := parseScoringTS(rec.TS, time.Time{})
 			if ts.IsZero() || !ts.After(since) || ts.After(cutoff) {
 				return true
@@ -1433,6 +1439,9 @@ func (s *nodeScoringStore) backfillFromLog(since, cutoff, now time.Time) (int, e
 	attributed := 0
 	for _, seg := range segs {
 		if err := forEachCallLogRecord(seg, func(rec CallRecord) bool {
+			if rec.RouteMode == "probe" {
+				return true
+			}
 			ts := parseScoringTS(rec.TS, time.Time{})
 			if ts.IsZero() || !ts.After(since) || ts.After(cutoff) {
 				return true
@@ -1511,7 +1520,7 @@ func (s *nodeScoringStore) pollCallLog() int {
 	}
 	n := 0
 	for _, rec := range recs[start:] {
-		if rec.ReqID == cursorReqID {
+		if rec.ReqID == cursorReqID || rec.RouteMode == "probe" {
 			continue
 		}
 		s.observeCallRecord(rec, s.now())

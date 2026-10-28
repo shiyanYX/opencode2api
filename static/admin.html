@@ -630,7 +630,6 @@ input,select,textarea{font-family:inherit;color:inherit}
     <div class="actions">
       <button class="btn btn-primary" onclick="reloadSubs()">重新加载订阅</button>
       <button class="btn btn-ghost" onclick="resetAllMarks()">解除全部标记</button>
-      <button class="btn btn-ghost" onclick="probeAll()">连通测速</button>
       <button id="probeAllBtn" class="btn btn-ghost" onclick="probeAllPrimary()">全量测试</button>
       <div id="probeAllProgress" class="usage-bar" style="display:none;width:140px;min-width:90px;flex:0 1 180px"><i style="width:0%"></i></div>
       <button class="btn btn-ghost" onclick="loadNodes()">刷新节点</button>
@@ -1762,7 +1761,7 @@ function showNodeDetail(fp){
   const rows=[
     ['判定原因',n.availability_reason?esc(n.availability_reason):missing],
     ['可用性',probeTagHtml(n)],
-    ['旧评分（force 下冻结）',n.score!=null?esc(String(n.score))+' / '+esc(n.tier||'-'):missing],
+    ['旧评分（独立口径，仅供参考）',n.score!=null?esc(String(n.score))+' / '+esc(n.tier||'-'):missing],
     ['配额至',v&&v.quota?'<code>'+esc(v.quota.model)+'</code> · '+esc(new Date(v.quota.until).toLocaleString()):missing],
     ['熔断',v?(gate?(gate.active?'熔断中':'正常'):missing):missing],
     ['Canary level',gate?esc(String(gate.canary_level)):missing],

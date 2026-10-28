@@ -27,6 +27,7 @@ type slimRec struct {
 	TTFTMs           int64
 	OutputSpeed      float64
 	DurationMS       int64
+	RouteMode        string
 
 	// Unmapped 表示这条记录来自「模型名无法映射到本部署可服务的模型」的请求。
 	// 这类请求**不进 hourBuckets**（故不进 models / total_requests / 成功率分母），
@@ -121,6 +122,8 @@ func parseStatsLine(line []byte, r *slimRec) bool {
 				r.Model = s
 			case "status":
 				r.Status = s
+			case "route_mode":
+				r.RouteMode = s
 			}
 			i = ni
 			continue

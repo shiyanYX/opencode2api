@@ -879,6 +879,10 @@ func (a *dailyAbsorb) consume(line []byte) {
 		a.skipped++
 		return
 	}
+	if r.RouteMode == "probe" {
+		a.skipped++
+		return
+	}
 	k, ok := hourKeyFor(r.TS, r.Model)
 	if !ok {
 		a.skipped++
@@ -1328,6 +1332,10 @@ func absorbOnceSingle() {
 			// 这行是好的** —— 尾随垃圾、数值写成字符串、+7 / 01 这类非法数字
 			// 它都收（见 statscan.go）。所以 false 只代表「结构性截断」，
 			// 不能拿来当坏行判据；宽容行按扫描器的既定行为计数，与查询侧同源。
+			continue
+		}
+		if r.RouteMode == "probe" {
+			skipped++
 			continue
 		}
 		// 必须走 hourKeyFor：它内部做 t.In(time.Local) 归一。生产日志混存
@@ -2311,7 +2319,7 @@ func (s *callLogStore) append(rec CallRecord) {
 				PromptTokens: rec.PromptTokens, CompletionTokens: rec.CompletionTokens,
 				CacheCreation: rec.CacheCreation, CacheRead: rec.CacheRead,
 				TTFTMs: rec.TTFTMs, OutputSpeed: rec.OutputSpeed,
-				DurationMS: rec.DurationMS, Unmapped: rec.Unmapped,
+				DurationMS: rec.DurationMS, Unmapped: rec.Unmapped, RouteMode: rec.RouteMode,
 			}
 			// 未映射请求进**平行表**，不进 hourBuckets。
 			//
@@ -2320,7 +2328,9 @@ func (s *callLogStore) append(rec CallRecord) {
 			// 漏掉推进 ⇒ 下次 backfill 会把这条再扫一遍（重复计数、单调发散）；
 			// 漏掉 absorbedRecords ⇒ 守恒判据差 1 ⇒ 每次查询触发一次全量重扫。
 			// 守恒式两表之和见 checkBucketConservation。
-			if rec.Unmapped {
+			if false {
+				unabsorbedRecords++
+			} else if rec.Unmapped {
 				if unmappedBuckets == nil {
 					unmappedBuckets = make(map[hourModelKey]*hourModelAgg)
 				}
