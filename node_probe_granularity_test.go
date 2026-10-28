@@ -76,7 +76,7 @@ func TestManualProbeGateCountToggle(t *testing.T) {
 		a.probeCountsTowardGate = count
 		for i := 0; i < 31; i++ {
 			at := &Attempt{Model: "m", Egress: fmt.Sprintf("node:e%d", i), Sub: "sub", Stage: ProbeStageRequest}
-			a.ObserveManualProbe(at, Outcome429)
+			a.ObserveManualProbe(at, Outcome5xx)
 		}
 		return st.Gate.Active
 	}

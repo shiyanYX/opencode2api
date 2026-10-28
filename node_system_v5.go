@@ -140,6 +140,9 @@ func v5GetRuntime() *v5Runtime {
 	if p := loadConfig(configPath).ProbeCountsTowardGate; p != nil {
 		adm.probeCountsTowardGate = *p
 	}
+	if p := loadConfig(configPath).QuotaGateEnforce; p != nil {
+		adm.quotaGateEnforce = *p
+	}
 	v5RT = &v5Runtime{
 		started:    now,
 		shadowOnly: true,
@@ -161,6 +164,17 @@ func v5ApplyProbeGateConfig(v bool) {
 		return
 	}
 	rt.adm.SetProbeCountsTowardGate(v)
+}
+
+// v5ApplyQuotaGateConfig hot-reloads quota enforcement without creating a runtime.
+func v5ApplyQuotaGateConfig(v bool) {
+	v5RTMu.Lock()
+	rt := v5RT
+	v5RTMu.Unlock()
+	if rt == nil {
+		return
+	}
+	rt.adm.SetQuotaGateEnforce(v)
 }
 
 // markDirty records a state mutation; the actual write is debounced by

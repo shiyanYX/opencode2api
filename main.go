@@ -1070,6 +1070,7 @@ type AppConfig struct {
 	NodeHealthProbeURL        string `json:"node_health_probe_url,omitempty"`
 	ProbeModel                string `json:"probe_model,omitempty"`
 	ProbeCountsTowardGate     *bool  `json:"probe_counts_toward_gate,omitempty"`
+	QuotaGateEnforce          *bool  `json:"quota_gate_enforce,omitempty"`
 
 	// ---- 缓存增强 ----
 	// PromptCacheRetention 注入上游的 prompt 前缀缓存保留时长：
@@ -1415,6 +1416,7 @@ func applyConfig(cfg AppConfig) {
 	}
 	proxyPool.probeURL = cfg.NodeHealthProbeURL
 	v5ApplyProbeGateConfig(cfg.ProbeCountsTowardGate != nil && *cfg.ProbeCountsTowardGate)
+	v5ApplyQuotaGateConfig(cfg.QuotaGateEnforce != nil && *cfg.QuotaGateEnforce)
 }
 
 var (
@@ -7374,6 +7376,7 @@ func adminConfigHandler(w http.ResponseWriter, r *http.Request) {
 			"node_health_probe_url":         merged.NodeHealthProbeURL,
 			"probe_model":                   probeModelOrDefault(merged.ProbeModel),
 			"probe_counts_toward_gate":      merged.ProbeCountsTowardGate != nil && *merged.ProbeCountsTowardGate,
+			"quota_gate_enforce":            merged.QuotaGateEnforce != nil && *merged.QuotaGateEnforce,
 			"prompt_cache_retention":        merged.PromptCacheRetention,
 			"cache_control_breakpoints":     merged.CacheControlBreakpoints,
 			"text_only_models":              merged.TextOnlyModels,
@@ -7451,6 +7454,7 @@ type configPatch struct {
 	TextOnlyModels             []string             `json:"text_only_models"`
 	Socks5Sticky               *bool                `json:"socks5_sticky"`
 	ProbeCountsTowardGate      *bool                `json:"probe_counts_toward_gate"`
+	QuotaGateEnforce           *bool                `json:"quota_gate_enforce"`
 	ApiKey                     *string              `json:"api_key"`
 	TruncationStopReason       *string              `json:"truncation_stop_reason"`
 }
@@ -7529,6 +7533,9 @@ func mergeAppConfig(base, patch AppConfig) AppConfig {
 	}
 	if patch.ProbeCountsTowardGate != nil {
 		out.ProbeCountsTowardGate = patch.ProbeCountsTowardGate
+	}
+	if patch.QuotaGateEnforce != nil {
+		out.QuotaGateEnforce = patch.QuotaGateEnforce
 	}
 	if patch.TruncationStopReason != "" {
 		out.TruncationStopReason = patch.TruncationStopReason
@@ -7610,6 +7617,9 @@ func mergeConfigPatch(base AppConfig, patch configPatch) AppConfig {
 	}
 	if patch.ProbeCountsTowardGate != nil {
 		out.ProbeCountsTowardGate = patch.ProbeCountsTowardGate
+	}
+	if patch.QuotaGateEnforce != nil {
+		out.QuotaGateEnforce = patch.QuotaGateEnforce
 	}
 	if patch.ApiKey != nil {
 		out.ApiKey = *patch.ApiKey

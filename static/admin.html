@@ -682,6 +682,7 @@ input,select,textarea{font-family:inherit;color:inherit}
         <div class="field"><label>健康检查探针 URL</label><input id="q_health_url" placeholder="https://opencode.ai/zen/v1/models"></div>
       </div>
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:12px"><input id="probe_counts_toward_gate" type="checkbox"> 探测计入熔断窗口</label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:8px"><input id="quota_gate_enforce" type="checkbox"> 配额闸强制拦截（关闭时只记录影子证据）</label>
       <div class="muted" style="font-size:11.5px;margin-top:8px">403 且无上述签名视为耗尽；429 无签名不视为耗尽。耗尽冷却到期自动恢复（标记清除）；故障节点每分钟复探，探测成功即恢复。</div>
     </div>
     <div class="actions" style="margin-top:4px">
@@ -2022,9 +2023,9 @@ function renderQuota(c){
   q('#q_cooldown_h').value=c.node_cooldown_exhausted_hours||1;
   q('#q_cooldown_m').value=c.node_cooldown_dead_minutes||1;
   q('#q_health_interval').value=c.node_health_interval_minutes||15;
-  q('#q_health_url').value=c.node_health_probe_url||'';q('#probe_counts_toward_gate').checked=!!c.probe_counts_toward_gate;
+  q('#q_health_url').value=c.node_health_probe_url||'';q('#probe_counts_toward_gate').checked=!!c.probe_counts_toward_gate;q('#quota_gate_enforce').checked=!!c.quota_gate_enforce;
 }
-function collectQuota(){return{quota_error_signals:{error_types:q('#q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:q('#q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(q('#q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(q('#q_cooldown_h').value||'1',10),node_cooldown_dead_minutes:parseInt(q('#q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(q('#q_health_interval').value||'15',10),node_health_probe_url:q('#q_health_url').value.trim(),probe_counts_toward_gate:q('#probe_counts_toward_gate').checked}}
+function collectQuota(){return{quota_error_signals:{error_types:q('#q_error_types').value.split(',').map(s=>s.trim()).filter(Boolean),message_keywords:q('#q_message_kw').value.split(',').map(s=>s.trim()).filter(Boolean)},max_quota_node_switches:parseInt(q('#q_max_switches').value||'5',10),node_cooldown_exhausted_hours:parseInt(q('#q_cooldown_h').value||'1',10),node_cooldown_dead_minutes:parseInt(q('#q_cooldown_m').value||'1',10),node_health_interval_minutes:parseInt(q('#q_health_interval').value||'15',10),node_health_probe_url:q('#q_health_url').value.trim(),probe_counts_toward_gate:q('#probe_counts_toward_gate').checked,quota_gate_enforce:q('#quota_gate_enforce').checked}}
 async function saveSubsConfig(){
   const st=q('#subSaveStatus');st.textContent='保存中…';
   if(DEMO_MODE){await new Promise(r=>setTimeout(r,350));collectSubs();collectNodes();st.textContent='已保存（演示）';showToast('订阅与节点已保存','success');return}
@@ -2130,7 +2131,7 @@ function collectSocks5(){const r=[];qa('#socks5Table tbody tr').forEach(tr=>{con
 function renderSocks5Select(){const sel=q('#activeSocks5');sel.innerHTML='<option value="">直连（不使用代理）</option>';(cfg.socks5_proxies||[]).forEach(p=>{if(p.addr){const opt=document.createElement('option');opt.value=p.addr;opt.textContent=p.name?p.name+' ('+p.addr+')':p.addr;sel.appendChild(opt)}});if((cfg.socks5_proxies||[]).length>=2){const opt=document.createElement('option');opt.value='__round_robin__';opt.textContent='轮询（自动切换）';sel.appendChild(opt)}sel.value=cfg.active_socks5||'';q('#socks5_paid_direct').value=cfg.socks5_paid_direct?'1':'0'}
 async function saveConfig(){
   collectEfforts();collectAliases();collectSocks5();
-  const body={model_alias:cfg.model_alias,hidden_free_aliases:collectHidden(),edited_free_aliases:cfg.edited_free_aliases||{},reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:q('#force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:q('#activeSocks5').value,socks5_paid_direct:q('#socks5_paid_direct').value==='1',api_key:q('#apiKeyInput').value,probe_counts_toward_gate:q('#probe_counts_toward_gate').checked};
+  const body={model_alias:cfg.model_alias,hidden_free_aliases:collectHidden(),edited_free_aliases:cfg.edited_free_aliases||{},reasoning_effort_map:cfg.reasoning_effort_map,force_disable_thinking:q('#force_disable_thinking').checked,socks5_proxies:cfg.socks5_proxies,active_socks5:q('#activeSocks5').value,socks5_paid_direct:q('#socks5_paid_direct').value==='1',api_key:q('#apiKeyInput').value,probe_counts_toward_gate:q('#probe_counts_toward_gate').checked,quota_gate_enforce:q('#quota_gate_enforce').checked};
   if(DEMO_MODE){cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存（演示）','success');return}
   try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});if(!r.ok)throw new Error(await r.text());cfg.api_key=body.api_key;syncGatewayBox();showToast('配置已保存','success')}catch(e){showToast('保存失败: '+e.message,'error')}
 }

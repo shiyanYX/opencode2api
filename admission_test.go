@@ -31,6 +31,7 @@ func newAdmissionTest(t *testing.T, k int, candidates ...Candidate) (*Admission,
 	t.Cleanup(func() { SetClock(nil) })
 	st := NewNodeStateV5(now)
 	a := NewAdmission(st, k, func(string) []Candidate { return candidates })
+	a.quotaGateEnforce = true // keep legacy tests explicit; shadow default is false
 	a.clock = c
 	return a, c, st
 }

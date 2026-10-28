@@ -57,6 +57,7 @@ type PairState struct {
 	B         float64 `json:"b"`
 	LastOK    int64   `json:"lastOK"`
 	LastFail  int64   `json:"lastFail"`
+	Last403   int64   `json:"last403"`
 	LastDecay int64   `json:"lastDecay"`
 	Strikes   int     `json:"strikes"`
 	Strike    int     `json:"strike"`

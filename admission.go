@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ const (
 	Outcome5xx          OutcomeClass = "5xx"
 	OutcomeCancel       OutcomeClass = "cancel"
 	OutcomeQuotaUnknown OutcomeClass = "quota_unknown"
+	OutcomeStream       OutcomeClass = "stream"
 )
 
 type AttemptKind uint8
@@ -120,6 +122,7 @@ type Admission struct {
 	exploreInflight map[string]int
 
 	probeCountsTowardGate bool
+	quotaGateEnforce      bool
 }
 
 var pairCooldownLadder = [...]time.Duration{
@@ -199,7 +202,7 @@ func (a *Admission) AdmitPreferred(model string, exclude map[string]bool, prefer
 		}
 		// Quota is a real traffic gate, not merely a Retry-After hint.
 		for _, c := range raw {
-			if c.Sub != "" && !c.Direct && c.Egress != "direct" &&
+			if a.quotaGateEnforce && c.Sub != "" && !c.Direct && c.Egress != "direct" &&
 				a.quotaUntilLocked(c.Sub, model) > nowMS {
 				_, reason := a.retryAfterLocked(RetryRequest{Model: model, Exclude: exclude})
 				return nil, reason
@@ -480,7 +483,7 @@ func (a *Admission) Observe(at *Attempt, class OutcomeClass) {
 	}
 }
 
-var pair403Ladder = [5]time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute, time.Hour, 6 * time.Hour}
+var pair403Ladder = [3]time.Duration{10 * time.Minute, 20 * time.Minute, 30 * time.Minute}
 
 const quotaGateWindow = 10 * time.Minute
 
@@ -534,7 +537,7 @@ func (a *Admission) recordQuotaLocked(sub, model, egress string, nodes int, now 
 	}
 	q.Seen[egress] = nowMS
 	q.Hits++
-	cutoff := q.Since + window
+	cutoff := nowMS - window
 	for k, ts := range q.Seen {
 		if ts < cutoff {
 			delete(q.Seen, k)
@@ -564,7 +567,7 @@ func (a *Admission) observeUpstreamLocked(at *Attempt, class OutcomeClass, now t
 		a.decayPairLocked(p, nowMS)
 		p.A++
 		p.LastOK = nowMS
-		if p.Strikes > 0 && p.Until > 0 && p.Until <= nowMS {
+		if (p.Strikes > 0 || p.Strike >= 3) && p.Until > 0 && p.Until <= nowMS {
 			p.OKStreak++
 			if p.OKStreak >= 2 {
 				p.Strikes = 0
@@ -573,7 +576,7 @@ func (a *Admission) observeUpstreamLocked(at *Attempt, class OutcomeClass, now t
 				p.Until = 0
 				p.OKStreak = 0
 			}
-		} else if p.Strikes > 0 && p.Until > nowMS {
+		} else if (p.Strikes > 0 || p.Strike >= 3) && p.Until > nowMS {
 			// An older lease must not shorten an active cooldown.
 		} else {
 			p.Strikes = 0
@@ -601,15 +604,22 @@ func (a *Admission) observeUpstreamLocked(at *Attempt, class OutcomeClass, now t
 	case Outcome403:
 		p := a.nodePairLocked(at.Egress)
 		if p != nil {
+			if p.Strike > 0 && nowMS-p.Last403 >= (10*time.Minute).Milliseconds() {
+				p.Strike = 0
+			}
 			p.B++
 			p.LastFail = nowMS
+			p.Last403 = nowMS
 			p.Strike++
-			if p.Strike > len(pair403Ladder) {
-				p.Strike = len(pair403Ladder)
-			}
-			until := now.Add(pair403Ladder[p.Strike-1]).UnixMilli()
-			if until > p.Until {
-				p.Until = until
+			if p.Strike >= 3 {
+				idx := p.Strike - 3
+				if idx >= len(pair403Ladder) {
+					idx = len(pair403Ladder) - 1
+				}
+				until := now.Add(pair403Ladder[idx]).UnixMilli()
+				if until > p.Until {
+					p.Until = until
+				}
 			}
 		}
 	case Outcome5xx:
@@ -684,7 +694,9 @@ func (a *Admission) retryAfterLocked(req RetryRequest) (time.Duration, string) {
 		consider(a.pairUntilLocked(req.Model, c.Egress), rankPair)
 		consider(a.egressDeadUntil(c.Egress), rankDead)
 		if c.Sub != "" {
-			consider(a.quotaUntilLocked(c.Sub, req.Model), rankQuota)
+			if a.quotaGateEnforce {
+				consider(a.quotaUntilLocked(c.Sub, req.Model), rankQuota)
+			}
 			consider(a.subUntilLocked(c.Sub), rankSub)
 		}
 		if c.Direct {
@@ -788,8 +800,13 @@ func (a *Admission) eligibleForTraffic(c Candidate, model string, nowMS int64) (
 			return false, false
 		}
 	}
-	if c.Sub != "" && !c.Direct && c.Egress != "direct" && a.quotaUntilLocked(c.Sub, model) > nowMS {
-		return false, false
+	if c.Sub != "" && !c.Direct && c.Egress != "direct" {
+		if qUntil := a.quotaUntilLocked(c.Sub, model); qUntil > nowMS {
+			if a.quotaGateEnforce {
+				return false, false
+			}
+			slog.Warn("v5_quota_shadow_block", "sub", c.Sub, "model", model, "until", qUntil, "nodes", a.nodesForSubLocked(model, c.Sub))
+		}
 	}
 	if p := a.pairLocked(model, c.Egress); p != nil && p.Until > nowMS {
 		return false, false
@@ -1085,6 +1102,14 @@ func (a *Admission) SetProbeCountsTowardGate(v bool) {
 	a.mu.Unlock()
 }
 
+// SetQuotaGateEnforce hot-reloads whether quota state blocks admission.
+// Recording remains unconditional; only eligibility/RetryAfter change.
+func (a *Admission) SetQuotaGateEnforce(v bool) {
+	a.mu.Lock()
+	a.quotaGateEnforce = v
+	a.mu.Unlock()
+}
+
 func (a *Admission) ObserveManualProbe(at *Attempt, class OutcomeClass) {
 	if at == nil {
 		return
@@ -1157,6 +1182,11 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 				if a.st.Direct != nil {
 					a.st.Direct.Until = 0
 				}
+			} else if class == Outcome429 || class == OutcomeQuotaUnknown {
+				// A 429 from the direct canary is quota evidence, not an egress
+				// failure. Keeping the gate active here was the 14-hour outage.
+				a.clearGateLocked(nowMS)
+				return
 			} else {
 				g.CanaryOK = false
 				g.NodeProbeUsed = false
@@ -1168,6 +1198,12 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 		case AttemptGateProbe:
 			if class == Outcome2xx {
 				a.clearGateLocked(nowMS)
+				return
+			}
+			if class == Outcome429 || class == OutcomeQuotaUnknown {
+				// Quota is not a node failure; only reschedule this probe.
+				g.NodeProbeUsed = false
+				g.NextNodeProbe = nowMS + gateEscapePeriod.Milliseconds()
 				return
 			}
 			g.CanaryOK = false
@@ -1191,7 +1227,9 @@ func (a *Admission) observeGateOutcomeLocked(at *Attempt, class OutcomeClass, no
 		g.Egresses = map[string]int64{}
 	}
 	g.Attempts++
-	if class == Outcome429 || class == OutcomeQuotaUnknown {
+	switch class {
+	case Outcome5xx, OutcomeNetwork, OutcomeTimeout, OutcomeStream:
+		// Quota (429/quota_unknown) and 403 are not egress-health failures.
 		g.Failures++
 		cutoff := nowMS - gateWindow.Milliseconds()
 		for k, ts := range g.Egresses {

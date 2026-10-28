@@ -60,3 +60,44 @@ func TestConfigPatchProbeGateBool(t *testing.T) {
 		t.Fatal("subscription-only patch cleared probe gate")
 	}
 }
+
+func TestConfigPatchQuotaGateBool(t *testing.T) {
+	setupProbeHTTP(t, nil)
+	post := func(body string) {
+		req := httptest.NewRequest(http.MethodPost, "/api/config", strings.NewReader(body))
+		rr := httptest.NewRecorder()
+		adminConfigHandler(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("POST %s: %d %s", body, rr.Code, rr.Body.String())
+		}
+	}
+	get := func() bool {
+		rr := httptest.NewRecorder()
+		adminConfigHandler(rr, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+		var body struct {
+			QuotaGateEnforce bool `json:"quota_gate_enforce"`
+		}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		return body.QuotaGateEnforce
+	}
+	onDisk := func() bool {
+		p := loadConfig(configPath).QuotaGateEnforce
+		return p != nil && *p
+	}
+
+	post(`{"quota_gate_enforce":true}`)
+	if !onDisk() || !get() {
+		t.Fatal("true not persisted/returned")
+	}
+	post(`{"quota_gate_enforce":false}`)
+	if onDisk() || get() {
+		t.Fatal("false not persisted/returned")
+	}
+	post(`{"quota_gate_enforce":true}`)
+	post(`{"subscriptions":[]}`)
+	if !onDisk() || !get() {
+		t.Fatal("subscription-only patch cleared quota gate")
+	}
+}

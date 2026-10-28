@@ -12,7 +12,7 @@ func normalAttempt(model, egress string) *Attempt {
 func TestGranularityGateTenAttemptsWithFinal2xx(t *testing.T) {
 	a, _, _ := newAdmissionTest(t, 8)
 	for i := 0; i < 9; i++ {
-		a.Observe(normalAttempt("m", "node:e"+string(rune('a'+i))), Outcome429)
+		a.Observe(normalAttempt("m", "node:e"+string(rune('a'+i))), Outcome5xx)
 	}
 	a.Observe(normalAttempt("m", "node:j"), Outcome2xx)
 	a.mu.Lock()
@@ -26,14 +26,14 @@ func TestGranularityGateTenAttemptsWithFinal2xx(t *testing.T) {
 func TestGranularityGateActiveSuppresses429Writes(t *testing.T) {
 	a, _, st := newAdmissionTest(t, 8)
 	for i := 0; i < 10; i++ {
-		a.Observe(normalAttempt("m", "node:e"+string(rune('a'+i))), Outcome429)
+		a.Observe(normalAttempt("m", "node:e"+string(rune('a'+i))), Outcome5xx)
 	}
 	at := normalAttempt("m", "node:x")
 	at.Sub = "s"
 	at.Nodes = 2
 	a.Observe(at, Outcome429)
-	if len(st.Pairs) != 0 {
-		t.Fatalf("429 wrote pair: %+v", st.Pairs)
+	if _, ok := st.Pairs["*|node:x"]; ok {
+		t.Fatalf("429 wrote pair for node:x: %+v", st.Pairs)
 	}
 	if len(st.Quota) != 0 {
 		t.Fatalf("gate-active 429 wrote quota: %+v", st.Quota)
@@ -43,12 +43,19 @@ func TestGranularityGateActiveSuppresses429Writes(t *testing.T) {
 func TestGranularity403LadderAndIsolation(t *testing.T) {
 	a, clock, st := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
 	want := []time.Duration{30 * time.Second, 2 * time.Minute, 10 * time.Minute, time.Hour, 6 * time.Hour}
+	want = []time.Duration{0, 0, 10 * time.Minute, 20 * time.Minute, 30 * time.Minute}
 	for i, d := range want {
 		at := normalAttempt("m", "node:e1")
 		a.Observe(at, Outcome403)
 		p := st.Pairs["*|node:e1"]
 		if p == nil || p.Strike != i+1 {
 			t.Fatalf("403 %d pair=%+v", i+1, p)
+		}
+		if d == 0 {
+			if p.Until != 0 {
+				t.Fatalf("403 %d set cooldown %d", i+1, p.Until)
+			}
+			continue
 		}
 		if p.Until != clock.Now().Add(d).UnixMilli() {
 			t.Fatalf("403 %d until=%d want %d", i+1, p.Until, clock.Now().Add(d).UnixMilli())
@@ -169,10 +176,11 @@ func TestGranularityPairsOnlyWildcard(t *testing.T) {
 
 	// A wildcard pair still needs two half-open successes to clear strikes.
 	p := st.Pairs[PairKey("*", "node:e1")]
-	if p == nil || p.Strike == 0 || p.Until == 0 {
+	if p == nil || p.Strike == 0 {
 		t.Fatalf("403 strike missing: %+v", p)
 	}
 	p.Strikes = 1
+	p.Strike = 3
 	p.Until = clock.Now().Add(-time.Millisecond).UnixMilli()
 	p.OKStreak = 0
 	a.Observe(normalAttempt("m", "node:e1"), Outcome2xx)
