@@ -355,6 +355,10 @@ func writeNodeStateFile(path string, st *NodeStateV5) error {
 // setQuotaLocked inserts or updates one quota key. It returns false when a new
 // key is rejected because all slots are held by active gates.
 func (st *NodeStateV5) setQuotaLocked(key string, q *QuotaState) bool {
+	return st.setQuotaLockedAt(key, q, Now().UnixMilli())
+}
+
+func (st *NodeStateV5) setQuotaLockedAt(key string, q *QuotaState, now int64) bool {
 	if st == nil || key == "" || q == nil {
 		return false
 	}
@@ -364,7 +368,6 @@ func (st *NodeStateV5) setQuotaLocked(key string, q *QuotaState) bool {
 	if q.Seen == nil {
 		q.Seen = map[string]int64{}
 	}
-	now := Now().UnixMilli()
 	window := int64((10 * time.Minute) / time.Millisecond)
 	trimQuotaSeen(q)
 	if _, exists := st.Quota[key]; exists {

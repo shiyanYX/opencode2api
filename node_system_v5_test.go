@@ -114,7 +114,7 @@ func TestV5ShadowDivergence(t *testing.T) {
 func TestV5PredictNoSideEffect(t *testing.T) {
 	st := NewNodeStateV5(time.Now())
 	now := time.Now().UnixMilli()
-	st.Pairs[PairKey("m", "node:A")] = &PairState{A: 20, B: 0, LastOK: now, Until: now + int64(time.Hour/time.Millisecond)}
+	st.Pairs[PairKey(legacyPairModel, "node:A")] = &PairState{A: 20, B: 0, LastOK: now, Until: now + int64(time.Hour/time.Millisecond)}
 	adm := NewAdmission(st, 8, func(model string) []Candidate {
 		return []Candidate{
 			{Egress: "node:A", Model: model},

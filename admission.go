@@ -44,6 +44,28 @@ type Candidate struct {
 	Direct bool
 }
 
+// RetryRequest carries the same static candidate filters used by AdmitPreferred.
+type RetryRequest struct {
+	Model   string
+	Exclude map[string]bool
+	Prefer  string
+}
+
+// AdmitError is the single carrier of a no-lease decision. RetryAfter is the
+// value returned by RetryAfter(RetryRequest), not a second calculation.
+type AdmitError struct {
+	Reason     string
+	RetryAfter time.Duration
+	Status     int
+}
+
+func (e *AdmitError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Reason
+}
+
 type Attempt struct {
 	Model  string
 	Egress string
@@ -164,37 +186,11 @@ func (a *Admission) AdmitPreferred(model string, exclude map[string]bool, prefer
 	defer a.mu.Unlock()
 	a.maybePruneLocked(now)
 
-	if a.candidates == nil {
+	raw := a.retryCandidatesLocked(model, exclude)
+	if len(raw) == 0 {
 		return nil, "no_candidate"
 	}
-	cands := a.candidates(model)
-	if len(cands) == 0 {
-		return nil, "no_candidate"
-	}
-
-	eligible := make([]Candidate, 0, len(cands))
-	onlySubBlocked := true
-	for _, c := range cands {
-		if c.Egress == "" {
-			onlySubBlocked = false
-			continue
-		}
-		if exclude != nil && exclude[c.Egress] {
-			onlySubBlocked = false
-			continue
-		}
-		ok, subBlocked := a.eligibleLocked(c, model, nowMS, false)
-		if !ok {
-			if !subBlocked {
-				onlySubBlocked = false
-			}
-			continue
-		}
-		if p := a.pairLocked(model, c.Egress); p != nil {
-			a.decayPairLocked(p, nowMS)
-		}
-		eligible = append(eligible, c)
-	}
+	eligible, onlySubBlocked := a.eligibleCandidatesLocked(raw, model, nowMS, false)
 	if len(eligible) == 0 {
 		if onlySubBlocked {
 			return nil, "sub_quarantine"
@@ -215,6 +211,7 @@ func (a *Admission) AdmitPreferred(model string, exclude map[string]bool, prefer
 			if !ok {
 				return nil, "all_inflight"
 			}
+			at.Nodes = a.nodesForSubLocked(model, c.Sub)
 			return at, ""
 		}
 	}
@@ -230,6 +227,7 @@ func (a *Admission) AdmitPreferred(model string, exclude map[string]bool, prefer
 		}
 		at, ok := a.acquireLocked(c, model, true)
 		if ok {
+			at.Nodes = a.nodesForSubLocked(model, c.Sub)
 			return at, ""
 		}
 	}
@@ -239,10 +237,66 @@ func (a *Admission) AdmitPreferred(model string, exclude map[string]bool, prefer
 		}
 		at, ok := a.acquireLocked(c, model, false)
 		if ok {
+			at.Nodes = a.nodesForSubLocked(model, c.Sub)
 			return at, ""
 		}
 	}
 	return nil, "all_inflight"
+}
+
+// retryCandidatesLocked applies only static filters (empty egress/exclude), so
+// RetryAfter can reason about the full candidate set rather than the set that
+// the currently active gates would allow.
+func (a *Admission) retryCandidatesLocked(model string, exclude map[string]bool) []Candidate {
+	if a.candidates == nil {
+		return nil
+	}
+	cands := a.candidates(model)
+	out := make([]Candidate, 0, len(cands))
+	for _, c := range cands {
+		if c.Egress == "" || (exclude != nil && exclude[c.Egress]) {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// eligibleCandidatesLocked is pure filtering (plus pair decay for scoring); it
+// does not mutate dead/probation lifecycle state.
+func (a *Admission) eligibleCandidatesLocked(cands []Candidate, model string, nowMS int64, probe bool) ([]Candidate, bool) {
+	out := make([]Candidate, 0, len(cands))
+	onlySubBlocked := true
+	for _, c := range cands {
+		ok, subBlocked := a.eligibleLocked(c, model, nowMS, probe)
+		if !ok {
+			if !subBlocked {
+				onlySubBlocked = false
+			}
+			continue
+		}
+		if p := a.pairLocked(model, c.Egress); p != nil {
+			a.decayPairLocked(p, nowMS)
+		}
+		out = append(out, c)
+	}
+	return out, onlySubBlocked
+}
+
+// nodesForSubLocked counts all candidates in the subscription, not just those
+// currently eligible. Pair cooldown/dead/quota must not turn a 2-node
+// subscription into a fake single-node subscription.
+func (a *Admission) nodesForSubLocked(model, sub string) int {
+	if a.candidates == nil {
+		return 0
+	}
+	n := 0
+	for _, c := range a.candidates(model) {
+		if c.Sub == sub && !c.Direct && c.Egress != "direct" && c.Egress != "" {
+			n++
+		}
+	}
+	return n
 }
 
 func (a *Admission) acquireLocked(c Candidate, model string, explore bool) (*Attempt, bool) {
@@ -443,9 +497,10 @@ func (a *Admission) recordQuotaLocked(sub, model, egress string, nodes int, now 
 	nowMS := now.UnixMilli()
 	key := quotaKey(sub, model)
 	q := a.st.Quota[key]
+	created := false
 	if q == nil {
 		q = &QuotaState{Since: nowMS, Seen: map[string]int64{}, Nodes: nodes}
-		a.st.Quota[key] = q
+		created = true
 	} else {
 		// Nodes is the current candidate count for this subscription; it is
 		// refreshed on every quota event, including while the gate is active.
@@ -472,6 +527,12 @@ func (a *Admission) recordQuotaLocked(sub, model, egress string, nodes int, now 
 		if q.Until <= nowMS {
 			q.Until = now.Add(quotaGateWindow).UnixMilli()
 		}
+	}
+	if created && !a.st.setQuotaLockedAt(key, q, nowMS) {
+		return
+	}
+	if !created {
+		a.st.setQuotaLockedAt(key, q, nowMS)
 	}
 }
 
@@ -556,49 +617,90 @@ func (a *Admission) observeManualProbeLocked(at *Attempt, class OutcomeClass, no
 	a.observeUpstreamLocked(at, class, now, nowMS, true)
 }
 
-func (a *Admission) RetryAfter(model string) time.Duration {
+func (a *Admission) RetryAfter(req RetryRequest) (time.Duration, string) {
 	now := a.now()
 	nowMS := now.UnixMilli()
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.maybePruneLocked(now)
 
+	cands := a.retryCandidatesLocked(req.Model, req.Exclude)
+	if len(cands) == 0 {
+		return a.noCandidateRetry(req.Model)
+	}
+
+	const (
+		rankQuota = iota
+		rankGate
+		rankDead
+		rankDirect
+		rankSub
+		rankPair
+	)
+	better := func(aUntil int64, aRank int, bUntil int64, bRank int) bool {
+		if bUntil == 0 {
+			return true
+		}
+		if aUntil != bUntil {
+			return aUntil < bUntil
+		}
+		return aRank < bRank
+	}
 	var minUntil int64
-	consider := func(v int64) {
-		if v > nowMS && (minUntil == 0 || v < minUntil) {
-			minUntil = v
-		}
-	}
-	if a.candidates != nil {
-		for _, c := range a.candidates(model) {
-			if c.Egress == "" {
-				continue
-			}
-			if p := a.pairLocked(model, c.Egress); p != nil {
-				consider(p.Until)
-			}
-			if c.Sub != "" {
-				if s := a.st.Subs[c.Sub]; s != nil {
-					consider(s.Until)
-				}
-			}
-			if e := a.st.Egress[c.Egress]; e != nil {
-				consider(e.DeadUntil)
-			}
-			if c.Direct || c.Egress == "direct" {
-				if a.st.Direct != nil {
-					consider(a.st.Direct.Until)
-				}
+	var minRank int
+	for _, c := range cands {
+		until := int64(0)
+		rank := rankPair
+		consider := func(v int64, r int) {
+			if v > until || (v == until && r < rank) {
+				until, rank = v, r
 			}
 		}
+		consider(a.pairUntilLocked(req.Model, c.Egress), rankPair)
+		consider(a.egressDeadUntil(c.Egress), rankDead)
+		if c.Sub != "" {
+			consider(a.quotaUntilLocked(c.Sub, req.Model), rankQuota)
+			consider(a.subUntilLocked(c.Sub), rankSub)
+		}
+		if c.Direct {
+			consider(a.directUntilLocked(), rankDirect)
+		}
+		if until > nowMS && better(until, rank, minUntil, minRank) {
+			minUntil, minRank = until, rank
+		}
 	}
-	if minUntil == 0 {
-		return time.Second
+
+	gateActive := a.gateLocked(now).Active
+	retry := time.Second
+	reason := "no_candidate"
+	if minUntil > nowMS {
+		retry = time.Duration(minUntil-nowMS) * time.Millisecond
+		switch minRank {
+		case rankQuota:
+			reason = "quota"
+		case rankDead:
+			reason = "dead"
+		case rankDirect:
+			reason = "direct"
+		case rankSub:
+			reason = "sub"
+		default:
+			reason = "pair"
+		}
 	}
-	d := time.Duration(minUntil-nowMS) * time.Millisecond
-	if d < time.Second {
-		return time.Second
+	if gateActive && retry < gateCanaryPeriod {
+		retry = gateCanaryPeriod
+		reason = "gate"
 	}
-	return d
+	if retry < time.Second {
+		retry = time.Second
+	}
+	if retry > 600*time.Second {
+		retry = 600 * time.Second
+	}
+	// Spread retries slightly to avoid a synchronized thundering herd.
+	retry += time.Duration(now.UnixNano()%2000) * time.Millisecond
+	return retry, reason
 }
 
 func (a *Admission) attemptLocked(c Candidate, model string, probe, lifecycle, explore bool, sem chan struct{}) *Attempt {
@@ -645,15 +747,8 @@ func (a *Admission) eligibleLocked(c Candidate, model string, nowMS int64, probe
 		}
 	}
 	if !(c.Direct || c.Egress == "direct") {
-		if e := a.st.Egress[c.Egress]; e != nil {
-			if e.Lifecycle == "dead" {
-				if e.DeadUntil > nowMS {
-					return false, false
-				}
-				e.Lifecycle = "probation"
-				e.ConsecOK = 0
-				e.DeadUntil = 0
-			}
+		if e := a.st.Egress[c.Egress]; e != nil && e.Lifecycle == "dead" && e.DeadUntil > nowMS {
+			return false, false
 		}
 	}
 	if !probe {
@@ -1096,6 +1191,9 @@ func (a *Admission) AdmitCanary(model string) (*Attempt, string) {
 	nowMS := a.now().UnixMilli()
 	if nowMS < g.NextCanary {
 		return nil, "canary_wait"
+	}
+	if a.st.Direct != nil && a.st.Direct.Until > nowMS {
+		return nil, "direct_cooldown"
 	}
 	sem := a.semLocked(EgressKeyDirect)
 	select {

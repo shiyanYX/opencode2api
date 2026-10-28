@@ -14,7 +14,7 @@ func seedSelectionPair(st *NodeStateV5, model, egress string, a, b float64, now 
 		LastFail:  now.UnixMilli(),
 		LastDecay: now.UnixMilli(),
 	}
-	st.Pairs[PairKey(model, egress)] = p
+	st.Pairs[PairKey(legacyPairModel, egress)] = p
 	return p
 }
 
@@ -181,7 +181,7 @@ func TestStickyPreferred(t *testing.T) {
 	}
 	a.Observe(at, Outcome2xx)
 
-	p := st.Pairs[PairKey("m", "node:e2")]
+	p := st.Pairs[PairKey(legacyPairModel, "node:e2")]
 	p.Until = clock.Now().Add(time.Minute).UnixMilli()
 	at, reason = a.AdmitPreferred("m", nil, "node:e2")
 	if at == nil {

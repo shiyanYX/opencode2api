@@ -12,43 +12,6 @@ import (
 	"time"
 )
 
-func TestPairLadder(t *testing.T) {
-	a, clock, st := newAdmissionTest(t, 8, Candidate{Egress: "node:e1", Model: "m", Sub: "s"})
-	key := PairKey("m", "node:e1")
-	at := mustAdmit(t, a, "m")
-	now := clock.Now()
-	a.Observe(at, Outcome429)
-	if got := st.Pairs[key]; got.Strikes != 1 || got.Until != now.Add(30*time.Minute).UnixMilli() {
-		t.Fatalf("first 429 = %+v", got)
-	}
-
-	clock.Advance(30*time.Minute + time.Millisecond)
-	at = mustAdmit(t, a, "m")
-	a.Observe(at, Outcome2xx)
-	if got := st.Pairs[key]; got.Strikes != 1 || got.OKStreak != 1 || got.Until == 0 {
-		t.Fatalf("first half-open 2xx = %+v, want strikes=1 okStreak=1", got)
-	}
-	at = mustAdmit(t, a, "m")
-	a.Observe(at, Outcome429)
-	if got := st.Pairs[key]; got.Strikes != 2 || got.OKStreak != 0 || got.Until != clock.Now().Add(2*time.Hour).UnixMilli() {
-		t.Fatalf("429 during half-open = %+v, want strikes=2 2h", got)
-	}
-
-	clock.Advance(2*time.Hour + time.Millisecond)
-	at = mustAdmit(t, a, "m")
-	a.Observe(at, Outcome2xx)
-	at = mustAdmit(t, a, "m")
-	a.Observe(at, Outcome2xx)
-	if got := st.Pairs[key]; got.Strikes != 0 || got.Until != 0 || got.OKStreak != 0 {
-		t.Fatalf("two half-open 2xx = %+v, want cleared", got)
-	}
-	at = mustAdmit(t, a, "m")
-	a.Observe(at, Outcome429)
-	if got := st.Pairs[key]; got.Strikes != 1 || got.Until != clock.Now().Add(30*time.Minute).UnixMilli() {
-		t.Fatalf("after full recovery 429 = %+v, want first level", got)
-	}
-}
-
 func TestNoReburnWithin10m(t *testing.T) {
 	a, clock, _ := newAdmissionTest(t, 8,
 		Candidate{Egress: "node:e1", Model: "m", Sub: "s1"},
@@ -66,7 +29,7 @@ func TestNoReburnWithin10m(t *testing.T) {
 	}
 	// Extra 429s during the active gate must not re-arm or double backoff.
 	for i := 0; i < 3; i++ {
-		a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome429)
+		a.Observe(normalAttempt("m", "node:e1"), Outcome429)
 	}
 	if g.PausedUntil != until || g.Backoff != backoff {
 		t.Fatalf("reburn within gate: %+v, want until=%d backoff=%d", g, until, backoff)
@@ -133,7 +96,7 @@ func TestV5StatePersist(t *testing.T) {
 	if at == nil {
 		t.Fatalf("admit: %s", reason)
 	}
-	rt.adm.Observe(at, Outcome429)
+	rt.adm.Observe(at, Outcome403)
 	rt.markDirty()
 	rt.persistNow()
 	if _, err := os.Stat(v5StatePath); err != nil {
@@ -143,8 +106,8 @@ func TestV5StatePersist(t *testing.T) {
 	resetV5ForTest()
 	t.Setenv("NODE_SYSTEM", "force")
 	rt2 := v5GetRuntime()
-	p := rt2.adm.st.Pairs[PairKey("m", "node:e1")]
-	if p == nil || p.Strikes != 1 || p.Until == 0 {
+	p := rt2.adm.st.Pairs[PairKey(legacyPairModel, "node:e1")]
+	if p == nil || p.Strike != 1 || p.Until == 0 {
 		t.Fatalf("reloaded pair = %+v", p)
 	}
 }
@@ -164,13 +127,13 @@ func TestNoCandidateNoDirect(t *testing.T) {
 func tripGate(t *testing.T, a *Admission) {
 	t.Helper()
 	for i := 0; i < 3; i++ {
-		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i))}, Outcome429)
+		a.Observe(normalAttempt("m", "node:e"+string(rune('1'+i))), Outcome429)
 	}
 	for i := 0; i < 5; i++ {
-		a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+		a.Observe(normalAttempt("m", "node:e1"), Outcome2xx)
 	}
-	a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome429)
-	a.Observe(&Attempt{Model: "m", Egress: "node:e2"}, Outcome429)
+	a.Observe(normalAttempt("m", "node:e1"), Outcome429)
+	a.Observe(normalAttempt("m", "node:e2"), Outcome429)
 }
 
 func TestGateNeedsFailureRatio(t *testing.T) {
@@ -182,9 +145,9 @@ func TestGateNeedsFailureRatio(t *testing.T) {
 	// 3 distinct 429 but only 3% failure across 100 attempts: must not trip.
 	for i := 0; i < 100; i++ {
 		if i < 3 {
-			a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i))}, Outcome429)
+			a.Observe(normalAttempt("m", "node:e"+string(rune('1'+i))), Outcome429)
 		} else {
-			a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+			a.Observe(normalAttempt("m", "node:e1"), Outcome2xx)
 		}
 	}
 	if a.GatePaused() {
@@ -199,9 +162,9 @@ func TestGateNeedsFailureRatio(t *testing.T) {
 	// 30 failures / 50 attempts: must trip once 3 distinct egress are seen.
 	for i := 0; i < 50; i++ {
 		if i < 30 {
-			b.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3))}, Outcome429)
+			b.Observe(normalAttempt("m", "node:e"+string(rune('1'+i%3))), Outcome429)
 		} else {
-			b.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+			b.Observe(normalAttempt("m", "node:e1"), Outcome2xx)
 		}
 	}
 	if !b.GatePaused() {
@@ -297,15 +260,15 @@ func TestGateThresholdOnTenthAttempt(t *testing.T) {
 		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
 	)
 	for i := 0; i < 5; i++ {
-		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3))}, Outcome429)
+		a.Observe(normalAttempt("m", "node:e"+string(rune('1'+i%3))), Outcome429)
 	}
 	for i := 0; i < 4; i++ {
-		a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+		a.Observe(normalAttempt("m", "node:e1"), Outcome2xx)
 	}
 	if a.GatePaused() {
 		t.Fatal("gate tripped before the 10th attempt")
 	}
-	a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+	a.Observe(normalAttempt("m", "node:e1"), Outcome2xx)
 	if !a.GatePaused() {
 		t.Fatal("10th attempt (2xx) did not evaluate the 5/10 boundary")
 	}
@@ -318,10 +281,10 @@ func TestGateNeedsTenAttempts(t *testing.T) {
 		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
 	)
 	for i := 0; i < 5; i++ {
-		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3))}, Outcome429)
+		a.Observe(normalAttempt("m", "node:e"+string(rune('1'+i%3))), Outcome429)
 	}
 	for i := 0; i < 4; i++ {
-		a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome2xx)
+		a.Observe(normalAttempt("m", "node:e1"), Outcome2xx)
 	}
 	if a.GatePaused() {
 		t.Fatal("gate tripped on 9 attempts")
@@ -339,7 +302,7 @@ func TestGateBelowFiftyPercent(t *testing.T) {
 		if i >= 25 {
 			class = Outcome429
 		}
-		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3))}, class)
+		a.Observe(normalAttempt("m", "node:e"+string(rune('1'+i%3))), class)
 	}
 	if a.GatePaused() {
 		t.Fatal("gate tripped below 50%")
@@ -353,7 +316,7 @@ func TestGateEmptyEgressNotCounted(t *testing.T) {
 		Candidate{Egress: "node:e3", Model: "m", Sub: "s3"},
 	)
 	for i := 0; i < 5; i++ {
-		a.Observe(&Attempt{Model: "m", Egress: "node:e" + string(rune('1'+i%3))}, Outcome429)
+		a.Observe(normalAttempt("m", "node:e"+string(rune('1'+i%3))), Outcome429)
 	}
 	for i := 0; i < 5; i++ {
 		a.Observe(&Attempt{Model: "m", Egress: ""}, Outcome429)
@@ -443,7 +406,7 @@ func TestEmptyEgressDoesNotTouchGateOrPairs(t *testing.T) {
 		t.Fatal("empty egress created wildcard pair")
 	}
 
-	a.Observe(&Attempt{Model: "m", Egress: "node:e1"}, Outcome429)
+	a.Observe(normalAttempt("m", "node:e1"), Outcome429)
 	start, attempts, failures := st.Gate.WindowStart, st.Gate.Attempts, st.Gate.Failures
 	clock.Advance(time.Second)
 	a.Observe(&Attempt{Model: "m", Egress: ""}, Outcome429)

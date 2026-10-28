@@ -122,7 +122,7 @@ func TestV5ForceObserveReleasesOnce(t *testing.T) {
 	if got := len(rt.adm.sems["node:e1"]); got != 0 {
 		t.Fatalf("sem len=%d want 0", got)
 	}
-	if p := rt.adm.st.Pairs[PairKey("m", "node:e1")]; p == nil || p.A != 1 || p.B != 0 {
+	if p := rt.adm.st.Pairs[PairKey(legacyPairModel, "node:e1")]; p == nil || p.A != 1 || p.B != 0 {
 		t.Fatalf("pair=%+v want A=1 B=0", p)
 	}
 }
@@ -154,7 +154,7 @@ func TestV5ForceOtherClassReleases(t *testing.T) {
 	if got := len(rt.adm.sems["node:e1"]); got != 0 {
 		t.Fatalf("sem len=%d want 0", got)
 	}
-	if p := rt.adm.st.Pairs[PairKey("m", "node:e1")]; p != nil && (p.A != 0 || p.B != 0) {
+	if p := rt.adm.st.Pairs[PairKey(legacyPairModel, "node:e1")]; p != nil && (p.A != 0 || p.B != 0) {
 		t.Fatalf("other unexpectedly changed pair: %+v", p)
 	}
 }
