@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,6 +59,7 @@ type PairState struct {
 	LastFail  int64   `json:"lastFail"`
 	LastDecay int64   `json:"lastDecay"`
 	Strikes   int     `json:"strikes"`
+	Strike    int     `json:"strike"`
 	Hard      int     `json:"hard"`
 	Until     int64   `json:"until"`
 	OKStreak  int     `json:"okStreak"`
@@ -213,7 +215,10 @@ func migrateV5File(path string, data []byte, failed *NodeStateV5) (*NodeStateV5,
 		failed.migrationFailed = true
 		return failed, err
 	}
-	out := migrateV5State(&old, Now())
+	out, dropped := migrateV5State(&old, Now())
+	if dropped > 0 {
+		slog.Warn("v5_migrate_dropped_pairs", "count", dropped)
+	}
 	backup := v5BackupPath(path)
 	if err := os.WriteFile(backup, data, 0o644); err != nil {
 		failed.migrationFailed = true
@@ -233,7 +238,7 @@ func v5BackupPath(path string) string {
 	return path + ".v5.bak"
 }
 
-func migrateV5State(old *NodeStateV5, now time.Time) *NodeStateV5 {
+func migrateV5State(old *NodeStateV5, now time.Time) (*NodeStateV5, int) {
 	out := emptyNodeStateV5()
 	out.Epoch = old.Epoch
 	out.Egress = old.Egress
@@ -254,16 +259,20 @@ func migrateV5State(old *NodeStateV5, now time.Time) *NodeStateV5 {
 	out.Subs = map[string]*SubState{}
 	out.Quota = map[string]*QuotaState{}
 	nowMS := now.UnixMilli()
+	dropped := 0
 	for key, p := range old.Pairs {
 		if p == nil {
+			dropped++
 			continue
 		}
 		idx := strings.LastIndex(key, "|")
 		if idx < 0 {
+			dropped++
 			continue
 		}
 		egress := key[idx+1:]
 		if egress == "direct" || p.Until > nowMS || p.Strikes != 0 || p.A+p.B < 3 {
+			dropped++
 			continue
 		}
 		nk := PairKey(legacyPairModel, egress)
@@ -284,7 +293,7 @@ func migrateV5State(old *NodeStateV5, now time.Time) *NodeStateV5 {
 			dst.LastDecay = p.LastDecay
 		}
 	}
-	return out
+	return out, dropped
 }
 
 // SaveNodeStateV5 atomically writes node_state_v5.json (temp file + rename, 0644).

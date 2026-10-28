@@ -211,3 +211,17 @@ func TestNodeStateV5Helpers(t *testing.T) {
 		t.Fatal("nil admission helpers must be zero")
 	}
 }
+
+func TestNodeStateV5MigrationDropCount(t *testing.T) {
+	now := time.Date(2026, 10, 28, 9, 0, 0, 0, time.UTC)
+	old := NewNodeStateV5(now)
+	old.Pairs["m|node:healthy"] = &PairState{A: 8, B: 2}
+	old.Pairs["m|node:cooling"] = &PairState{A: 8, B: 2, Until: now.Add(time.Hour).UnixMilli()}
+	got, dropped := migrateV5State(old, now)
+	if dropped != 1 {
+		t.Fatalf("dropped=%d, want 1", dropped)
+	}
+	if len(got.Pairs) != 1 || got.Pairs["*|node:healthy"] == nil {
+		t.Fatalf("pairs=%v, want only healthy", got.Pairs)
+	}
+}
