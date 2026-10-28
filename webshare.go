@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -102,6 +105,89 @@ func webshareHTTPClient(proxy string) (*http.Client, error) {
 	return nil, fmt.Errorf("webshare 代理协议不支持: %s（支持 http/https/socks5）", u.Scheme)
 }
 
+var webshareSleep = func(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+var webshareRetryBackoff = []time.Duration{500 * time.Millisecond, 1500 * time.Millisecond}
+
+func webshareTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne)
+}
+
+func fetchWebsharePage(ctx context.Context, client *http.Client, w WebshareConfig, page int) (webshareListResponse, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			if err := webshareSleep(ctx, webshareRetryBackoff[attempt-1]); err != nil {
+				return webshareListResponse{}, err
+			}
+		}
+		u, err := url.Parse(webshareListURL)
+		if err != nil {
+			return webshareListResponse{}, fmt.Errorf("webshare url: %w", err)
+		}
+		q := u.Query()
+		q.Set("mode", w.mode())
+		q.Set("page_size", "100")
+		q.Set("page", strconv.Itoa(page))
+		u.RawQuery = q.Encode()
+
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		if err != nil {
+			return webshareListResponse{}, err
+		}
+		req.Header.Set("Authorization", "Token "+w.APIKey)
+		req.Header.Set("User-Agent", "opencode2api/"+versionString()+" (webshare source)")
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt < 2 && webshareTransientError(err) {
+				continue
+			}
+			return webshareListResponse{}, err
+		}
+		body, rerr := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
+		resp.Body.Close()
+		if rerr != nil {
+			lastErr = rerr
+			if attempt < 2 && webshareTransientError(rerr) {
+				continue
+			}
+			return webshareListResponse{}, rerr
+		}
+		if resp.StatusCode != http.StatusOK {
+			httpErr := fmt.Errorf("webshare API HTTP %d: %s", resp.StatusCode, truncateLog(string(body), 200))
+			lastErr = httpErr
+			if attempt < 2 && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) {
+				continue
+			}
+			return webshareListResponse{}, httpErr
+		}
+		var list webshareListResponse
+		if err := json.Unmarshal(body, &list); err != nil {
+			return webshareListResponse{}, fmt.Errorf("webshare response 解析: %w", err)
+		}
+		return list, nil
+	}
+	return webshareListResponse{}, lastErr
+}
+
 // fetchWebshare 分页拉取 Webshare 代理列表并转为 SOCKS5 节点。
 // 只保留 valid != false 的代理；非 200 或解析失败返回错误。
 func fetchWebshare(ctx context.Context, w WebshareConfig) ([]*ProxyNode, error) {
@@ -113,37 +199,9 @@ func fetchWebshare(ctx context.Context, w WebshareConfig) ([]*ProxyNode, error) 
 	seen := map[string]bool{}
 	page := 1
 	for {
-		u, err := url.Parse(webshareListURL)
-		if err != nil {
-			return nil, fmt.Errorf("webshare url: %w", err)
-		}
-		q := u.Query()
-		q.Set("mode", w.mode())
-		q.Set("page_size", "100")
-		q.Set("page", strconv.Itoa(page))
-		u.RawQuery = q.Encode()
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+		list, err := fetchWebsharePage(ctx, client, w, page)
 		if err != nil {
 			return nil, err
-		}
-		req.Header.Set("Authorization", "Token "+w.APIKey)
-		req.Header.Set("User-Agent", "opencode2api/"+versionString()+" (webshare source)")
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		body, rerr := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
-		resp.Body.Close()
-		if rerr != nil {
-			return nil, rerr
-		}
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("webshare API HTTP %d: %s", resp.StatusCode, truncateLog(string(body), 200))
-		}
-		var list webshareListResponse
-		if err := json.Unmarshal(body, &list); err != nil {
-			return nil, fmt.Errorf("webshare response 解析: %w", err)
 		}
 
 		added := 0
